@@ -24,6 +24,8 @@ import {
   persistConversation,
   resetConversationsDbTo,
   scheduleThrottledConvFlush,
+  selectedConversationMessages,
+  truncateConversationForRegenerate,
 } from "./conversations";
 
 import { createHash, createHmac } from "node:crypto";
@@ -1750,13 +1752,6 @@ function replaceLoadingReasoningWithTool(msg: Message, toolPart: JsonValue, sink
 function summaryAsText(msg: Message) {
   return `[${msg.role}]: ${textFromParts(msg.parts)}`;
 }
-
-function selectedConversationMessages(conversation: Conversation) {
-  return conversation.messages
-    .map((node) => node.messages[node.selectIndex] ?? node.messages[0])
-    .filter(Boolean);
-}
-
 function estimatePromptTokensForConversation(conversation: Conversation) {
   return selectedConversationMessages(conversation)
     .filter((msg) => msg.role !== "ASSISTANT")
@@ -12618,25 +12613,6 @@ function ensureAssistantGenerationNode(conversation: Conversation, modelId: stri
   conversation.messages.push(assistantNode);
   return assistantNode;
 }
-
-function truncateConversationForRegenerate(conversation: Conversation, messageId?: string) {
-  if (!messageId) {
-    const last = conversation.messages[conversation.messages.length - 1];
-    if (last?.messages[last.selectIndex]?.role === "ASSISTANT") conversation.messages.pop();
-    return;
-  }
-  const nodeIndex = conversation.messages.findIndex((node) => node.messages.some((msg) => msg.id === messageId));
-  if (nodeIndex < 0) return;
-  const node = conversation.messages[nodeIndex];
-  const msg = node.messages.find((item) => item.id === messageId);
-  if (!msg) return;
-  if (msg.role === "USER") {
-    conversation.messages = conversation.messages.slice(0, nodeIndex + 1);
-    return;
-  }
-  conversation.messages = conversation.messages.slice(0, nodeIndex);
-}
-
 function updateSettings(next: Settings) {
   // 代理配置变化时记一条日志。实际生效由 fetch 拦截器 per-request 现读 resolveEffectiveProxy 保证,
   // 无需手动刷新 env / 探测 —— 配置变化下一次请求自动跟上。

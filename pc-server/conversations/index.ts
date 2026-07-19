@@ -359,3 +359,32 @@ export function resetConversationsDbTo(conversations: Conversation[]): void {
 export function checkpointConversationsDb(): void {
   conversationsDb?.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 }
+
+/** 按当前 selectIndex 取出每个节点的有效 message。 */
+export function selectedConversationMessages(conversation: Conversation): Message[] {
+  return conversation.messages
+    .map((node) => node.messages[node.selectIndex] ?? node.messages[0])
+    .filter(Boolean);
+}
+
+/** 重新生成前截断会话消息:
+ * - 无 messageId:删除末尾 ASSISTANT 节点。
+ * - 有 messageId:若目标消息是 USER,保留到该节点(含);若是 ASSISTANT,保留到该节点(不含)。
+ */
+export function truncateConversationForRegenerate(conversation: Conversation, messageId?: string): void {
+  if (!messageId) {
+    const last = conversation.messages[conversation.messages.length - 1];
+    if (last?.messages[last.selectIndex]?.role === "ASSISTANT") conversation.messages.pop();
+    return;
+  }
+  const nodeIndex = conversation.messages.findIndex((node) => node.messages.some((msg) => msg.id === messageId));
+  if (nodeIndex < 0) return;
+  const node = conversation.messages[nodeIndex];
+  const msg = node.messages.find((item) => item.id === messageId);
+  if (!msg) return;
+  if (msg.role === "USER") {
+    conversation.messages = conversation.messages.slice(0, nodeIndex + 1);
+    return;
+  }
+  conversation.messages = conversation.messages.slice(0, nodeIndex);
+}
