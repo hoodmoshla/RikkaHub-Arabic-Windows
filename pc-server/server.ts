@@ -1,4 +1,5 @@
 import { MupdfModule, JsonValue, Model, Provider, WebDavConfig, S3Config, ProxyMode, ProxyConfig, Assistant, Settings, AsrProvider, TtsProvider, Message, MessageNode, AssistantMemory, WriteStrategy, MemorySettings, Conversation, RequestLog, RequestStats, DailyStat, StoredFile, GeneratedImage, State, SearchService, SkillMetadata, GithubRelease, MemoryEntry, GlobalMemoryFile, AssistantMemoryGroup, AssistantMemoryFile, PendingEntry, PendingMemoryFile, AddMemoryInput, MemorySnapshot, PcConversationRow, PcMessageNodeRow, GitHubSkillInfo, GitHubSkillFile, ApiMessage, XmlToken, FontWeightFile, FontEntry, ManifestWeight, ManifestEntry, BuiltinManifest, StreamHooks, ClaudeStreamRoundResult, GoogleStreamRoundResult, AuxiliaryTextOptions, AsrRealtimeSession } from "./foundation/types";
+import { compareSemver, id, uniqueStrings, cloneJson, textFromParts, formatLocalDate, formatLocalTime, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, formatKeyLocal, getStringArray, isRecord, mergeById, safeJsonStringify, backupStamp, stripHtml, domainOfUrl, faviconForUrl, guessMimeFromExt, extensionFromMime, mergeObjects, safeJsonParse, visibleTextFromMessage, visibleReasoningFromMessage } from "./foundation/utils";
 
 import { createHash, createHmac } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -339,35 +340,8 @@ function probeCachedInstaller(fileName: string, tag: string, isNewer: boolean): 
 
 /** Compare two dotted-version strings. Returns -1/0/1 like `a - b`. Tolerates "v" prefix,
  *  missing patch parts (treated as 0), and non-numeric trailing labels (compared as strings). */
-function compareSemver(a: string, b: string): number {
-  const norm = (v: string) => v.replace(/^v/i, "").trim();
-  const partsA = norm(a).split(".");
-  const partsB = norm(b).split(".");
-  const len = Math.max(partsA.length, partsB.length);
-  for (let i = 0; i < len; i++) {
-    const ap = partsA[i] ?? "0";
-    const bp = partsB[i] ?? "0";
-    const an = Number.parseInt(ap, 10);
-    const bn = Number.parseInt(bp, 10);
-    if (Number.isFinite(an) && Number.isFinite(bn) && String(an) === ap && String(bn) === bp) {
-      if (an !== bn) return an > bn ? 1 : -1;
-    } else {
-      const cmp = ap.localeCompare(bp);
-      if (cmp !== 0) return cmp > 0 ? 1 : -1;
-    }
-  }
-  return 0;
-}
-
-function id() {
-  return crypto.randomUUID();
-}
 
 const LOG_PREVIEW_LIMIT = 256_000;
-
-function uniqueStrings(values: Array<string | null | undefined>) {
-  return [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))];
-}
 
 function inferModelAbilities(modelId: string): string[] {
   const name = modelId.toLowerCase();
@@ -1832,11 +1806,6 @@ function writeSlimStateJsonSyncForMemory(data: State): void {
   }
 }
 
-function mergeById<T extends { id: string }>(current: T[], defaults: T[]): T[] {
-  const byId = new Set(current.map((item) => item.id));
-  return [...current, ...defaults.filter((item) => !byId.has(item.id))];
-}
-
 // Streaming path throttles disk writes: token deltas can arrive 30-50/s for fast providers, and
 // serializing+writing the full state on every chunk turns smooth streams into stutter. We coalesce
 // writes inside `touchStream` to ~5/s while still broadcasting every chunk to SSE clients in real
@@ -2838,43 +2807,6 @@ function replaceLoadingReasoningWithTool(msg: Message, toolPart: JsonValue) {
   msg.parts.push(toolPart);
 }
 
-function textFromParts(parts: JsonValue[]) {
-  return parts
-    .map((part) => {
-      if (part && typeof part === "object" && !Array.isArray(part) && part.type === "text") return String(part.text ?? "");
-      return "";
-    })
-    .join("\n")
-    .trim();
-}
-
-function formatLocalDate(date = new Date()) {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "full" }).format(date);
-}
-
-function formatLocalTime(date = new Date()) {
-  return new Intl.DateTimeFormat(undefined, { timeStyle: "medium" }).format(date);
-}
-
-function renderTemplate(template: string, variables: Record<string, string>) {
-  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => variables[key] ?? match);
-}
-
-function applyPlaceholders(template: string, variables: Record<string, string>) {
-  return template
-    .replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => variables[key] ?? match)
-    .replace(/\{\s*([a-zA-Z0-9_]+)\s*\}/g, (match, key) => variables[key] ?? match);
-}
-
-function localeDisplayName() {
-  const locale = Intl.DateTimeFormat().resolvedOptions().locale;
-  try {
-    return new Intl.DisplayNames([locale], { type: "language" }).of(locale.split("-")[0]) ?? locale;
-  } catch {
-    return locale;
-  }
-}
-
 function summaryAsText(msg: Message) {
   return `[${msg.role}]: ${textFromParts(msg.parts)}`;
 }
@@ -2883,12 +2815,6 @@ function selectedConversationMessages(conversation: Conversation) {
   return conversation.messages
     .map((node) => node.messages[node.selectIndex] ?? node.messages[0])
     .filter(Boolean);
-}
-
-function estimateTokens(text: string) {
-  const cjk = (text.match(/[\u3400-\u9fff]/g) ?? []).length;
-  const other = Math.max(0, text.length - cjk);
-  return Math.max(1, Math.ceil(cjk * 0.9 + other / 4));
 }
 
 function estimatePromptTokensForConversation(conversation: Conversation) {
@@ -3038,18 +2964,6 @@ function applyMessageTemplateToParts(parts: JsonValue[], role: string, template:
   });
 }
 
-function cloneJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function dateKey(timestamp: number | string) {
-  return formatKeyLocal(new Date(timestamp));
-}
-
-function formatKeyLocal(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
 function computeStats() {
   const daily = new Map<string, DailyStat>();
   let userMessages = 0;
@@ -3123,10 +3037,6 @@ function computeStats() {
     requestGroups: [...requestGroups.entries()].map(([name, value]) => ({ name, ...value })).sort((a, b) => (b.ok + b.failed) - (a.ok + a.failed)),
     providers: [...providers.entries()].map(([name, value]) => ({ name, ...value })).sort((a, b) => (b.ok + b.failed) - (a.ok + a.failed)),
   };
-}
-
-function getStringArray(value: unknown) {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function normalizeWebDavConfig(value: unknown): WebDavConfig {
@@ -3232,10 +3142,6 @@ function formatBalanceValue(value: unknown) {
   const text = String(value ?? "").trim();
   const num = Number(text);
   return text && Number.isFinite(num) ? num.toFixed(2) : text;
-}
-
-function isRecord(value: unknown): value is Record<string, JsonValue> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function upsertById(items: JsonValue[], item: Record<string, JsonValue>) {
@@ -3401,6 +3307,7 @@ function defaultSkillContent(name = "new-skill") {
 // 用户只是无效元数据。
 // 纯函数:深拷贝,绝不改动内存中的运行时 state.settings,只清洗"写入备份文件"的内容。
 const BACKUP_INCOMPATIBLE_MODALITIES = new Set(["AUDIO", "VIDEO", "DOCUMENT"]);
+
 function sanitizeModelModalitiesForExport(settings: Settings): Settings {
   return {
     ...settings,
@@ -4092,15 +3999,6 @@ function normalizeAndroidMessage(raw: unknown): Message | null {
     usage: (r.usage ?? null) as JsonValue | null,
     translation: typeof r.translation === "string" ? r.translation : null,
   };
-}
-
-function guessMimeFromExt(ext: string): string {
-  const e = ext.toLowerCase().replace(/^\./, "");
-  if (["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(e)) return `image/${e === "jpg" ? "jpeg" : e}`;
-  if (e === "pdf") return "application/pdf";
-  if (e === "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  if (e === "txt" || e === "md") return "text/plain";
-  return "application/octet-stream";
 }
 
 function copyDirRecursive(src: string, dest: string): number {
@@ -5101,23 +4999,6 @@ function restoreBackupBuffer(buffer: Buffer, fileName: string): void {
   applyBackupPayload(JSON.parse(buffer.toString("utf-8")));
 }
 
-function safeJsonStringify(value: unknown): string {
-  const seen = new WeakSet();
-  return JSON.stringify(value, (_key, val) => {
-    if (typeof val === "bigint") return Number(val);
-    if (val !== null && typeof val === "object") {
-      if (seen.has(val)) return undefined;
-      seen.add(val);
-    }
-    return val;
-  }, 2);
-}
-
-function backupStamp(): string {
-  // Match Android's DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss") so the filename stamp lines up.
-  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "_");
-}
-
 /** Stream an HTTP response body to a temp file (no in-JS-memory buffering) and route the
  *  saved file through applyAndroidZipBackupFromPath / applyBackupPayload as appropriate.
  *  Used by s3Restore + webDavRestore. Mirrors the local data/import streaming-path so
@@ -5959,32 +5840,6 @@ function searchResultSize(service: Record<string, JsonValue>) {
   const commonSize = Number(state.settings.searchCommonOptions?.resultSize ?? 10);
   // Lower bound 1 prevents nonsensical zero/negative requests. No upper bound — match Android.
   return Math.max(1, serviceSize || commonSize || 10);
-}
-
-function stripHtml(value: string) {
-  return value
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function domainOfUrl(targetUrl: string) {
-  try {
-    return new URL(targetUrl).hostname.replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
-
-function faviconForUrl(targetUrl: string) {
-  const domain = domainOfUrl(targetUrl);
-  return domain ? `https://icons.duckduckgo.com/ip3/${encodeURIComponent(domain)}.ico` : "";
 }
 
 function searchResult(index: number, item: { title?: unknown; url?: unknown; text?: unknown }) {
@@ -8027,18 +7882,6 @@ function safeDataFilePath(relativePath: string) {
     existsSync(candidate) &&
     statSync(candidate).isFile()
   ) ?? null;
-}
-
-function extensionFromMime(mime: string) {
-  const normalized = mime.toLowerCase();
-  if (normalized.includes("jpeg") || normalized.includes("jpg")) return ".jpg";
-  if (normalized.includes("webp")) return ".webp";
-  if (normalized.includes("gif")) return ".gif";
-  if (normalized.includes("svg")) return ".svg";
-  if (normalized.includes("pdf")) return ".pdf";
-  if (normalized.includes("json")) return ".json";
-  if (normalized.includes("text")) return ".txt";
-  return ".png";
 }
 
 async function saveToolBinaryContent(data: string, mime: string, prefix: string) {
@@ -10113,17 +9956,6 @@ function applyRequestHeaders(
   return headers;
 }
 
-function mergeObjects(base: Record<string, any>, overlay: Record<string, any>): Record<string, any> {
-  const result = { ...base };
-  for (const [key, value] of Object.entries(overlay)) {
-    const existing = result[key];
-    result[key] = isRecord(existing) && isRecord(value)
-      ? mergeObjects(existing as Record<string, any>, value as Record<string, any>)
-      : value;
-  }
-  return result;
-}
-
 function decodeCustomBodyValue(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
@@ -11993,14 +11825,6 @@ async function streamClaudeChatWithTools(
   throw new Error("Too many consecutive Claude tool calls without final assistant content");
 }
 
-function safeJsonParse(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return {};
-  }
-}
-
 async function fetchClaudeTextWithTools(
   url: string,
   headers: Record<string, string>,
@@ -13082,19 +12906,6 @@ function mergeToolCallDeltas(existing: any[], deltaCalls: any[], mode: "delta" |
       },
     };
   }
-}
-
-function visibleTextFromMessage(msg: Message | undefined) {
-  return msg ? textFromParts(msg.parts) : "";
-}
-
-function visibleReasoningFromMessage(msg: Message | undefined) {
-  return msg
-    ? msg.parts
-        .map((part) => isRecord(part) && part.type === "reasoning" ? String(part.reasoning ?? "") : "")
-        .filter(Boolean)
-        .join("")
-    : "";
 }
 
 function ensureReasoningPart(hooks: StreamHooks, metadata?: Record<string, JsonValue>) {
