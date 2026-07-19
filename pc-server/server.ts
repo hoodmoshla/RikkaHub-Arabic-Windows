@@ -16,6 +16,7 @@ import {
   deletePcConversations,
   flushConvDirtyNow,
   getConversationsDb,
+  getConversation,
   loadAllConversationsFromDb,
   markConversationRowDirty,
   markMessageNodeDirty,
@@ -25,6 +26,8 @@ import {
   resetConversationsDbTo,
   scheduleThrottledConvFlush,
   selectedConversationMessages,
+  toConversationDto,
+  toListDto,
   truncateConversationForRegenerate,
 } from "./conversations";
 
@@ -1380,7 +1383,7 @@ function broadcastConversation(conversation: Conversation, event = "snapshot") {
   const payload = {
     type: "snapshot",
     seq: Date.now(),
-    conversation: toConversationDto(conversation),
+    conversation: toConversationDto(conversation, generating.has(conversation.id)),
     serverTime: Date.now(),
   };
   for (const client of conversationClients.get(conversation.id) ?? []) {
@@ -1502,27 +1505,6 @@ function findModel(modelId: string | null | undefined) {
   }
   return { provider: state.settings.providers.find((item) => item.enabled) ?? state.settings.providers[0], model: model("auto", "Auto") };
 }
-
-function toConversationDto(conversation: Conversation) {
-  return { ...conversation, isGenerating: generating.has(conversation.id) };
-}
-
-function toListDto(conversation: Conversation) {
-  return {
-    id: conversation.id,
-    assistantId: conversation.assistantId,
-    title: conversation.title,
-    isPinned: conversation.isPinned,
-    createAt: conversation.createAt,
-    updateAt: conversation.updateAt,
-    isGenerating: generating.has(conversation.id),
-  };
-}
-
-function getConversation(idValue: string) {
-  return state.conversations.find((conversation) => conversation.id === idValue);
-}
-
 function ensureConversation(idValue: string) {
   let conversation = getConversation(idValue);
   if (!conversation) {
@@ -13668,7 +13650,7 @@ async function routeApi(request: Request, url: URL) {
   }
 
   if (path === "conversations" && request.method === "GET") {
-    return json(state.conversations.filter((item) => item.assistantId === state.settings.assistantId).map(toListDto));
+    return json(state.conversations.filter((item) => item.assistantId === state.settings.assistantId).map((item) => toListDto(item, generating.has(item.id))));
   }
   if (path === "conversations/paged" && request.method === "GET") {
     const offset = Number(url.searchParams.get("offset") ?? "0");
@@ -13679,7 +13661,7 @@ async function routeApi(request: Request, url: URL) {
       .filter((item) => !query || item.title.toLowerCase().includes(query))
       .sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || b.updateAt - a.updateAt);
     const page = items.slice(offset, offset + limit);
-    return json({ items: page.map(toListDto), nextOffset: offset + limit < items.length ? offset + limit : null, hasMore: offset + limit < items.length });
+    return json({ items: page.map((item) => toListDto(item, generating.has(item.id))), nextOffset: offset + limit < items.length ? offset + limit : null, hasMore: offset + limit < items.length });
   }
   if (path === "conversations/search" && request.method === "GET") {
     const queryText = (url.searchParams.get("query") ?? "").toLowerCase();
@@ -13705,7 +13687,7 @@ async function routeApi(request: Request, url: URL) {
     const conversation = getConversation(conversationStream[1]);
     if (!conversation) return error("Conversation not found", 404);
     return openSse(
-      () => [["snapshot", { type: "snapshot", seq: Date.now(), conversation: toConversationDto(conversation), serverTime: Date.now() }]],
+      () => [["snapshot", { type: "snapshot", seq: Date.now(), conversation: toConversationDto(conversation, generating.has(conversation.id)), serverTime: Date.now() }]],
       (controller) => {
         const set = conversationClients.get(conversation.id) ?? new Set<ReadableStreamDefaultController<Uint8Array>>();
         set.add(controller);
@@ -13729,7 +13711,7 @@ async function routeApi(request: Request, url: URL) {
       : getConversation(conversationId);
     if (!conversation) return error("Conversation not found", 404);
 
-    if (!sub && request.method === "GET") return json(toConversationDto(conversation));
+    if (!sub && request.method === "GET") return json(toConversationDto(conversation, generating.has(conversation.id)));
     if (sub === "messages" && request.method === "POST") {
       const body = await readJson<{ parts: JsonValue[] }>(request);
       const assistant = findAssistant(conversation.assistantId);

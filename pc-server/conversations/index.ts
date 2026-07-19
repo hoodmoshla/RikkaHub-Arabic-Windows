@@ -360,6 +360,29 @@ export function checkpointConversationsDb(): void {
   conversationsDb?.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 }
 
+/** 按 id 查找内存中的会话。 */
+export function getConversation(idValue: string): Conversation | undefined {
+  return state.conversations.find((conversation) => conversation.id === idValue);
+}
+
+/** 把 Conversation 转成含生成状态快照的 DTO。 */
+export function toConversationDto(conversation: Conversation, isGenerating: boolean) {
+  return { ...conversation, isGenerating };
+}
+
+/** 把 Conversation 转成列表项 DTO。 */
+export function toListDto(conversation: Conversation, isGenerating: boolean) {
+  return {
+    id: conversation.id,
+    assistantId: conversation.assistantId,
+    title: conversation.title,
+    isPinned: conversation.isPinned,
+    createAt: conversation.createAt,
+    updateAt: conversation.updateAt,
+    isGenerating,
+  };
+}
+
 /** 按当前 selectIndex 取出每个节点的有效 message。 */
 export function selectedConversationMessages(conversation: Conversation): Message[] {
   return conversation.messages
