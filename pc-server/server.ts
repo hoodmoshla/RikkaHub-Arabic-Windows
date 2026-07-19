@@ -7,6 +7,7 @@ import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveInitia
 import { GLOBAL_MEMORY_ID, buildMemoryPrompt, buildRecentChatsPrompt, memoriesForAssistant, memoryStore } from "./memory/index";
 import { extractDocxText, extractEpubText, extractPdfText, extractPptxText, extractStoredFileText, extractStoredFileTextSync, fallbackDocumentText, getStoredFileSize, loadMupdf, readZipEntries, stripXmlText } from "./files/index";
 import { APP_VERSION, UPDATE_R2_BASE, fetchGithubLatestRelease, fetchLatestReleaseFromHtmlRedirect, probeCachedInstaller, readSkippedVersion, writeSkippedVersion } from "./updates/index";
+import type { GenerationEvent, GenerationEventSink, ToolCall, ToolContext, ToolExecutor, ToolResult } from "./inference-engine/events";
 
 import { createHash, createHmac } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -26,6 +27,15 @@ const DEFAULT_SYSTEM_TTS_ID = "026a01a2-c3a0-4fd5-8075-80e03bdef200";
 const MAX_TOOL_STEPS = 256;
 const TITLE_CHARACTER_LIMIT = 15;
 const SUGGESTION_CHARACTER_LIMIT = 18;
+
+/** 流式钩子的事件下沉扩展。推理引擎通过 sink 发出事件，由协调器（generateAnswer）
+ *  应用到 message 并触发持久化/SSE；executeTool 是注入的工具执行回调。 */
+type StreamHooksWithSink = StreamHooks & {
+  sink?: GenerationEventSink;
+  executeTool?: ToolExecutor;
+};
+
+type ToolDispatchContext = ToolContext & { executeTool?: ToolExecutor };
 
 const DEFAULT_TITLE_PROMPT = `I will give you some dialogue content in the \`<content>\` block.
 You need to summarize the conversation between user and assistant into a short title.
@@ -1700,7 +1710,18 @@ function hasOpenReasoningPart(msg: Message) {
   );
 }
 
-function replaceLoadingReasoningWithTool(msg: Message, toolPart: JsonValue) {
+function replaceLoadingReasoningWithTool(msg: Message, toolPart: JsonValue, sink?: GenerationEventSink) {
+  if (sink) {
+    const tp = isRecord(toolPart) ? toolPart : {};
+    sink({
+      kind: "tool_call_created",
+      toolCallId: String(tp.toolCallId ?? ""),
+      toolName: String(tp.toolName ?? ""),
+      input: String(tp.input ?? ""),
+      approvalState: tp.approvalState ?? { type: "auto" },
+    });
+    return;
+  }
   markStreamFirstContent(msg);
   msg.parts = msg.parts.filter((part) => !(
     part &&
@@ -9063,7 +9084,7 @@ function resolveFontFile(source: "builtin" | "custom", fileName: string): string
 async function callProvider(
   conversation: Conversation,
   signal?: AbortSignal,
-  hooks?: StreamHooks,
+  hooks?: StreamHooksWithSink,
 ) {
   const assistant = findAssistant(conversation.assistantId);
   const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
@@ -9177,8 +9198,11 @@ async function callProvider(
   return fetchOpenAiText(url, headers, applyCustomBody(body, assistant, picked.model), providerItem, assistant, signal, hooks);
 }
 
-function touchStream(hooks?: StreamHooks) {
+function touchStream(hooks?: StreamHooksWithSink) {
   if (!hooks?.conversation || !hooks.node) return;
+  // 事件流模式下，副作用（updateAt、标脏、SSE、持久化）由协调器统一处理，
+  // 这里直接返回，避免推理引擎直接触发广播/SQLite 写入。
+  if (hooks.sink) return;
   hooks.conversation.updateAt = Date.now();
   // 1.2.6:流式增量写活库——只标脏当前在长的会话行(updateAt)+ 节点,200ms 合并 upsert
   // 进 SQLite。不再全量重写 state.json(会话已迁出 state.json)。N 路流式并发时各自标脏,
@@ -9193,12 +9217,13 @@ function touchStream(hooks?: StreamHooks) {
  *  hooks 在非流式路径(如 executeApprovedToolPart)可能缺失 → 返回 undefined,runSaveMemoryTool
  *  入队时降级为空 conversationId(仅丧失来源追溯,不影响核心流程)。
  *  conversationTitle 取入队时快照(与会话后续改名/删除解耦),空标题不传。 */
-function toolCallContext(hooks?: StreamHooks): { conversationId?: string; conversationTitle?: string; messageNodeId?: string } | undefined {
+function toolCallContext(hooks?: StreamHooksWithSink): ToolDispatchContext | undefined {
   if (!hooks?.conversation) return undefined;
   return {
     conversationId: hooks.conversation.id,
     conversationTitle: hooks.conversation.title || undefined,
     messageNodeId: hooks.node?.id,
+    executeTool: hooks.executeTool,
   };
 }
 
@@ -9218,8 +9243,13 @@ function markStreamFirstContent(msg: Message | undefined) {
   msg.createdAt = new Date().toISOString();
 }
 
-function addStreamText(hooks: StreamHooks | undefined, text: string) {
+function addStreamText(hooks: StreamHooksWithSink | undefined, text: string) {
   if (!hooks?.message || !text) return;
+  // 事件流模式：只把增量抛给协调器，由协调器负责 message mutation / SSE / 持久化。
+  if (hooks.sink) {
+    hooks.sink({ kind: "text_delta", text });
+    return;
+  }
   markStreamFirstContent(hooks.message);
   const hadOpenReasoning = hasOpenReasoningPart(hooks.message);
   hooks.message.parts = hooks.message.parts.filter((part) => !(
@@ -9366,7 +9396,12 @@ function appendUsageFromRaw(msg: Message | undefined, raw: any) {
   fillContextLimit(msg);
 }
 
-async function callProviderStreaming(conversation: Conversation, assistantMessage: Message, assistantNode: MessageNode, signal?: AbortSignal) {
+async function callProviderStreaming(
+  conversation: Conversation,
+  assistantMessage: Message,
+  assistantNode: MessageNode,
+  ctx: { signal?: AbortSignal; sink: GenerationEventSink; executeTool: ToolExecutor },
+): Promise<string> {
   const assistant = findAssistant(conversation.assistantId);
   const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
   const providerItem = picked.provider;
@@ -9386,12 +9421,15 @@ async function callProviderStreaming(conversation: Conversation, assistantMessag
     providerItem.type === "openai" ? providerItem.includeHistoryReasoning !== false : true,
   );
   const tools = supportsAbility(picked.model, "TOOL") ? [...openAiSearchTools(), ...openAiLocalTools(assistant), ...openAiSkillTools(assistant), ...openAiMcpTools(assistant)] : [];
+  const hooks: StreamHooksWithSink = {
+    message: assistantMessage,
+    conversation,
+    node: assistantNode,
+    sink: ctx.sink,
+    executeTool: ctx.executeTool,
+  };
   if (providerItem.type !== "openai") {
-    return callProvider(conversation, signal, {
-      message: assistantMessage,
-      conversation,
-      node: assistantNode,
-    });
+    return callProvider(conversation, ctx.signal, hooks);
   }
   if (providerItem.useResponseApi) {
     const responseTools = [
@@ -9419,11 +9457,7 @@ async function callProviderStreaming(conversation: Conversation, assistantMessag
       ...(include ? { include } : {}),
       tools: responseTools.length ? responseTools : undefined,
     }, assistant, picked.model);
-    return fetchOpenAiTextStreaming(url, headers, body, providerItem, assistant, {
-      message: assistantMessage,
-      conversation,
-      node: assistantNode,
-    }, signal);
+    return fetchOpenAiTextStreaming(url, headers, body, providerItem, assistant, hooks, ctx.signal);
   }
   const body = applyCustomBody({
     model: selectedModel,
@@ -9438,11 +9472,7 @@ async function callProviderStreaming(conversation: Conversation, assistantMessag
     stream: true,
     stream_options: hostOfProvider(providerItem) === "api.mistral.ai" ? undefined : { include_usage: true },
   }, assistant, picked.model);
-  return fetchOpenAiTextStreaming(url, headers, body, providerItem, assistant, {
-    message: assistantMessage,
-    conversation,
-    node: assistantNode,
-  }, signal);
+  return fetchOpenAiTextStreaming(url, headers, body, providerItem, assistant, hooks, ctx.signal);
 }
 
 async function fetchText(
@@ -9530,7 +9560,7 @@ async function streamClaudeChat(
   body: Record<string, any>,
   providerItem: Provider,
   signal: AbortSignal | undefined,
-  hooks: StreamHooks,
+  hooks: StreamHooksWithSink,
 ) {
   const started = Date.now();
   const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
@@ -9561,7 +9591,10 @@ async function streamClaudeChat(
       usage = mergeClaudeUsage(u, usage);
     }
   }, signal);
-  if (hooks.message && usage) hooks.message.usage = usage;
+  if (hooks.message && usage) {
+    if (hooks.sink) hooks.sink({ kind: "usage", usage });
+    else hooks.message.usage = usage;
+  }
   addLog({
     providerId: providerItem.id,
     providerName: providerItem.name,
@@ -9581,7 +9614,7 @@ async function streamClaudeChat(
 
 async function readClaudeStreamingRound(
   response: Response,
-  hooks: StreamHooks,
+  hooks: StreamHooksWithSink,
   assistant: Assistant,
   signal?: AbortSignal,
 ): Promise<ClaudeStreamRoundResult> {
@@ -9638,7 +9671,7 @@ async function readClaudeStreamingRound(
             output: [],
             approvalState: initialApprovalState(String(block.name ?? ""), assistant),
           };
-          replaceLoadingReasoningWithTool(hooks.message, toolPart);
+          replaceLoadingReasoningWithTool(hooks.message, toolPart, hooks.sink);
           touchStream(hooks);
         }
       } else if (type === "text" && block.text) {
@@ -9670,10 +9703,14 @@ async function readClaudeStreamingRound(
         if (hooks.message && block.type === "tool_use") {
           const targetId = String(block.id ?? "");
           if (targetId) {
-            hooks.message.parts = hooks.message.parts.map((part) => {
-              if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== targetId) return part;
-              return { ...part, input: block._inputBuffer };
-            });
+            if (hooks.sink) {
+              hooks.sink({ kind: "tool_input_delta", toolCallId: targetId, input: block._inputBuffer });
+            } else {
+              hooks.message.parts = hooks.message.parts.map((part) => {
+                if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== targetId) return part;
+                return { ...part, input: block._inputBuffer };
+              });
+            }
             touchStream(hooks);
           }
         }
@@ -9759,7 +9796,7 @@ async function streamClaudeChatWithTools(
   providerItem: Provider,
   assistant: Assistant,
   signal: AbortSignal | undefined,
-  hooks: StreamHooks,
+  hooks: StreamHooksWithSink,
 ) {
   let messages = Array.isArray(body.messages) ? [...body.messages] : [];
   let currentBody = { ...body, messages, stream: true };
@@ -9793,7 +9830,10 @@ async function streamClaudeChatWithTools(
       throw new Error(`${providerItem.name} ${response.status}: ${text.slice(0, 500)}`);
     }
     const round_ = await readClaudeStreamingRound(response, hooks, assistant, signal);
-    if (hooks.message && round_.usage) hooks.message.usage = round_.usage;
+    if (hooks.message && round_.usage) {
+      if (hooks.sink) hooks.sink({ kind: "usage", usage: round_.usage });
+      else hooks.message.usage = round_.usage;
+    }
     addLog({
       providerId: providerItem.id,
       providerName: providerItem.name,
@@ -9818,6 +9858,7 @@ async function streamClaudeChatWithTools(
       return allContent.trim() || "(empty response)";
     }
     const toolResultBlocks: Array<Record<string, JsonValue>> = [];
+    const dispatchCtx = toolCallContext(hooks);
     // Pre-scan for any tool that requires user approval. Anthropic requires every tool_use to
     // be answered by a tool_result in the next turn, so we can't execute a mixed batch where
     // some tools are pending — the safest correct behavior is to render the pending tool
@@ -9842,19 +9883,23 @@ async function streamClaudeChatWithTools(
         },
       };
       // The tool part was already created during the stream — find it and run the tool.
-      let toolResult: unknown;
+      let toolResult: ToolResult;
       try {
-        toolResult = await executeToolCall(toolCall, assistant, toolCallContext(hooks));
+        toolResult = await dispatchCtx!.executeTool(toolCall, dispatchCtx);
       } catch (err) {
-        toolResult = toolExecutionErrorPayload(err);
+        toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
-      const outputParts = await toolResultToParts(toolResult);
+      const outputParts = toolResult.output;
       if (hooks.message) {
-        hooks.message.parts = hooks.message.parts.map((part) => {
-          if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== toolCallId) return part;
-          return { ...part, input: toolCall.function.arguments, output: outputParts as unknown as JsonValue };
-        });
-        touchStream(hooks);
+        if (hooks.sink) {
+          hooks.sink({ kind: "tool_result", toolCallId, output: outputParts });
+        } else {
+          hooks.message.parts = hooks.message.parts.map((part) => {
+            if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== toolCallId) return part;
+            return { ...part, input: toolCall.function.arguments, output: outputParts as unknown as JsonValue };
+          });
+          touchStream(hooks);
+        }
       }
       toolResultBlocks.push({
         type: "tool_result",
@@ -9895,7 +9940,7 @@ async function fetchClaudeTextWithTools(
   providerItem: Provider,
   assistant: Assistant,
   signal?: AbortSignal,
-  hooks?: StreamHooks,
+  hooks?: StreamHooksWithSink,
 ) {
   let messages = Array.isArray(body.messages) ? [...body.messages] : [];
   let currentBody = { ...body, messages, stream: false };
@@ -9938,6 +9983,7 @@ async function fetchClaudeTextWithTools(
     if (toolUses.length === 0) return allContent.trim() || "(empty response)";
 
     const toolResultBlocks = [];
+    const dispatchCtx = toolCallContext(hooks);
     // Same rationale as the stream path: bail out of the turn if any tool needs approval so
     // we don't end up sending an unanswered tool_use to Anthropic on the next turn.
     const hasPendingInBatch = toolUses.some((toolUse) => toolNeedsApproval(String(toolUse.name ?? ""), assistant));
@@ -9960,7 +10006,7 @@ async function fetchClaudeTextWithTools(
       };
       if (hooks?.message) {
         finishReasoningParts(hooks.message);
-        replaceLoadingReasoningWithTool(hooks.message, toolPart);
+        replaceLoadingReasoningWithTool(hooks.message, toolPart, hooks.sink);
         touchStream(hooks);
       }
       if (hasPendingInBatch) {
@@ -9968,15 +10014,19 @@ async function fetchClaudeTextWithTools(
         // as pending cards too (so the UI shows the full set of decisions to approve/deny).
         continue;
       }
-      let toolResult: unknown;
+      let toolResult: ToolResult;
       try {
-        toolResult = await executeToolCall(toolCall, assistant, toolCallContext(hooks));
+        toolResult = await dispatchCtx!.executeTool(toolCall as ToolCall, dispatchCtx);
       } catch (err) {
-        toolResult = toolExecutionErrorPayload(err);
+        toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
-      const outputParts = await toolResultToParts(toolResult);
-      (toolPart as Record<string, JsonValue>).output = outputParts as unknown as JsonValue;
-      touchStream(hooks);
+      const outputParts = toolResult.output;
+      if (hooks?.sink) {
+        hooks.sink({ kind: "tool_result", toolCallId: toolCall.id, output: outputParts });
+      } else {
+        (toolPart as Record<string, JsonValue>).output = outputParts as unknown as JsonValue;
+        touchStream(hooks);
+      }
       toolResultBlocks.push({
         type: "tool_result",
         tool_use_id: toolCall.id,
@@ -10013,7 +10063,7 @@ function googleUsageFromMeta(meta: any): Message["usage"] | undefined {
 
 async function readGoogleStreamingRound(
   response: Response,
-  hooks: StreamHooks,
+  hooks: StreamHooksWithSink,
   assistant: Assistant,
   signal?: AbortSignal,
 ): Promise<GoogleStreamRoundResult> {
@@ -10081,7 +10131,7 @@ async function readGoogleStreamingRound(
             input: JSON.stringify(args),
             output: [],
             approvalState: initialApprovalState(name, assistant),
-          });
+          }, hooks.sink);
           touchStream(hooks);
         }
       }
@@ -10134,7 +10184,7 @@ async function streamGoogleChatWithTools(
   providerItem: Provider,
   assistant: Assistant,
   signal: AbortSignal | undefined,
-  hooks: StreamHooks,
+  hooks: StreamHooksWithSink,
 ) {
   const streamUrl = `${baseUrl.replace(/\/+$/, "")}/models/${modelId}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
   let contents = Array.isArray(body.contents) ? [...body.contents] : [];
@@ -10169,7 +10219,10 @@ async function streamGoogleChatWithTools(
       throw new Error(`${providerItem.name} ${response.status}: ${text.slice(0, 500)}`);
     }
     const round_ = await readGoogleStreamingRound(response, hooks, assistant, signal);
-    if (hooks.message && round_.usage) hooks.message.usage = round_.usage;
+    if (hooks.message && round_.usage) {
+      if (hooks.sink) hooks.sink({ kind: "usage", usage: round_.usage });
+      else hooks.message.usage = round_.usage;
+    }
     addLog({
       providerId: providerItem.id,
       providerName: providerItem.name,
@@ -10197,25 +10250,30 @@ async function streamGoogleChatWithTools(
       return allContent.trim() || "";
     }
     const responseParts: Record<string, JsonValue>[] = [];
+    const dispatchCtx = toolCallContext(hooks);
     for (const fc of round_.functionCalls) {
       const toolCall = {
         id: fc.id,
         type: "function" as const,
         function: { name: fc.name, arguments: JSON.stringify(fc.args ?? {}) },
       };
-      let toolResult: unknown;
+      let toolResult: ToolResult;
       try {
-        toolResult = await executeToolCall(toolCall, assistant, toolCallContext(hooks));
+        toolResult = await dispatchCtx!.executeTool(toolCall, dispatchCtx);
       } catch (err) {
-        toolResult = toolExecutionErrorPayload(err);
+        toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
-      const outputParts = await toolResultToParts(toolResult);
+      const outputParts = toolResult.output;
       if (hooks.message) {
-        hooks.message.parts = hooks.message.parts.map((part) => {
-          if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== fc.id) return part;
-          return { ...part, input: toolCall.function.arguments, output: outputParts as unknown as JsonValue };
-        });
-        touchStream(hooks);
+        if (hooks.sink) {
+          hooks.sink({ kind: "tool_result", toolCallId: fc.id, output: outputParts });
+        } else {
+          hooks.message.parts = hooks.message.parts.map((part) => {
+            if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== fc.id) return part;
+            return { ...part, input: toolCall.function.arguments, output: outputParts as unknown as JsonValue };
+          });
+          touchStream(hooks);
+        }
       }
       responseParts.push({
         functionResponse: { name: fc.name, response: { result: apiContentText(partsToToolResultText(outputParts)) } },
@@ -10249,7 +10307,7 @@ async function fetchOpenAiText(
   providerItem: Provider,
   assistant: Assistant,
   signal?: AbortSignal,
-  hooks?: StreamHooks,
+  hooks?: StreamHooksWithSink,
 ) {
   let messages = Array.isArray(body.messages) ? [...body.messages] : [];
   let currentBody = { ...body, messages, stream: false };
@@ -10292,6 +10350,7 @@ async function fetchOpenAiText(
 
     const toolMessages = [];
     const hasPendingInBatch = toolCalls.some((toolCall: any) => toolNeedsApproval(String(toolCall?.function?.name ?? ""), assistant));
+    const dispatchCtx = toolCallContext(hooks);
     for (const toolCall of toolCalls) {
       const toolPart: JsonValue = {
         type: "tool",
@@ -10303,21 +10362,25 @@ async function fetchOpenAiText(
       };
       if (hooks?.message) {
         finishReasoningParts(hooks.message);
-        replaceLoadingReasoningWithTool(hooks.message, toolPart);
+        replaceLoadingReasoningWithTool(hooks.message, toolPart, hooks.sink);
         touchStream(hooks);
       }
       if (hasPendingInBatch) {
         continue;
       }
-      let toolResult: unknown;
+      let toolResult: ToolResult;
       try {
-        toolResult = await executeToolCall(toolCall, assistant, toolCallContext(hooks));
+        toolResult = await dispatchCtx!.executeTool(toolCall as ToolCall, dispatchCtx);
       } catch (err) {
-        toolResult = toolExecutionErrorPayload(err);
+        toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
-      const outputParts = await toolResultToParts(toolResult);
-      (toolPart as Record<string, JsonValue>).output = outputParts as unknown as JsonValue;
-      touchStream(hooks);
+      const outputParts = toolResult.output;
+      if (hooks?.sink) {
+        hooks.sink({ kind: "tool_result", toolCallId: String((toolPart as Record<string, JsonValue>).toolCallId), output: outputParts });
+      } else {
+        (toolPart as Record<string, JsonValue>).output = outputParts as unknown as JsonValue;
+        touchStream(hooks);
+      }
       toolMessages.push({
         role: "tool",
         tool_call_id: (toolPart as Record<string, JsonValue>).toolCallId,
@@ -10595,7 +10658,7 @@ async function readOpenAiStream(
 function applyOpenAiDelta(
   delta: any,
   rawEvent: any,
-  hooks: StreamHooks,
+  hooks: StreamHooksWithSink,
   toolCalls: any[],
 ) {
   appendUsageFromRaw(hooks.message, rawEvent);
@@ -10829,7 +10892,7 @@ async function fetchGoogleAuxiliaryStream(
   return text.trim() || "(empty response)";
 }
 
-function readOpenAiSseTextIntoMessage(rawText: string, hooks: StreamHooks, toolCalls: any[]) {
+function readOpenAiSseTextIntoMessage(rawText: string, hooks: StreamHooksWithSink, toolCalls: any[]) {
   let content = "";
   let reasoning = "";
   for (const payload of parseSseChunks(rawText)) {
@@ -10971,7 +11034,7 @@ function mergeToolCallDeltas(existing: any[], deltaCalls: any[], mode: "delta" |
   }
 }
 
-function ensureReasoningPart(hooks: StreamHooks, metadata?: Record<string, JsonValue>) {
+function ensureReasoningPart(hooks: StreamHooksWithSink, metadata?: Record<string, JsonValue>) {
   if (!hooks.message) return null;
   hooks.message.parts = hooks.message.parts.filter((part) => !(
     part &&
@@ -10997,8 +11060,12 @@ function ensureReasoningPart(hooks: StreamHooks, metadata?: Record<string, JsonV
   return next;
 }
 
-function appendReasoningDelta(hooks: StreamHooks, text: string, metadata?: Record<string, JsonValue>) {
+function appendReasoningDelta(hooks: StreamHooksWithSink, text: string, metadata?: Record<string, JsonValue>) {
   if (!hooks.message) return;
+  if (hooks.sink) {
+    hooks.sink({ kind: "reasoning_delta", text, metadata });
+    return;
+  }
   markStreamFirstContent(hooks.message);
   const part = ensureReasoningPart(hooks, metadata);
   if (part && text) part.reasoning = String(part.reasoning ?? "") + text;
@@ -11011,8 +11078,12 @@ function normalizeGeneratedImageUrl(value: string) {
   return `data:image/png;base64,${text}`;
 }
 
-function addStreamImage(hooks: StreamHooks | undefined, url: string, metadata: Record<string, JsonValue> = {}) {
+function addStreamImage(hooks: StreamHooksWithSink | undefined, url: string, metadata: Record<string, JsonValue> = {}) {
   if (!hooks?.message) return;
+  if (hooks.sink) {
+    hooks.sink({ kind: "image_delta", url, metadata });
+    return;
+  }
   const normalized = normalizeGeneratedImageUrl(url);
   if (!normalized) return;
   markStreamFirstContent(hooks.message);
@@ -11022,7 +11093,7 @@ function addStreamImage(hooks: StreamHooks | undefined, url: string, metadata: R
 
 async function readOpenAiResponseIntoMessage(
   response: Response,
-  hooks: StreamHooks,
+  hooks: StreamHooksWithSink,
   signal?: AbortSignal,
 ) {
   const toolCalls: any[] = [];
@@ -11071,7 +11142,7 @@ async function fetchOpenAiTextStreaming(
   body: Record<string, any>,
   providerItem: Provider,
   assistant: Assistant,
-  hooks: StreamHooks,
+  hooks: StreamHooksWithSink,
   signal?: AbortSignal,
 ) {
   const started = Date.now();
@@ -11214,6 +11285,7 @@ async function fetchOpenAiTextStreaming(
       toolCall && typeof toolCall === "object" && toolCall.function?.name &&
       toolNeedsApproval(String(toolCall.function?.name ?? ""), assistant)
     );
+    const dispatchCtx = toolCallContext(hooks);
     for (const toolCall of result.toolCalls) {
       // Skip sparse-array holes. The Responses API stream parser indexes into toolCalls[]
       // by `output_index` (server.ts:7354) — when the model emits both a function_call
@@ -11238,7 +11310,7 @@ async function fetchOpenAiTextStreaming(
       };
       if (hooks.message) {
         finishReasoningParts(hooks.message);
-        replaceLoadingReasoningWithTool(hooks.message, toolPart);
+        replaceLoadingReasoningWithTool(hooks.message, toolPart, hooks.sink);
         touchStream(hooks);
       }
       if (hasPendingInBatch) {
@@ -11246,14 +11318,18 @@ async function fetchOpenAiTextStreaming(
         // or denies the pending one(s).
         continue;
       }
-      let toolResult: unknown;
+      let toolResult: ToolResult;
       try {
-        toolResult = await executeToolCall(toolCall, assistant, toolCallContext(hooks));
+        toolResult = await dispatchCtx!.executeTool(toolCall as ToolCall, dispatchCtx);
       } catch (err) {
-        toolResult = toolExecutionErrorPayload(err);
+        toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
-      toolPart.output = await toolResultToParts(toolResult);
-      touchStream(hooks);
+      toolPart.output = toolResult.output;
+      if (hooks.sink) {
+        hooks.sink({ kind: "tool_result", toolCallId: toolPart.toolCallId, output: toolPart.output });
+      } else {
+        touchStream(hooks);
+      }
       toolMessages.push(
         useResponseInput
           ? { type: "function_call_output", call_id: toolPart.toolCallId, output: resolvedToolOutput(toolPart) }
@@ -12617,6 +12693,30 @@ async function runPostGenerationTasks(conversationId: string, snapshot: Conversa
   }
 }
 
+/** 纯生成逻辑：驱动 Provider 流式/非流式调用，并通过 sink 发出生成事件。
+ *  本函数不直接写 state.json、不直接广播 SSE、不直接落盘 SQLite——这些副作用由
+ *  协调器 generateAnswer 统一处理。 */
+async function runGeneration(
+  conversation: Conversation,
+  assistantMessage: Message,
+  assistantNode: MessageNode,
+  deps: {
+    assistant: Assistant;
+    providerItem: Provider;
+    selectedModel: Model;
+    executeTool: ToolExecutor;
+  },
+  sink: GenerationEventSink,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
+  return callProviderStreaming(conversation, assistantMessage, assistantNode, {
+    signal,
+    sink,
+    executeTool: deps.executeTool,
+  });
+}
+
 async function generateAnswer(conversation: Conversation, regenerateAtNodeId?: string) {
   const controller = new AbortController();
   generating.set(conversation.id, controller);
@@ -12651,7 +12751,70 @@ async function generateAnswer(conversation: Conversation, regenerateAtNodeId?: s
     if (resumingApprovedTools) {
       await resumeApprovedToolParts(conversation, assistant, currentMessage, assistantNode, false);
     }
-    const content = await callProviderStreaming(conversation, currentMessage, assistantNode, controller.signal);
+    // 工具执行闭包：把 server.ts 里的 executeToolCall 包装成 ToolExecutor 接口。
+    // 这里保留对全局 state 的读写（如 saveToolBinaryContent），因为协调器仍然是唯一拥有
+    // state 写权限的层；后续 Phase 会再把文件落盘拆到 files/ 模块。
+    const executeTool: ToolExecutor = async (toolCall, context) => {
+      const raw = await executeToolCall(toolCall, assistant, context);
+      // ask_user / MCP 审批等 pending 状态直接作为单 part 返回，让协调器走暂停路径。
+      if (isRecord(raw) && "pending" in raw) {
+        return { output: [raw as JsonValue] };
+      }
+      const parts = await toolResultToParts(raw);
+      return { output: parts };
+    };
+    const applyEvent = (event: GenerationEvent) => {
+      const streamHooks: StreamHooks = { message: currentMessage, conversation, node: assistantNode };
+      switch (event.kind) {
+        case "text_delta":
+          addStreamText(streamHooks, event.text);
+          break;
+        case "reasoning_delta":
+          appendReasoningDelta(streamHooks as StreamHooksWithSink, event.text, event.metadata);
+          break;
+        case "image_delta":
+          addStreamImage(streamHooks, event.url, event.metadata);
+          break;
+        case "tool_call_created":
+          finishReasoningParts(currentMessage);
+          replaceLoadingReasoningWithTool(currentMessage, {
+            type: "tool",
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            input: event.input,
+            output: [],
+            approvalState: event.approvalState,
+          });
+          touchStream(streamHooks as StreamHooksWithSink);
+          break;
+        case "tool_input_delta":
+          currentMessage.parts = currentMessage.parts.map((part) => {
+            if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== event.toolCallId) return part;
+            return { ...part, input: event.input };
+          });
+          touchStream(streamHooks as StreamHooksWithSink);
+          break;
+        case "tool_result":
+          currentMessage.parts = currentMessage.parts.map((part) => {
+            if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== event.toolCallId) return part;
+            return { ...part, output: event.output };
+          });
+          touchStream(streamHooks as StreamHooksWithSink);
+          break;
+        case "usage":
+          currentMessage.usage = event.usage;
+          break;
+      }
+    };
+    const sink: GenerationEventSink = (event) => applyEvent(event);
+    const content = await runGeneration(
+      conversation,
+      currentMessage,
+      assistantNode,
+      { assistant, providerItem: picked.provider, selectedModel: picked.model, executeTool },
+      sink,
+      controller.signal,
+    );
     if (controller.signal.aborted) throw new DOMException("Generation stopped", "AbortError");
     applyOutputTransforms(currentMessage, assistant);
     finishReasoningParts(currentMessage);

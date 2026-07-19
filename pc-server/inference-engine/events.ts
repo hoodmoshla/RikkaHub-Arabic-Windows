@@ -16,6 +16,7 @@ export type GenerationEvent =
       input: string;
       approvalState: JsonValue;
     }
+  | { kind: "tool_input_delta"; toolCallId: string; input: string }
   | { kind: "tool_result"; toolCallId: string; output: JsonValue[] }
   | { kind: "usage"; usage: Message["usage"] }
   | { kind: "finished"; content: string; stopReason: string | null }
