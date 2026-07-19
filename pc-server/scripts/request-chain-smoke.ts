@@ -333,12 +333,13 @@ const mockServer = Bun.serve({
       const form = await req.formData();
       const body: AnyRecord = {};
       for (const [key, value] of form.entries()) {
-        if (value instanceof File) {
-          const current = Array.isArray(body[key]) ? body[key] : body[key] ? [body[key]] : [];
-          current.push({ name: value.name, type: value.type, size: value.size });
-          body[key] = current;
+        if (typeof value === "string") {
+          body[key] = value;
         } else {
-          body[key] = String(value);
+          const file = value as File;
+          const current = Array.isArray(body[key]) ? body[key] : body[key] ? [body[key]] : [];
+          current.push({ name: file.name, type: file.type, size: file.size });
+          body[key] = current;
         }
       }
       requests.push({ path: url.pathname, body });
@@ -532,7 +533,7 @@ const webDavServer = Bun.serve({
           ...[...webDavFiles.entries()].map(([name, content]) => ({
             href: `/dav/rikkahub_backups/${encodeURIComponent(name)}`,
             displayName: name,
-            size: new TextEncoder().encode(content).byteLength,
+            size: content.byteLength,
           })),
         ];
         return webDavMultistatus(items);
@@ -550,7 +551,7 @@ const webDavServer = Bun.serve({
     if (req.method === "GET") {
       const content = webDavFiles.get(fileName);
       if (!content) return new Response("not found", { status: 404 });
-      return new Response(content, { headers: { "Content-Type": "application/zip" } });
+      return new Response(content as BodyInit, { headers: { "Content-Type": "application/zip" } });
     }
     if (req.method === "DELETE") {
       if (!webDavFiles.delete(fileName)) return new Response("not found", { status: 404 });
@@ -1869,7 +1870,7 @@ async function runBackupRoundtripSmoke() {
     ["references/example.txt", "nested reference file"],
   ]);
   const form = new FormData();
-  form.append("file", new File([nestedZip], "skill.zip", { type: "application/zip" }));
+  form.append("file", new File([nestedZip as BlobPart], "skill.zip", { type: "application/zip" }));
   const importFileRes = await fetch(`${baseUrl}/api/skills/import-file`, { method: "POST", body: form });
   const importFileBody = await importFileRes.json();
   assert(importFileRes.ok && Array.isArray(importFileBody.imported) && importFileBody.imported.includes(nestedSkillName), `skills/import-file failed: ${importFileRes.status} ${JSON.stringify(importFileBody)}`);

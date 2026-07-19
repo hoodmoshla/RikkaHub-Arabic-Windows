@@ -1200,14 +1200,14 @@ function normalizeState(input: Partial<State>): State {
       // Pre-2026-05 PC builds saved global-scope memories under "global" (without underscores).
       // Migrate any legacy records so they continue to surface for assistants with
       // `useGlobalMemory: true`, matching the Android schema literal.
-      const rawAssistantId = String(memory.assistantId ?? memory.assistant_id ?? GLOBAL_MEMORY_ID);
+      const rawAssistantId = String(memory.assistantId ?? (memory as any).assistant_id ?? GLOBAL_MEMORY_ID);
       const assistantId = rawAssistantId === "global" ? GLOBAL_MEMORY_ID : rawAssistantId;
       return {
         id: Number(memory.id ?? index + 1),
         assistantId,
         content: String(memory.content ?? ""),
-        createdAt: Number(memory.createdAt ?? memory.created_at ?? now),
-        updatedAt: Number(memory.updatedAt ?? memory.updated_at ?? now),
+        createdAt: Number(memory.createdAt ?? (memory as any).created_at ?? now),
+        updatedAt: Number(memory.updatedAt ?? (memory as any).updated_at ?? now),
       };
     }).filter((memory) => memory.content.trim()) : [],
     nextFileId: typeof input.nextFileId === "number" ? input.nextFileId : 1,
@@ -1236,11 +1236,11 @@ function normalizeState(input: Partial<State>): State {
   // 若所有助手 enableMemory=false,globalEnabled 默认 false(避免被动注入全局,违背用户意愿);
   // 否则默认 true。用户设过 memorySettings(存在)则保留,仅校验 writeStrategy 合法性。
   {
-    const userMs = (parsedSettings as Record<string, unknown>).memorySettings;
+    const userMs = (parsedSettings as unknown as Record<string, unknown>).memorySettings;
     if (isRecord(userMs)) {
-      const ws = String((userMs as Record<string, unknown>).writeStrategy ?? "ask");
+      const ws = String((userMs as unknown as Record<string, unknown>).writeStrategy ?? "ask");
       normalized.settings.memorySettings = {
-        globalEnabled: (userMs as Record<string, unknown>).globalEnabled !== false,
+        globalEnabled: (userMs as unknown as Record<string, unknown>).globalEnabled !== false,
         writeStrategy: ws === "always_assistant" || ws === "always_global" || ws === "readonly"
           ? (ws as WriteStrategy)
           : "ask",
@@ -1771,11 +1771,11 @@ const memoryStore = {
 
   /** 已迁移:从 memory/ 目录加载到内存。启动阶段调用,传入当前 state(刷助手名快照)。 */
   load(stateObj: State) {
-    const gmf = this.readFile<GlobalMemoryFile>(globalMemoryPath, { version: 1, nextMemoryId: 1, memories: [] });
+    const gmf = this.readFile(globalMemoryPath, { version: 1, nextMemoryId: 1, memories: [] }) as GlobalMemoryFile;
     this.globalMemories = Array.isArray(gmf.memories) ? gmf.memories : [];
-    const amf = this.readFile<AssistantMemoryFile>(assistantMemoryPath, { version: 1, assistants: [] });
+    const amf = this.readFile(assistantMemoryPath, { version: 1, assistants: [] }) as AssistantMemoryFile;
     this.assistantGroups = Array.isArray(amf.assistants) ? amf.assistants : [];
-    const pmf = this.readFile<PendingMemoryFile>(pendingMemoryPath, { version: 1, pending: [] });
+    const pmf = this.readFile(pendingMemoryPath, { version: 1, pending: [] }) as PendingMemoryFile;
     this.pending = Array.isArray(pmf.pending) ? pmf.pending : [];
     this.recomputeNextId();
     this.refreshAssistantNames(stateObj.settings.assistants);
@@ -2196,8 +2196,8 @@ function migrateMemoryFilesIfNeeded(stateObj: State): void {
   // S2 防御(c):标记未写但 memory/ 已有数据——上次迁移半完成(写文件后、写标记前崩)。
   // 不覆盖!从已有文件加载 + 补写标记,保留用户可能的新增数据。
   if (existsSync(globalMemoryPath) || existsSync(assistantMemoryPath) || existsSync(pendingMemoryPath)) {
-    const gmfTemp = memoryStore.readFile<GlobalMemoryFile>(globalMemoryPath, { version: 1, nextMemoryId: 1, memories: [] });
-    const amfTemp = memoryStore.readFile<AssistantMemoryFile>(assistantMemoryPath, { version: 1, assistants: [] });
+    const gmfTemp = memoryStore.readFile(globalMemoryPath, { version: 1, nextMemoryId: 1, memories: [] }) as GlobalMemoryFile;
+    const amfTemp = memoryStore.readFile(assistantMemoryPath, { version: 1, assistants: [] }) as AssistantMemoryFile;
     const hasData = (Array.isArray(gmfTemp.memories) && gmfTemp.memories.length > 0)
       || (Array.isArray(amfTemp.assistants) && amfTemp.assistants.length > 0);
     if (hasData) {
@@ -3675,13 +3675,13 @@ function upsertById(items: JsonValue[], item: Record<string, JsonValue>) {
 }
 
 function deleteById(items: JsonValue[], idValue: string) {
-  return items.filter((entry) => !(isRecord(entry) && String(entry.id) === idValue));
+  return items.filter((entry) => !(isRecord(entry) && String(entry["id"]) === idValue));
 }
 
 function reorderByIds<T extends JsonValue>(items: T[], ids: string[]) {
-  const byId = new Map(items.filter(isRecord).map((item) => [String(item.id), item as T]));
+  const byId = new Map(items.filter(isRecord).map((item) => [String(item["id"]), item as T]));
   const ordered = ids.map((itemId) => byId.get(itemId)).filter(Boolean) as T[];
-  const rest = items.filter((item) => !isRecord(item) || !ids.includes(String(item.id)));
+  const rest = items.filter((item) => !isRecord(item) || !ids.includes(String(item["id"])));
   return [...ordered, ...rest];
 }
 
@@ -4121,9 +4121,9 @@ function applyAndroidZipBackupFromPath(zipPath: string): { settingsImported: boo
       const defaults = defaultSettings();
       // 标量:APP 有该字段、且 PC 缺失(null)或仍=出厂默认 → 采用 APP;否则保 PC。APP 没该字段时保 PC。
       const pick = (key: string): unknown => {
-        const pcVal = (pc as Record<string, unknown>)[key];
+        const pcVal = (pc as unknown as Record<string, unknown>)[key];
         if (!(key in app)) return pcVal;
-        const defVal = (defaults as Record<string, unknown>)[key];
+        const defVal = (defaults as unknown as Record<string, unknown>)[key];
         return pcVal == null || pcVal === defVal ? app[key] : pcVal;
       };
       // searchServices 两端 id 都是随机生成(defaultSettings 用 id()、Android 用 Uuid.random()),mergeById
@@ -4192,11 +4192,11 @@ function applyAndroidZipBackupFromPath(zipPath: string): { settingsImported: boo
       }
       // WebDavConfig 两端结构完全一致(url/username/password/path/items)。PC 已配置(url 非空)= PC 上
       // 验证过能用且含密钥 → 保 PC;PC 空(url 空)= 用户没在 PC 配过 → 采用 APP 的(主力端配置)。
-      const mergedWebDav = String((pc.webDavConfig as Record<string, JsonValue> | null)?.url ?? "").trim()
+      const mergedWebDav = String((pc.webDavConfig as unknown as Record<string, JsonValue> | null)?.url ?? "").trim()
         ? pc.webDavConfig
         : (app.webDavConfig ?? pc.webDavConfig);
       // S3Config 对齐 APP 后两端结构一致。PC 已配置(endpoint 非空)→ 保 PC;PC 空 → 采用 APP。
-      const mergedS3 = String((pc.s3Config as Record<string, JsonValue> | null)?.endpoint ?? "").trim()
+      const mergedS3 = String((pc.s3Config as unknown as Record<string, JsonValue> | null)?.endpoint ?? "").trim()
         ? pc.s3Config
         : (app.s3Config ?? pc.s3Config);
       const merged = {
@@ -4226,12 +4226,12 @@ function applyAndroidZipBackupFromPath(zipPath: string): { settingsImported: boo
         searchServiceSelected: resolveSearchSelected(),
         asrProviders: mergeById(pc.asrProviders ?? [], (Array.isArray(app.asrProviders) ? app.asrProviders : []) as { id: string }[]),
         ttsProviders: mergeById(pc.ttsProviders ?? [], (Array.isArray(app.ttsProviders) ? app.ttsProviders : []) as { id: string }[]),
-        assistants: mergeById((Array.isArray(app.assistants) ? app.assistants : []) as { id: string }[], pc.assistants ?? []),
-        mcpServers: mergeById((Array.isArray(app.mcpServers) ? app.mcpServers : []) as { id: string }[], pc.mcpServers ?? []),
-        lorebooks: mergeById((Array.isArray(app.lorebooks) ? app.lorebooks : []) as { id: string }[], pc.lorebooks ?? []),
-        quickMessages: mergeById((Array.isArray(app.quickMessages) ? app.quickMessages : []) as { id: string }[], pc.quickMessages ?? []),
-        modeInjections: mergeById((Array.isArray(app.modeInjections) ? app.modeInjections : []) as { id: string }[], pc.modeInjections ?? []),
-        assistantTags: mergeById((Array.isArray(app.assistantTags) ? app.assistantTags : []) as { id: string }[], pc.assistantTags ?? []),
+        assistants: mergeById((Array.isArray(app.assistants) ? app.assistants : []) as any[], pc.assistants ?? []),
+        mcpServers: mergeById((Array.isArray(app.mcpServers) ? app.mcpServers : []) as any[], pc.mcpServers ?? []),
+        lorebooks: mergeById((Array.isArray(app.lorebooks) ? app.lorebooks : []) as any[], pc.lorebooks ?? []),
+        quickMessages: mergeById((Array.isArray(app.quickMessages) ? app.quickMessages : []) as any[], pc.quickMessages ?? []),
+        modeInjections: mergeById((Array.isArray(app.modeInjections) ? app.modeInjections : []) as any[], pc.modeInjections ?? []),
+        assistantTags: mergeById((Array.isArray(app.assistantTags) ? app.assistantTags : []) as any[], pc.assistantTags ?? []),
         favoriteModels: Array.from(new Set([
           ...(Array.isArray(pc.favoriteModels) ? pc.favoriteModels : []),
           ...(Array.isArray(app.favoriteModels) ? (app.favoriteModels as string[]) : []),
@@ -4253,7 +4253,7 @@ function applyAndroidZipBackupFromPath(zipPath: string): { settingsImported: boo
         // memorySettings 同为 PC-only(APP Settings 无此字段),保 PC 设置,否则 normalizeState
         // 的 M1 推断会覆盖用户的 globalEnabled 选择。
         memorySettings: pc.memorySettings,
-      } as State["settings"];
+      } as unknown as State["settings"];
       const adjusted = rewriteAvatarsInSettings(merged, ANDROID_AVATAR_TYPE_TO_PC, "to-pc");
       state = normalizeState({ ...state, settings: adjusted as State["settings"] });
       settingsImported = true;
@@ -5861,7 +5861,7 @@ async function s3Request(
     if (options.bodyLength != null) contentLength = String(options.bodyLength);
   } else {
     payload = options.body ?? Buffer.alloc(0);
-    bodyForFetch = payload.length ? payload : undefined;
+    bodyForFetch = payload.length ? (payload as BodyInit) : undefined;
     if (payload.length) contentLength = String(payload.length);
   }
   const { requestUrl, headers } = s3Sign(config, method, key, options.query ?? {}, payload, payloadHashOverride);
@@ -9267,19 +9267,21 @@ function extractPptxBulletInfo(p: XmlPull): { hasBullet: boolean; level: number;
 function extractPptxTextRun(p: XmlPull, result: string[]) {
   const startDepth = p.depth;
   while (p.next() !== XML_EOF) {
-    if (p.eventType === XML_START_TAG && p.name === "t") {
+    const ev = p.eventType;
+    if (ev === XML_START_TAG && p.name === "t") {
       p.next();
       if (p.eventType === XML_TEXT && p.text) result.push(p.text);
     }
-    if (p.eventType === XML_END_TAG && p.name === "r" && p.depth === startDepth) break;
+    if (ev === XML_END_TAG && p.name === "r" && p.depth === startDepth) break;
   }
 }
 
 function processPptxGraphicFrame(p: XmlPull, result: string[]) {
   const startDepth = p.depth;
   while (p.next() !== XML_EOF) {
-    if (p.eventType === XML_START_TAG && p.name === "tbl") processPptxTable(p, result);
-    if (p.eventType === XML_END_TAG && p.name === "graphicFrame" && p.depth === startDepth) break;
+    const ev = p.eventType;
+    if (ev === XML_START_TAG && p.name === "tbl") processPptxTable(p, result);
+    if (ev === XML_END_TAG && p.name === "graphicFrame" && p.depth === startDepth) break;
   }
 }
 
@@ -9287,11 +9289,12 @@ function processPptxTable(p: XmlPull, result: string[]) {
   const startDepth = p.depth;
   const rows: string[][] = [];
   while (p.next() !== XML_EOF) {
-    if (p.eventType === XML_START_TAG && p.name === "tr") {
+    const ev = p.eventType;
+    if (ev === XML_START_TAG && p.name === "tr") {
       const cells = extractPptxTableRow(p);
       if (cells.length) rows.push(cells);
     }
-    if (p.eventType === XML_END_TAG && p.name === "tbl" && p.depth === startDepth) break;
+    if (ev === XML_END_TAG && p.name === "tbl" && p.depth === startDepth) break;
   }
   if (!rows.length) return;
   const maxCols = Math.max(...rows.map((r) => r.length));
@@ -9316,14 +9319,15 @@ function extractPptxTableCell(p: XmlPull): string {
   const startDepth = p.depth;
   const parts: string[] = [];
   while (p.next() !== XML_EOF) {
-    if (p.eventType === XML_START_TAG && p.name === "t") {
+    const ev = p.eventType;
+    if (ev === XML_START_TAG && p.name === "t") {
       p.next();
       if (p.eventType === XML_TEXT && p.text) {
         if (parts.length > 0) parts.push(" ");
         parts.push(p.text);
       }
     }
-    if (p.eventType === XML_END_TAG && p.name === "tc" && p.depth === startDepth) break;
+    if (ev === XML_END_TAG && p.name === "tc" && p.depth === startDepth) break;
   }
   return parts.join("").trim();
 }
@@ -9354,11 +9358,12 @@ function isPptxNotesTextShape(p: XmlPull): boolean {
 
 function extractPptxShapeText(p: XmlPull, result: string[]) {
   while (p.next() !== XML_EOF) {
-    if (p.eventType === XML_START_TAG && p.name === "t") {
+    const ev = p.eventType;
+    if (ev === XML_START_TAG && p.name === "t") {
       p.next();
       if (p.eventType === XML_TEXT && p.text) result.push(p.text);
     }
-    if (p.eventType === XML_END_TAG && p.name === "p") result.push("\n");
+    if (ev === XML_END_TAG && p.name === "p") result.push("\n");
   }
 }
 
@@ -9575,9 +9580,9 @@ function claudeSystemContent(system: unknown, providerItem: Provider) {
 }
 
 function claudeMessagesFromApiMessages(messages: ApiMessage[], providerItem: Provider) {
-  const items = messages
+  const items: any[] = messages
     .filter((item) => item.role !== "system")
-    .flatMap((item) => {
+    .flatMap((item): any[] => {
       if (item.role === "assistant") {
         const content = claudeContentBlocks(item.content).filter((block) =>
           !isRecord(block) || block.type !== "text" || String(block.text ?? "").trim()
@@ -12140,14 +12145,14 @@ function mergeClaudeUsage(
   const cacheCreation = Number(u.cache_creation_input_tokens ?? 0);
   const promptTokens = inputTokens + cacheRead + cacheCreation;
   const completionTokens = Number(u.output_tokens ?? 0);
-  const mergedPrompt = promptTokens > 0 ? promptTokens : (prev?.promptTokens ?? 0);
+  const mergedPrompt = promptTokens > 0 ? promptTokens : ((prev as any)?.promptTokens ?? 0);
   const mergedCompletion =
-    completionTokens > 0 ? completionTokens : (prev?.completionTokens ?? 0);
+    completionTokens > 0 ? completionTokens : ((prev as any)?.completionTokens ?? 0);
   return {
     promptTokens: mergedPrompt,
     completionTokens: mergedCompletion,
     totalTokens: mergedPrompt + mergedCompletion,
-    cachedTokens: cacheRead > 0 ? cacheRead : (prev?.cachedTokens ?? 0),
+    cachedTokens: cacheRead > 0 ? cacheRead : ((prev as any)?.cachedTokens ?? 0),
   };
 }
 
@@ -12183,8 +12188,8 @@ async function streamClaudeChat(
   let usage: Message["usage"] | undefined;
   const full = await readClaudeStream(response, (text, raw) => {
     if (text) addStreamText(hooks, text);
-    if (raw && isRecord(raw) && (raw.usage || raw.message?.usage)) {
-      const u: any = raw.usage ?? raw.message?.usage;
+    if (raw && isRecord(raw) && ((raw as any).usage || (raw as any).message?.usage)) {
+      const u: any = (raw as any).usage ?? (raw as any).message?.usage;
       usage = mergeClaudeUsage(u, usage);
     }
   }, signal);
@@ -13229,7 +13234,7 @@ async function readOpenAiStream(
           // 跳过就永远捕获不到(非流式回放版 readOpenAiSseTextIntoMessage 有对应分支)。
           const applied = onDelta(delta, raw);
           if (Object.keys(delta).length > 0) {
-            full += applied?.content ?? deltaTextContent(delta);
+            full += (applied as any)?.content ?? deltaTextContent(delta);
           }
         } catch {
           // Ignore malformed stream fragments.
@@ -13244,7 +13249,7 @@ async function readOpenAiStream(
       const delta = raw.choices?.[0]?.delta ?? raw.choices?.[0]?.message ?? responseEventToDelta(raw) ?? {};
       const applied = onDelta(delta, raw);
       if (Object.keys(delta).length > 0) {
-        full += applied?.content ?? deltaTextContent(delta);
+        full += (applied as any)?.content ?? deltaTextContent(delta);
       }
     } catch {
       // Ignore malformed trailing stream fragments.
@@ -13751,7 +13756,7 @@ async function fetchOpenAiTextStreaming(
   const started = Date.now();
   const useResponseInput = Array.isArray(body.input) && !Array.isArray(body.messages);
   let messages = [...(useResponseInput ? body.input ?? [] : body.messages ?? [])];
-  let currentBody = useResponseInput ? { ...body, input: messages } : { ...body, messages };
+  let currentBody: Record<string, any> = useResponseInput ? { ...body, input: messages } : { ...body, messages };
   let allContent = "";
   let forceNonStream = false;
   const fetchRound = (requestBody: Record<string, any>) => {
@@ -13779,7 +13784,7 @@ async function fetchOpenAiTextStreaming(
 
   for (let round = 0; round < MAX_TOOL_STEPS; round += 1) {
     const roundStarted = Date.now();
-    const requestBody = forceNonStream
+    const requestBody: Record<string, any> = forceNonStream
       ? { ...currentBody, stream: false, stream_options: undefined }
       : currentBody;
     let response: Response;
@@ -14598,6 +14603,7 @@ async function generateSpeechWithTtsProvider(text: string, providerId?: string, 
       providerName: provider.name,
       url: "windows:System.Speech",
       ok: true,
+      status: 200,
       kind: "provider:tts",
       durationMs: Date.now() - started,
       requestBody: text,
@@ -15095,7 +15101,7 @@ function startAsrRealtimeSession(client: any, providerId?: string) {
     if (shouldBypassProxy(endpoint, cfg?.bypassRules ?? "")) return undefined;
     return url;
   })();
-  const upstream = new WebSocket(endpoint, wsProxy ? { headers, proxy: wsProxy } : { headers });
+  const upstream = new WebSocket(endpoint, (wsProxy ? { headers, proxy: wsProxy } : { headers }) as any);
   session.upstream = upstream;
   upstream.binaryType = "arraybuffer";
   upstream.onopen = () => {
@@ -16044,7 +16050,7 @@ async function routeApi(request: Request, url: URL) {
     const nextServer = await syncMcpServerTools(server);
     const result = upsertById(state.settings.mcpServers as JsonValue[], nextServer);
     updateSettings({ ...state.settings, mcpServers: result.items });
-    const common = isRecord(nextServer.commonOptions) ? nextServer.commonOptions : {};
+    const common = (isRecord(nextServer.commonOptions) ? nextServer.commonOptions : {}) as Record<string, JsonValue>;
     if (common.connected === false) return error(String(common.lastSyncError ?? "MCP sync failed"), 502);
     return json({ status: "ok", tools: Array.isArray(common.tools) ? common.tools : [], server: result.item });
   }
@@ -17978,7 +17984,7 @@ async function routeApi(request: Request, url: URL) {
     try {
       const result = await generateSpeechWithTtsProvider(text, body.providerId, body.speed);
       if (!result.audio) return error("TTS provider returned no audio", 502);
-      return new Response(result.audio, {
+      return new Response(result.audio as BodyInit, {
         headers: {
           "Content-Type": result.mime,
           "Cache-Control": "no-store",
@@ -18145,7 +18151,7 @@ const { server, port } = (() => {
             const url = new URL(request.url);
             try {
               if (url.pathname === "/api/asr/realtime" && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-                const upgraded = server.upgrade(request, { data: { kind: "asr" } });
+                const upgraded = server.upgrade(request, { data: { kind: "asr" } as any });
                 return upgraded ? undefined : error("WebSocket upgrade failed", 400);
               }
               if (url.pathname.startsWith("/api/")) return await routeApi(request, url);
