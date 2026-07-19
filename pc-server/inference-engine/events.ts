@@ -49,11 +49,8 @@ export interface ToolContext {
  *    由协调器统一落盘，避免工具直接修改 global state.files。 */
 export interface ToolResult {
   output: JsonValue[];
-  fileCreation?: {
-    data: string; // base64
-    mime: string;
-    prefix: string;
-  };
+  /** 工具想创建的文件描述符列表（如 MCP 图片）。由协调器统一落盘，避免工具直接修改 global state.files。 */
+  fileCreations?: Array<{ data: string; mime: string; prefix: string }>;
 }
 
 /** 推理引擎对工具执行层的抽象。实现可以暂时仍是 server.ts 里的 executeToolCall，

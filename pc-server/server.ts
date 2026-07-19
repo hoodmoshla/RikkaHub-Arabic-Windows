@@ -6769,10 +6769,29 @@ async function saveToolBinaryContent(data: string, mime: string, prefix: string)
   return `/api/files/${fileId}/content`;
 }
 
-async function toolResultToParts(toolResult: unknown): Promise<JsonValue[]> {
-  if (typeof toolResult === "string") return [{ type: "text", text: toolResult }];
+/** 把各种工具原始返回值归一化为 ToolResult。
+ *  特别地，MCP 返回的图片不再直接落盘，而是以 fileCreations 描述符交给协调器处理，
+ *  避免工具执行层直接修改 state.files。 */
+async function toolResultToParts(toolResult: unknown): Promise<ToolResult> {
+  if (isRecord(toolResult) && Array.isArray(toolResult.output)) {
+    const fileCreations: Array<{ data: string; mime: string; prefix: string }> = [];
+    if (Array.isArray(toolResult.fileCreations)) {
+      for (const fc of toolResult.fileCreations) {
+        if (isRecord(fc)) {
+          fileCreations.push({
+            data: String(fc.data ?? ""),
+            mime: String(fc.mime ?? ""),
+            prefix: String(fc.prefix ?? ""),
+          });
+        }
+      }
+    }
+    return { output: toolResult.output as JsonValue[], ...(fileCreations.length ? { fileCreations } : {}) };
+  }
+  if (typeof toolResult === "string") return { output: [{ type: "text", text: toolResult }] };
   if (isRecord(toolResult) && Array.isArray(toolResult.content)) {
     const parts: JsonValue[] = [];
+    const fileCreations: Array<{ data: string; mime: string; prefix: string }> = [];
     for (const item of toolResult.content) {
       if (!isRecord(item)) continue;
       const type = String(item.type ?? "").toLowerCase();
@@ -6784,11 +6803,8 @@ async function toolResultToParts(toolResult: unknown): Promise<JsonValue[]> {
         const data = String(item.data ?? item.base64 ?? "");
         const mime = String(item.mimeType ?? item.mime_type ?? "image/png");
         if (data) {
-          parts.push({
-            type: "image",
-            url: await saveToolBinaryContent(data, mime, "mcp-image"),
-            metadata: { source: "mcp", mime },
-          });
+          // 不直接保存文件，把描述符交给协调器，由它统一写盘并生成 /api/files/{id}/content URL。
+          fileCreations.push({ data, mime, prefix: "mcp-image" });
         }
         continue;
       }
@@ -6801,9 +6817,21 @@ async function toolResultToParts(toolResult: unknown): Promise<JsonValue[]> {
       }
       parts.push({ type: "text", text: JSON.stringify(item) });
     }
-    if (parts.length) return parts;
+    return { output: parts, ...(fileCreations.length ? { fileCreations } : {}) };
   }
-  return [{ type: "text", text: JSON.stringify(toolResult) }];
+  return { output: [{ type: "text", text: JSON.stringify(toolResult) }] };
+}
+
+/** 将 ToolResult 中的 fileCreations 落盘，并补充对应的 image parts。 */
+async function realizeToolResult(result: ToolResult): Promise<JsonValue[]> {
+  const extra: JsonValue[] = [];
+  if (result.fileCreations) {
+    for (const fc of result.fileCreations) {
+      const url = await saveToolBinaryContent(fc.data, fc.mime, fc.prefix);
+      extra.push({ type: "image", url, metadata: { source: "mcp", mime: fc.mime } });
+    }
+  }
+  return [...result.output, ...extra];
 }
 
 function dataUrlForMessageUrl(url: string) {
@@ -10981,7 +11009,8 @@ async function resumeApprovedToolParts(
     } catch (err) {
       toolResult = toolExecutionErrorPayload(err);
     }
-    part.output = await toolResultToParts(toolResult);
+    const normalized = await toolResultToParts(toolResult);
+    part.output = await realizeToolResult(normalized);
     changed = true;
     toolMessages.push(
       useResponseInput
@@ -12760,8 +12789,9 @@ async function generateAnswer(conversation: Conversation, regenerateAtNodeId?: s
       if (isRecord(raw) && "pending" in raw) {
         return { output: [raw as JsonValue] };
       }
-      const parts = await toolResultToParts(raw);
-      return { output: parts };
+      const normalized = await toolResultToParts(raw);
+      const output = await realizeToolResult(normalized);
+      return { output };
     };
     const applyEvent = (event: GenerationEvent) => {
       const streamHooks: StreamHooks = { message: currentMessage, conversation, node: assistantNode };
