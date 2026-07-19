@@ -1,5 +1,7 @@
 import { MupdfModule, JsonValue, Model, Provider, WebDavConfig, S3Config, ProxyMode, ProxyConfig, Assistant, Settings, AsrProvider, TtsProvider, Message, MessageNode, AssistantMemory, WriteStrategy, MemorySettings, Conversation, RequestLog, RequestStats, DailyStat, StoredFile, GeneratedImage, State, SearchService, SkillMetadata, GithubRelease, MemoryEntry, GlobalMemoryFile, AssistantMemoryGroup, AssistantMemoryFile, PendingEntry, PendingMemoryFile, AddMemoryInput, MemorySnapshot, PcConversationRow, PcMessageNodeRow, GitHubSkillInfo, GitHubSkillFile, ApiMessage, XmlToken, FontWeightFile, FontEntry, ManifestWeight, ManifestEntry, BuiltinManifest, StreamHooks, ClaudeStreamRoundResult, GoogleStreamRoundResult, AuxiliaryTextOptions, AsrRealtimeSession } from "./foundation/types";
 import { compareSemver, id, uniqueStrings, cloneJson, textFromParts, formatLocalDate, formatLocalTime, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, formatKeyLocal, getStringArray, isRecord, mergeById, safeJsonStringify, backupStamp, stripHtml, domainOfUrl, faviconForUrl, guessMimeFromExt, extensionFromMime, mergeObjects, safeJsonParse, visibleTextFromMessage, visibleReasoningFromMessage } from "./foundation/utils";
+import { sourceRootDir, executableDir, rootDir, dataDir, filesDir, skillsDir, customFontsDir, statePath, conversationsDbPath, skipVersionPath, updatesCacheDir, memoryDir, globalMemoryPath, assistantMemoryPath, pendingMemoryPath, deviceIdPath, MODELS_DEV_CACHE_PATH } from "./foundation/paths";
+import { RUNTIME_PLATFORM, RUNNING_IN_CONTAINER, osType, tempDir } from "./foundation/platform";
 
 import { createHash, createHmac } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -142,50 +144,14 @@ const DEFAULT_PROMPT_OPTIMIZE_PROMPT = `你是一位资深的提示词优化专�
 
 只输出优化后的那段话本身。不要写任何前言、解释、"以下是优化版本"之类的引导语,不要用引号包裹结果,不要在末尾追加说明。用户会把你的输出直接读进输入框——任何提示词以外的文字都是干扰。`;
 
-const sourceRootDir = resolve(import.meta.dir, "..");
-const executableDir = dirname(process.execPath);
-const rootDir = existsSync(join(executableDir, "web-ui")) ? executableDir : sourceRootDir;
-const dataDir = resolve(process.env.RIKKAHUB_PC_DATA_DIR ?? join(rootDir, "pc-data"));
-
-function tempDir(): string {
-  const t = process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP;
-  if (t) return t;
-  return process.platform === "win32" ? dataDir : "/tmp";
-}
-
-function osType(): string {
-  if (process.platform === "linux") return "Linux";
-  if (process.platform === "darwin") return "macOS";
-  return "Windows";
-}
-
 // 运行平台（用于自动更新：Windows 走 Tauri NSIS 安装器，Linux 走二进制原地替换）。
 // 与 analyticsOs() 的划分保持一致 —— Docker 容器内 process.platform 也是 "linux"，
 // 这是对的：Docker 镜像就是 Linux 二进制，只是它的更新路径不同（见下）。
-const RUNTIME_PLATFORM: "win" | "mac" | "linux" =
-  process.platform === "darwin" ? "mac" : process.platform === "linux" ? "linux" : "win";
 
 // 容器化部署检测。Docker 内即使替换了 /app/rikkahub-pc，容器一旦重建就会回到镜像里的
 // 旧版本，原地更新没有意义 —— 这类部署应当 docker pull 新镜像。检测 /.dockerenv（Docker
 // 标准标记）或显式注入的环境变量（兼容其他容器运行时）。
-const RUNNING_IN_CONTAINER = existsSync("/.dockerenv") || process.env.RIKKAHUB_CONTAINER === "1";
 
-const filesDir = join(dataDir, "files");
-const skillsDir = join(dataDir, "skills");
-// 用户上传的自定义字体。跟 files/skills 同级,落在 pc-data/ 下,gitignored 且应用更新不覆盖。
-const customFontsDir = join(dataDir, "fonts");
-const statePath = join(dataDir, "state.json");
-// 会话活库(SQLite,WAL)。1.2.6:会话从 state.json 迁出,改用 SQLite 增量写——流式只
-// upsert 当前在长的那个节点行,不再每 200ms 全量重写 state.json。与备份库(导出时现场
-// 生成、Android 兼容)是不同文件/表名/schema:活库 pc_conversation/pc_message_node 为 PC
-// 超集(含 system_prompt / truncate_index,Android 备份库没有这两列)。
-// 详见 conversation-persistence-design.md。
-const conversationsDbPath = join(dataDir, "rikka_hub.db");
-const skipVersionPath = join(dataDir, "skip-version.txt");
-// 已下载更新包的缓存目录。放在持久的 dataDir 下(而非系统 tempDir)——系统临时目录会被
-// OS/磁盘清理/重启清掉,会导致"下次进更新界面又得重下"。Windows 存 .exe 安装器,Linux
-// 存 tar.gz 及其解压产物。probeCachedInstaller / update/download / update/apply 共用。
-const updatesCacheDir = join(dataDir, "updates");
 // 应用内更新下载源:Cloudflare R2 镜像,与官网(rikkahub-desktop.pages.dev)同源,国内/全球
 // 访问都快(GitHub Release 在国内常需代理)。Windows 走 R2(Rikkahub_<tag>_x64-setup.exe);
 // Linux R2 无预编译包,仍走 GitHub Release 直链。
@@ -208,7 +174,6 @@ function writeSkippedVersion(version: string) {
 //   - 不阻塞:fetch 出错只能被 Promise 链吞掉,绝不能冒泡成 UnhandledRejection
 //   - 不持久错误状态:连续失败不退避、不停跳,因为我们根本不关心是否送达
 const ANALYTICS_ENDPOINT = "https://rikkahub-desktop.pages.dev/ping";
-const deviceIdPath = join(dataDir, "device-id.txt");
 let analyticsDeviceId = "";
 let analyticsMsgCount = 0;
 
@@ -1198,11 +1163,6 @@ const MEMORY_FILE_SPLIT_MIGRATION = "memory-file-split-1.3.2";
 //     addMemory 先自增计数器再写记忆(内存序),persistAll 先写 global(计数器)再写
 //     assistant——崩在任意点,recompute 都能自愈,已落盘 id 永不重用。
 // ============================================================================
-
-const memoryDir = join(dataDir, "memory");
-const globalMemoryPath = join(memoryDir, "global_memory.json");
-const assistantMemoryPath = join(memoryDir, "assistant_memory.json");
-const pendingMemoryPath = join(memoryDir, "pending_memory.json");
 
 // pending 队列容量上限(M7)。超限拒绝入队,工具返回 overflow,徽章变体高亮提醒用户处理积压。
 const PENDING_MAX = 100;
@@ -11176,7 +11136,6 @@ function addStreamText(hooks: StreamHooks | undefined, text: string) {
 // 数据源 https://models.dev/api.json,缓存到 pc-data,7 天 TTL,fetch 失败降级为空(不报错)。
 // 策略参考 opencode 的 models-dev.ts:磁盘缓存 + 原子写(tmp→rename)+ 失败用旧缓存。
 const MODELS_DEV_URL = "https://models.dev/api.json";
-const MODELS_DEV_CACHE_PATH = join(dataDir, "models-dev-cache.json");
 const MODELS_DEV_TTL_MS = 24 * 60 * 60 * 1000; // 1 天
 let modelsDevCache: Record<string, any> | null = null;
 let modelsDevLoading: Promise<void> | null = null;

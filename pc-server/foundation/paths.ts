@@ -1,0 +1,37 @@
+// foundation/paths.ts — 路径常量
+// 纪律：只导出路径字符串，不依赖业务逻辑，不引入副作用。
+
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import process from "node:process";
+
+export const sourceRootDir = resolve(import.meta.dir, "..");
+export const executableDir = dirname(process.execPath);
+export const rootDir = existsSync(join(executableDir, "web-ui")) ? executableDir : sourceRootDir;
+export const dataDir = resolve(process.env.RIKKAHUB_PC_DATA_DIR ?? join(rootDir, "pc-data"));
+
+export const filesDir = join(dataDir, "files");
+export const skillsDir = join(dataDir, "skills");
+// 用户上传的自定义字体。跟 files/skills 同级，落在 pc-data/ 下，gitignored 且应用更新不覆盖。
+export const customFontsDir = join(dataDir, "fonts");
+export const statePath = join(dataDir, "state.json");
+// 会话活库（SQLite，WAL）。1.2.6：会话从 state.json 迁出，改用 SQLite 增量写——流式只
+// upsert 当前在长的那个节点行，不再每 200ms 全量重写 state.json。与备份库（导出时现场
+// 生成、Android 兼容）是不同文件/表名/schema：活库 pc_conversation/pc_message_node 为 PC
+// 超集（含 system_prompt / truncate_index，Android 备份库没有这两列）。
+// 详见 conversation-persistence-design.md。
+export const conversationsDbPath = join(dataDir, "rikka_hub.db");
+export const skipVersionPath = join(dataDir, "skip-version.txt");
+// 已下载更新包的缓存目录。放在持久的 dataDir 下（而非系统 tempDir）——系统临时目录会被
+// OS/磁盘清理/重启清掉，会导致"下次进更新界面又得重下"。Windows 存 .exe 安装器，Linux
+// 存 tar.gz 及其解压产物。probeCachedInstaller / update/download / update/apply 共用。
+export const updatesCacheDir = join(dataDir, "updates");
+
+export const memoryDir = join(dataDir, "memory");
+export const globalMemoryPath = join(memoryDir, "global_memory.json");
+export const assistantMemoryPath = join(memoryDir, "assistant_memory.json");
+export const pendingMemoryPath = join(memoryDir, "pending_memory.json");
+
+export const deviceIdPath = join(dataDir, "device-id.txt");
+
+export const MODELS_DEV_CACHE_PATH = join(dataDir, "models-dev-cache.json");
