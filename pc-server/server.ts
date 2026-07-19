@@ -6,6 +6,7 @@ import { applyEffectiveProxy, classifyProxyError, friendlyRequestError, installP
 import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveInitialState, saveState, scheduleThrottledSaveState, setState, state, writeSlimStateJsonSync, writeSlimStateJsonSyncForMemory } from "./persistence/json-store";
 import { GLOBAL_MEMORY_ID, buildMemoryPrompt, buildRecentChatsPrompt, memoriesForAssistant, memoryStore } from "./memory/index";
 import { extractDocxText, extractEpubText, extractPdfText, extractPptxText, extractStoredFileText, extractStoredFileTextSync, fallbackDocumentText, getStoredFileSize, loadMupdf, readZipEntries, stripXmlText } from "./files/index";
+import { APP_VERSION, UPDATE_R2_BASE, fetchGithubLatestRelease, fetchLatestReleaseFromHtmlRedirect, probeCachedInstaller, readSkippedVersion, writeSkippedVersion } from "./updates/index";
 
 import { createHash, createHmac } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -130,16 +131,6 @@ const DEFAULT_PROMPT_OPTIMIZE_PROMPT = `你是一位资深的提示词优化专�
 // 标准标记）或显式注入的环境变量（兼容其他容器运行时）。
 
 // 应用内更新下载源:Cloudflare R2 镜像,与官网(rikkahub-desktop.pages.dev)同源,国内/全球
-// 访问都快(GitHub Release 在国内常需代理)。Windows 走 R2(Rikkahub_<tag>_x64-setup.exe);
-// Linux R2 无预编译包,仍走 GitHub Release 直链。
-const UPDATE_R2_BASE = "https://pub-d26eee7d911c4bab937ebe1729a4cefe.r2.dev";
-
-function readSkippedVersion(): string {
-  try { return readFileSync(skipVersionPath, "utf-8").trim(); } catch { return ""; }
-}
-function writeSkippedVersion(version: string) {
-  try { writeFileSync(skipVersionPath, version.trim()); } catch { /* best-effort */ }
-}
 
 // ── Analytics (anonymous DAU tracking) ────────────────────────────────────
 // One ping per app start + periodic updates during the session.  Sends only:
@@ -208,76 +199,6 @@ function startAnalytics(): void {
       sendAnalyticsPing();
     }, 10 * 60 * 1000); // every 10 minutes
   } catch { /* analytics must never break the app */ }
-}
-
-// MUST be kept in sync with web-ui/src-tauri/tauri.conf.json's `version` field. The update
-// checker compares this against the latest GitHub release tag and the version is also shown
-// verbatim in the About page. If you bump tauri.conf.json's version, bump this too.
-const APP_VERSION = "1.4.1";
-
-async function fetchGithubLatestRelease(repo: string): Promise<GithubRelease> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-    headers: { Accept: "application/vnd.github+json", "User-Agent": "RikkaHub-PC" },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub ${res.status}: ${text.slice(0, 300)}`);
-  }
-  return (await res.json()) as GithubRelease;
-}
-
-// Anonymous fallback when api.github.com refuses. github.com/<repo>/releases/latest is a
-// regular HTML page that 302-redirects to /releases/tag/v<latest>. We follow the redirect
-// manually and pull the tag out of the Location header. No API, no rate limit, no token.
-async function fetchLatestReleaseFromHtmlRedirect(repo: string): Promise<{ tag: string; htmlUrl: string }> {
-  const url = `https://github.com/${repo}/releases/latest`;
-  const res = await fetch(url, {
-    method: "HEAD",
-    redirect: "manual",
-    headers: { "User-Agent": "RikkaHub-PC" },
-  });
-  // GitHub returns 302 with Location: /<owner>/<repo>/releases/tag/v<tag> on success.
-  const location = res.headers.get("location") ?? "";
-  if (!location) {
-    throw new Error(`No redirect from ${url} (status ${res.status})`);
-  }
-  const match = location.match(/\/releases\/tag\/v?([^/?#]+)/i);
-  if (!match) {
-    throw new Error(`Unrecognized release redirect target: ${location}`);
-  }
-  const tag = match[1].replace(/^v/i, "");
-  const absoluteHtmlUrl = location.startsWith("http") ? location : `https://github.com${location}`;
-  return { tag, htmlUrl: absoluteHtmlUrl };
-}
-
-// Look for a previously-downloaded installer for this exact version in the temp dir so the
-// UI can offer "直接安装" without re-downloading. Matched first by canonical filename, then
-// by any *.exe whose name embeds the version tag (tolerates users moving/renaming files).
-// Returns null if isNewer is false (don't surface stale installers).
-//
-// 仅 Windows 调用(buildResponse 里按平台过滤):Linux 的更新是 tar.gz,需要解压后才能
-// apply,缓存的 tar.gz 没法直接用,所以 Linux 走"每次重新下载解压"的路径,见 update/download。
-function probeCachedInstaller(fileName: string, tag: string, isNewer: boolean): string | null {
-  if (!isNewer || !fileName) return null;
-  try {
-    const tmpDir = updatesCacheDir;
-    if (!existsSync(tmpDir)) return null;
-    const canonical = join(tmpDir, fileName);
-    if (existsSync(canonical) && statSync(canonical).size > 0) {
-      return canonical;
-    }
-    for (const entry of readdirSync(tmpDir)) {
-      if (!/\.exe$/i.test(entry)) continue;
-      if (tag && !entry.includes(tag)) continue;
-      const candidate = join(tmpDir, entry);
-      try {
-        if (statSync(candidate).size > 0) return candidate;
-      } catch { /* ignore */ }
-    }
-  } catch (cacheErr) {
-    console.warn("[update/check] cache scan failed:", cacheErr);
-  }
-  return null;
 }
 
 /** Compare two dotted-version strings. Returns -1/0/1 like `a - b`. Tolerates "v" prefix,
