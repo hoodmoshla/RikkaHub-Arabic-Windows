@@ -2,6 +2,7 @@ import { MupdfModule, JsonValue, Model, Provider, WebDavConfig, S3Config, ProxyM
 import { compareSemver, id, uniqueStrings, cloneJson, textFromParts, formatLocalDate, formatLocalTime, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, formatKeyLocal, getStringArray, isRecord, mergeById, safeJsonStringify, backupStamp, stripHtml, domainOfUrl, faviconForUrl, guessMimeFromExt, extensionFromMime, mergeObjects, safeJsonParse, visibleTextFromMessage, visibleReasoningFromMessage } from "./foundation/utils";
 import { sourceRootDir, executableDir, rootDir, dataDir, filesDir, skillsDir, customFontsDir, statePath, conversationsDbPath, skipVersionPath, updatesCacheDir, memoryDir, globalMemoryPath, assistantMemoryPath, pendingMemoryPath, deviceIdPath, MODELS_DEV_CACHE_PATH } from "./foundation/paths";
 import { RUNTIME_PLATFORM, RUNNING_IN_CONTAINER, osType, tempDir } from "./foundation/platform";
+import { applyEffectiveProxy, classifyProxyError, friendlyRequestError, installProxyFetchInterceptor, proxyStatusPayload, readWindowsSystemProxy, resolveEffectiveProxy, setActualServingPort, shouldBypassProxy } from "./foundation/net";
 
 import { createHash, createHmac } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -1836,347 +1837,13 @@ function clearNodeBroadcast(conversation: Conversation, node: MessageNode) {
   pendingBroadcasts.delete(key);
 }
 
-// === Effective proxy resolution ============================================================
-// Two-tier model so non-technical users get zero-config behavior, while power users keep full
-// control via 设置 → 代理:
-//
-//   1. If the user filled in `settings.proxyConfig.url` → use it verbatim (with optional
-//      basic-auth credentials composed into the URL).
-//   2. Otherwise, read Windows registry (HKCU\…\Internet Settings\ProxyServer) the same way
-//      browsers and Clash/V2Ray "规则代理 / 系统代理" mode set it. This is the path that
-//      "just works" for users who have a proxy tool running.
-//
-// ⚠️ Bun fetch 在进程首次网络请求时快照 HTTPS_PROXY/HTTP_PROXY/NO_PROXY env 并永久锁定,
-// 之后运行时改 env 不读 (实测 Bun 1.3.13)。所以"写 env 让 fetch 自动走代理"的路线在运行时
-// 切换代理 / 降级 / mode 切换场景下失效。改为: 启动时清空 env 防 Bun 锁定 (见
-// installProxyFetchInterceptor), 拦截 globalThis.fetch, per-request 按当前代理状态显式传
-// `proxy` 选项。env 只在容器 (mode=env) 场景保留 —— 让 Bun 快照 docker 注入的 HTTPS_PROXY。
-
-let lastDetectedSystemProxy: string | undefined;
-// 实际监听端口(Bun.serve 绑定后赋值)。端口顺延后可能与 preferredPort 不同,
-// proxyStatusPayload 返回给前端用于显示"当前运行端口"(P2-5)。
-let actualServingPort: number | undefined;
-
-function parseProxyServerValue(value: string): string | undefined {
-  if (!value) return undefined;
-  // `ProxyServer` can be either a single endpoint ("127.0.0.1:7890") or per-protocol
-  // ("http=127.0.0.1:7890;https=127.0.0.1:7891;ftp=..."). Prefer the https= variant for
-  // outbound API calls; fall back to http= or the bare endpoint.
-  if (value.includes("=")) {
-    const map = new Map<string, string>();
-    for (const piece of value.split(";")) {
-      const [k, v] = piece.split("=");
-      if (k && v) map.set(k.trim().toLowerCase(), v.trim());
-    }
-    // P0-3: 不 fallback 到 socks=。Bun fetch 只支持 http/https 代理, 把 SOCKS 端口当
-    // HTTP 代理用会导致 CONNECT 握手挂起。注册表只有 socks= 时返回 undefined(等同无系统代理)。
-    const target = map.get("https") ?? map.get("http");
-    if (!target) return undefined;
-    return /^https?:\/\//i.test(target) ? target : `http://${target}`;
-  }
-  return /^https?:\/\//i.test(value) ? value : `http://${value}`;
-}
-
-function readWindowsSystemProxy(): string | undefined {
-  if (process.platform !== "win32") return undefined;
-  try {
-    const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
-    const enableProc = Bun.spawnSync(["reg", "query", key, "/v", "ProxyEnable"]);
-    if (enableProc.exitCode !== 0) return undefined;
-    const enableOut = new TextDecoder().decode(enableProc.stdout ?? new Uint8Array());
-    if (!/ProxyEnable\s+REG_DWORD\s+0x1/i.test(enableOut)) return undefined;
-    const serverProc = Bun.spawnSync(["reg", "query", key, "/v", "ProxyServer"]);
-    if (serverProc.exitCode !== 0) return undefined;
-    const serverOut = new TextDecoder().decode(serverProc.stdout ?? new Uint8Array());
-    const match = serverOut.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
-    if (!match) return undefined;
-    return parseProxyServerValue(match[1].trim());
-  } catch {
-    return undefined;
-  }
-}
-
-// Linux 桌面 GNOME 代理读取(gsettings)。仅处理 mode='manual'(明确主机端口);
-// 'none' 返回 undefined; 'auto'(PAC) 不支持(我们不实现 PAC 解析)。
-// KDE 暂不支持, 用户可在 UI 手动填代理(mode=manual)。
-function readGnomeProxy(): string | undefined {
-  if (process.platform !== "linux") return undefined;
-  try {
-    const run = (args: string[]) =>
-      Bun.spawnSync(["gsettings", ...args], { stdout: "pipe", stderr: "ignore" });
-    const modeRaw = run(["get", "org.gnome.system.proxy", "mode"]).stdout?.toString().trim();
-    if (!modeRaw || modeRaw === "'none'") return undefined;
-    if (modeRaw !== "'manual'") return undefined; // 'auto'(PAC) 未实现
-    const host = run(["get", "org.gnome.system.proxy.http", "host"]).stdout?.toString().trim().replace(/^'|'$/g, "");
-    const port = run(["get", "org.gnome.system.proxy.http", "port"]).stdout?.toString().trim();
-    if (!host || !port || host === "''" || port === "0") return undefined;
-    return `http://${host}:${port}`;
-  } catch {
-    return undefined;
-  }
-}
-
-// 统一的系统代理读取入口(auto 模式调用): Windows 读注册表, Linux 桌面读 GNOME。
-// Docker 容器返回 undefined(容器代理走 env, 由 mode=env 处理, 不走 auto)。
-//
-// 带 2s TTL 缓存: auto 模式下每个 fetch 请求都调本函数, 裸调会每请求 spawnSync 两次 reg
-// query (Win) / gsettings (Linux), 同步阻塞后端主线程几十毫秒。模型流式 + 工具调用 burst
-// 时一回合可能十几次 fetch, 这些注册表读取串行累加会让对话明显卡顿。缓存让 TTL 窗口内的
-// 请求共用一次读取。代理开关变更有最多 TTL 的滞后, 与设置页 3s 轮询叠加, 用户体感基本即时。
-// 手动"检测"按钮(/settings/proxy/detect)直接调底层 readWindowsSystemProxy 绕过缓存,
-// 保证用户主动操作拿到的是最新值。
-let systemProxyCache: { value: string | undefined; ts: number } | null = null;
-const SYSTEM_PROXY_TTL_MS = 2000;
-function readSystemProxy(): string | undefined {
-  const now = Date.now();
-  if (systemProxyCache && now - systemProxyCache.ts < SYSTEM_PROXY_TTL_MS) {
-    return systemProxyCache.value;
-  }
-  let value: string | undefined;
-  if (RUNTIME_PLATFORM === "win") value = readWindowsSystemProxy();
-  else if (RUNTIME_PLATFORM === "linux" && !RUNNING_IN_CONTAINER) value = readGnomeProxy();
-  systemProxyCache = { value, ts: now };
-  return value;
-}
-
-function composeProxyUrl(base: string, username: string, password: string): string {
-  const trimmed = base.trim();
-  if (!trimmed) return "";
-  if (!username && !password) return trimmed;
-  try {
-    const url = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
-    // The WHATWG URL setter encodes the value itself — don't pre-encode or we end up
-    // double-escaping characters like "@" in `user@example.com` into "user%2540example.com".
-    if (username) url.username = username;
-    if (password) url.password = password;
-    return url.toString();
-  } catch {
-    return trimmed;
-  }
-}
-
-function resolveEffectiveProxy(): { url: string | undefined; source: "manual" | "system" | "env" | "none" } {
-  const cfg = state?.settings?.proxyConfig;
-  const mode = cfg?.mode ?? "auto";
-
-  if (mode === "direct") {
-    // 强制直连: 完全忽略系统代理声明, 用户显式选择的逃生口
-    return { url: undefined, source: "none" };
-  }
-
-  if (mode === "env") {
-    // 完全由 env 控制(Docker): 读当前 env 值用于展示, 不由我们写入(applyEffectiveProxy 也是 no-op)
-    const envUrl = process.env.HTTPS_PROXY?.trim() || process.env.HTTP_PROXY?.trim();
-    return { url: envUrl || undefined, source: envUrl ? "env" : "none" };
-  }
-
-  if (mode === "manual") {
-    const manual = cfg?.url?.trim();
-    if (manual) {
-      return { url: composeProxyUrl(manual, cfg!.username ?? "", cfg!.password ?? ""), source: "manual" };
-    }
-    return { url: undefined, source: "none" };
-  }
-
-  // mode === "auto": 跟随系统代理(Windows 注册表 / GNOME gsettings)
-  const system = readSystemProxy();
-  lastDetectedSystemProxy = system;
-  if (system) return { url: system, source: "system" };
-  return { url: undefined, source: "none" };
-}
-
-function applyEffectiveProxy() {
-  // 代理的 per-request 应用由 installProxyFetchInterceptor 安装的拦截器负责。
-  // 此函数仅做日志输出, 保留调用点不变 (updateSettings / settings/proxy POST 都调它)。
-  const mode = state?.settings?.proxyConfig?.mode ?? "auto";
-  if (mode === "env") {
-    const envUrl = process.env.HTTPS_PROXY?.trim() || process.env.HTTP_PROXY?.trim();
-    console.log(envUrl ? `[proxy] env: ${redactProxyForLog(envUrl)}` : "[proxy] env: direct (no HTTPS_PROXY)");
-    return;
-  }
-  const { url, source } = resolveEffectiveProxy();
-  console.log(url ? `[proxy] ${source}: ${redactProxyForLog(url)}` : "[proxy] direct (no proxy)");
-}
-
-// bypassRules 匹配 (逻辑移植自 opencode proxy-from-env 的 shouldProxy + kelivo CIDR)。
-// localhost/127.0.0.1/::1 永远 bypass (硬编码, 即使没配 rules); 用户 rules 支持精确域名 /
-// 通配 (*.example.com / .example.com) / host:port 端口限定 / IPv4 CIDR 网段 (10.0.0.0/8)。
-// CIDR 仅当 target 是 IP 字面量时生效 (域名请求时拿到的是域名不是 IP, CIDR 没法判断)。
-function shouldBypassProxy(targetUrl: string, userRules: string): boolean {
-  let hostname: string;
-  let port: number;
-  try {
-    const u = new URL(targetUrl);
-    hostname = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    port = u.port ? parseInt(u.port, 10) : u.protocol === "https:" || u.protocol === "wss:" ? 443 : 80;
-  } catch {
-    return false; // URL 解析不出, 不 bypass (让请求正常发出, 由调用方处理错误)
-  }
-  const noProxy = `localhost,127.0.0.1,::1,${userRules}`.toLowerCase();
-  for (const rule of noProxy.split(/[,\s]/)) {
-    const trimmed = rule.trim();
-    if (!trimmed) continue;
-    const parsed = trimmed.match(/^(.+):(\d+)$/);
-    const rh = parsed ? parsed[1] : trimmed;
-    const rp = parsed ? parseInt(parsed[2], 10) : 0;
-    if (rp && rp !== port) continue; // 端口限定的规则, 端口不匹配跳过
-    if (rh === "*") return true; // 全 bypass
-    if (rh.includes("/")) {
-      // CIDR 网段 (10.0.0.0/8): target 必须是 IPv4 字面量
-      if (ipInCidr(hostname, rh)) return true;
-      continue;
-    }
-    if (rh.startsWith("*")) {
-      // *.example.com 匹配 example.com 及子域
-      if (hostname === rh.slice(2) || hostname.endsWith(rh.slice(1))) return true;
-    } else if (rh.startsWith(".")) {
-      // .example.com 匹配子域
-      if (hostname.endsWith(rh)) return true;
-    } else {
-      if (hostname === rh) return true;
-    }
-  }
-  return false;
-}
-
-// IPv4 点分十进制 → 无符号 32 位整数。非法格式返回 null。
-function ipv4ToInt(ip: string): number | null {
-  const parts = ip.split(".");
-  if (parts.length !== 4) return null;
-  let n = 0;
-  for (const p of parts) {
-    const v = Number(p);
-    if (!Number.isInteger(v) || v < 0 || v > 255) return null;
-    n = n * 256 + v;
-  }
-  return n >>> 0;
-}
-
-// IPv4 CIDR 网段匹配 (移植自 kelivo _matchesCidr, 简化为仅 IPv4)。
-// cidr 格式 "10.0.0.0/8"; prefix 0 = 全匹配, 32 = 精确 IP。
-function ipInCidr(ip: string, cidr: string): boolean {
-  const ci = cidr.indexOf("/");
-  if (ci < 0) return false;
-  const net = cidr.slice(0, ci).trim();
-  const prefix = parseInt(cidr.slice(ci + 1).trim(), 10);
-  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
-  const ipInt = ipv4ToInt(ip);
-  const netInt = ipv4ToInt(net);
-  if (ipInt === null || netInt === null) return false;
-  if (prefix === 0) return true;
-  const mask = prefix === 32 ? 0xffffffff : ((1 << prefix) - 1) << (32 - prefix);
-  return ((ipInt & mask) >>> 0) === ((netInt & mask) >>> 0);
-}
-
-// Bun fetch 在进程首次网络请求时快照 HTTPS_PROXY/HTTP_PROXY/NO_PROXY env 并永久锁定
-// (实测 Bun 1.3.13)。本函数在 server 启动早期 (首次 fetch 前) 安装拦截:
-//   - 非容器部署: 清空 env 防 Bun 锁定旧代理
-//   - 容器部署 (mode=env): 保留 docker 注入的 HTTPS_PROXY, 让 Bun 快照它
-//   - 替换 globalThis.fetch, per-request 按当前代理状态显式传 proxy 选项
-function installProxyFetchInterceptor(): void {
-  if (!RUNNING_IN_CONTAINER) {
-    delete process.env.HTTPS_PROXY;
-    delete process.env.HTTP_PROXY;
-    delete process.env.https_proxy;
-    delete process.env.http_proxy;
-    delete process.env.NO_PROXY;
-    delete process.env.no_proxy;
-  }
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = function (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) {
-    // 调用方已显式传 proxy (如 /settings/proxy/test 端点): 尊重, 不拦截
-    const explicitProxy = (init as (RequestInit & { proxy?: string }) | undefined)?.proxy;
-    if (explicitProxy !== undefined) {
-      return originalFetch(input, init);
-    }
-    let target = "";
-    if (typeof input === "string") target = input;
-    else if (input instanceof URL) target = input.href;
-    else if (input instanceof Request) target = input.url;
-    const cfg = state?.settings?.proxyConfig;
-    const mode = cfg?.mode ?? "auto";
-    let proxy: string | undefined;
-    // env 模式 (Docker): 不注入, 让 Bun 用启动时快照的 docker env。
-    // direct: 强制直连。其余 (auto/manual): 按当前 resolveEffectiveProxy + bypass 决定。
-    if (mode !== "env" && mode !== "direct") {
-      const { url } = resolveEffectiveProxy();
-      if (url && !shouldBypassProxy(target, cfg?.bypassRules ?? "")) {
-        proxy = url;
-      }
-    }
-    if (proxy) {
-      return originalFetch(input, { ...(init as RequestInit), proxy } as RequestInit & { proxy: string });
-    }
-    return originalFetch(input, init);
-  } as typeof fetch;
-}
-
-function redactProxyForLog(url: string): string {
-  try {
-    const parsed = new URL(url);
-    if (parsed.password) parsed.password = "***";
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
-// P1-6: 识别 fetch 错误是否疑似代理问题(ECONNREFUSED/ECONNRESET/407/CONNECT 失败等)。
-// 有代理时返回友好提示(替代泛化"请求失败:..."), 无代理返回 null(走原"请求失败"逻辑)。
-// 这是横向覆盖所有 provider 流式调用的最小注入点 —— send 端点 catch 调它即可。
-function classifyProxyError(err: unknown): string | null {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (!/ECONNREFUSED|ECONNRESET|EPIPE|_tunnel|proxy connect|407|Unable to connect|fetch failed/i.test(msg)) {
-    return null;
-  }
-  const { url, source } = resolveEffectiveProxy();
-  if (!url && source === "none") return null; // 无代理, 是普通网络/API 问题, 不冒充代理错误
-  const display = url ? redactProxyForLog(url) : "系统代理";
-  return `代理连接失败 (${display}) —— 请检查代理地址 / 端口 / 密码是否正确, 或在 设置 → 代理 中切换为「直连」模式。\n[原始错误] ${msg}`;
-}
-
-// 测试端点(供应商 / 搜索 / 图片 / 流式)共用的错误信息构造: 命中代理错误给友好提示,
-// 否则用原始消息。供应商/搜索测试的请求路径与对话相同(都走 installProxyFetchInterceptor),
-// 但各自的 catch 只报"请求未能发送", 代理错误被埋没在一堆可能原因里 —— 套这层让代理问题
-// 在所有页面都给出一致的精准提示。
-function friendlyRequestError(err: unknown): string {
-  return classifyProxyError(err) ?? (err instanceof Error ? err.message : String(err));
-}
-
-function proxyStatusPayload() {
-  const { url, source } = resolveEffectiveProxy();
-  // Strip credentials from the URL we send back to the UI — the UI shows the username/password
-  // fields separately, no need to echo them in the "active proxy" footer.
-  let displayUrl: string | undefined;
-  if (url) {
-    try {
-      const parsed = new URL(url);
-      parsed.username = "";
-      parsed.password = "";
-      displayUrl = parsed.toString().replace(/\/$/, "");
-    } catch {
-      displayUrl = url;
-    }
-  }
-  return {
-    activeUrl: displayUrl ?? null,
-    source, // "manual" | "system" | "env" | "none"
-    detectedSystemProxy: lastDetectedSystemProxy ?? null,
-    // 当前 mode 与容器标记, 前端据此决定 UI 分支(如 containerMode 锁定 mode=env 只读)
-    mode: state?.settings?.proxyConfig?.mode ?? "auto",
-    containerMode: RUNNING_IN_CONTAINER,
-    // 实际运行端口(顺延后可能与 preferredPort 不同), 前端口 Card 显示
-    runningPort: actualServingPort ?? null,
-  };
-}
-
 let state = loadState();
 state.launchCount += 1;
 
 // 必须在首次 fetch 之前安装 (Bun.serve 接受请求之前), 否则首个请求触发 env 快照锁定。
 // 清空 env (非容器) + 拦截 globalThis.fetch, per-request 按当前代理状态显式传 proxy。
-installProxyFetchInterceptor();
-applyEffectiveProxy();
+installProxyFetchInterceptor(() => state.settings.proxyConfig);
+applyEffectiveProxy(state.settings.proxyConfig);
 
 // Async write queue — serializes saves so two callers can't race the temp-file rename
 // dance, but each write is non-blocking on the event loop so other HTTP handlers (image
@@ -14289,7 +13956,7 @@ function startAsrRealtimeSession(client: any, providerId?: string) {
     const cfg = state?.settings?.proxyConfig;
     const mode = cfg?.mode ?? "auto";
     if (mode === "env" || mode === "direct") return undefined;
-    const { url } = resolveEffectiveProxy();
+    const { url } = resolveEffectiveProxy(state.settings.proxyConfig);
     if (!url) return undefined;
     if (shouldBypassProxy(endpoint, cfg?.bypassRules ?? "")) return undefined;
     return url;
@@ -14596,7 +14263,7 @@ async function generateAnswer(conversation: Conversation, regenerateAtNodeId?: s
       return;
     }
     const rawContent = err instanceof Error ? err.message : String(err);
-    const proxyHint = classifyProxyError(err);
+    const proxyHint = classifyProxyError(err, state.settings.proxyConfig);
     const failureText = proxyHint ?? `请求失败：${rawContent}`;
     applyOutputTransforms(currentMessage, assistant);
     finishReasoningParts(currentMessage);
@@ -14660,14 +14327,14 @@ function truncateConversationForRegenerate(conversation: Conversation, messageId
 function updateSettings(next: Settings) {
   // 代理配置变化时记一条日志。实际生效由 fetch 拦截器 per-request 现读 resolveEffectiveProxy 保证,
   // 无需手动刷新 env / 探测 —— 配置变化下一次请求自动跟上。
-  const prevProxyUrl = resolveEffectiveProxy().url;
+  const prevProxyUrl = resolveEffectiveProxy(state.settings.proxyConfig).url;
   state.settings = next;
   saveState();
   broadcastSettings();
   broadcastList();
-  const newProxyUrl = resolveEffectiveProxy().url;
+  const newProxyUrl = resolveEffectiveProxy(state.settings.proxyConfig).url;
   if (newProxyUrl !== prevProxyUrl) {
-    applyEffectiveProxy();
+    applyEffectiveProxy(state.settings.proxyConfig);
   }
 }
 
@@ -15407,7 +15074,7 @@ async function routeApi(request: Request, url: URL) {
       }
       return json(result);
     } catch (err) {
-      return error(friendlyRequestError(err), 502);
+      return error(friendlyRequestError(err, state.settings.proxyConfig), 502);
     }
   }
   const searchDelete = path.match(/^settings\/search\/service\/([^/]+)$/);
@@ -15525,7 +15192,7 @@ async function routeApi(request: Request, url: URL) {
           ok: false,
           status: 0,
           endpoint: endpointFor(providerItem),
-          preview: friendlyRequestError(err),
+          preview: friendlyRequestError(err, state.settings.proxyConfig),
         })));
       }
       markProviderTestResult(providerItem, result.models, checks);
@@ -15540,7 +15207,7 @@ async function routeApi(request: Request, url: URL) {
         preview: result.preview,
       });
     } catch (err) {
-      return error(friendlyRequestError(err), 502);
+      return error(friendlyRequestError(err, state.settings.proxyConfig), 502);
     }
   }
 
@@ -15568,7 +15235,7 @@ async function routeApi(request: Request, url: URL) {
         image: { url: generated.url, mime: generated.mime, fileName: generated.fileName },
       });
     } catch (err) {
-      return error(friendlyRequestError(err), 502);
+      return error(friendlyRequestError(err, state.settings.proxyConfig), 502);
     } finally {
       state.settings.imageGenerationModelId = previousImageId;
     }
@@ -15602,7 +15269,7 @@ async function routeApi(request: Request, url: URL) {
               ok: false,
               status: 0,
               endpoint: endpointFor(providerItem),
-              preview: friendlyRequestError(err),
+              preview: friendlyRequestError(err, state.settings.proxyConfig),
             }));
             checks.push(check);
             send("check", check);
@@ -15619,7 +15286,7 @@ async function routeApi(request: Request, url: URL) {
             preview: result.preview,
           });
         } catch (err) {
-          send("error", { error: friendlyRequestError(err) });
+          send("error", { error: friendlyRequestError(err, state.settings.proxyConfig) });
         } finally {
           controller.close();
         }
@@ -16332,7 +15999,7 @@ async function routeApi(request: Request, url: URL) {
           const items = await webDavListBackups(state.settings.webDavConfig);
           send("done", { status: "ok", fileName: result.fileName, size: result.size, items });
         } catch (err) {
-          send("error", { error: friendlyRequestError(err) });
+          send("error", { error: friendlyRequestError(err, state.settings.proxyConfig) });
         } finally {
           controller.close();
         }
@@ -16353,7 +16020,7 @@ async function routeApi(request: Request, url: URL) {
           });
           send("done", { status: "restored", settings: state.settings });
         } catch (err) {
-          send("error", { error: friendlyRequestError(err) });
+          send("error", { error: friendlyRequestError(err, state.settings.proxyConfig) });
         } finally {
           controller.close();
         }
@@ -16424,7 +16091,7 @@ async function routeApi(request: Request, url: URL) {
           const items = await s3ListBackups(state.settings.s3Config);
           send("done", { status: "ok", fileName: result.fileName, size: result.size, items });
         } catch (err) {
-          send("error", { error: friendlyRequestError(err) });
+          send("error", { error: friendlyRequestError(err, state.settings.proxyConfig) });
         } finally {
           controller.close();
         }
@@ -16445,7 +16112,7 @@ async function routeApi(request: Request, url: URL) {
           });
           send("done", { status: "restored", settings: state.settings });
         } catch (err) {
-          send("error", { error: friendlyRequestError(err) });
+          send("error", { error: friendlyRequestError(err, state.settings.proxyConfig) });
         } finally {
           controller.close();
         }
@@ -16466,8 +16133,8 @@ async function routeApi(request: Request, url: URL) {
     }
     const proxyConfig = normalizeProxyConfig(body);
     updateSettings({ ...state.settings, proxyConfig });
-    applyEffectiveProxy();
-    return json({ status: "ok", config: proxyConfig, ...proxyStatusPayload() });
+    applyEffectiveProxy(state.settings.proxyConfig);
+    return json({ status: "ok", config: proxyConfig, ...proxyStatusPayload(state.settings.proxyConfig) });
   }
   if (path === "settings/port" && request.method === "POST") {
     const body = await readJson<{ port?: number | null }>(request).catch(
@@ -16485,12 +16152,12 @@ async function routeApi(request: Request, url: URL) {
     return json({ detected: detected ?? null });
   }
   if (path === "settings/proxy/status" && request.method === "GET") {
-    return json(proxyStatusPayload());
+    return json(proxyStatusPayload(state.settings.proxyConfig));
   }
   if (path === "settings/proxy/test" && request.method === "POST") {
     // 测试当前生效代理能否真的连通。显式传 proxy 选项绕过 env —— 否则降级态下 env 已清,
     // fetch 会直连成功, 误判成"代理通了"。用户可指定测试 URL (默认 generate_204 轻量快速)。
-    const { url } = resolveEffectiveProxy();
+    const { url } = resolveEffectiveProxy(state.settings.proxyConfig);
     if (!url) return json({ ok: false, error: "no_proxy" });
     let testUrl = "https://www.gstatic.com/generate_204";
     try {
@@ -17216,7 +16883,7 @@ async function routeApi(request: Request, url: URL) {
       });
       return json({ status: "ok", images });
     } catch (err) {
-      return error(friendlyRequestError(err), 502);
+      return error(friendlyRequestError(err, state.settings.proxyConfig), 502);
     }
   }
   const generatedImageDelete = path.match(/^images\/([^/]+)$/);
@@ -17406,7 +17073,7 @@ const { server, port } = (() => {
 // Machine-readable marker parsed by the Tauri shell (src-tauri/src/lib.rs) to learn which port
 // the sidecar actually bound to — the shell navigates the webview here when 8080 was taken.
 // Keep it a single line with the exact `RIKKAHUB_PORT:<port>` prefix.
-actualServingPort = port;
+setActualServingPort(port);
 console.log(`RIKKAHUB_PORT:${port}`);
 
 console.log(`RikkaHub PC server running at http://localhost:${port}`);

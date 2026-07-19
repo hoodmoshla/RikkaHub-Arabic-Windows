@@ -1,0 +1,315 @@
+// foundation/net.ts — 代理与网络工具
+// 纪律：纯函数，不直接读取 state；调用方通过参数传入 ProxyConfig。
+
+import { RUNNING_IN_CONTAINER, RUNTIME_PLATFORM } from "./platform";
+import type { ProxyConfig } from "./types";
+
+export let lastDetectedSystemProxy: string | undefined;
+// 实际监听端口（Bun.serve 绑定后赋值）。端口顺延后可能与 preferredPort 不同，
+// proxyStatusPayload 返回给前端用于显示"当前运行端口"。
+let actualServingPort: number | undefined;
+export function setActualServingPort(port: number) { actualServingPort = port; }
+export function getActualServingPort(): number | undefined { return actualServingPort; }
+
+export function parseProxyServerValue(value: string): string | undefined {
+  if (!value) return undefined;
+  // `ProxyServer` can be either a single endpoint ("127.0.0.1:7890") or per-protocol
+  // ("http=127.0.0.1:7890;https=127.0.0.1:7891;ftp=..."). Prefer the https= variant for
+  // outbound API calls; fall back to http= or the bare endpoint.
+  if (value.includes("=")) {
+    const map = new Map<string, string>();
+    for (const piece of value.split(";")) {
+      const [k, v] = piece.split("=");
+      if (k && v) map.set(k.trim().toLowerCase(), v.trim());
+    }
+    // P0-3: 不 fallback 到 socks=。Bun fetch 只支持 http/https 代理，把 SOCKS 端口当
+    // HTTP 代理用会导致 CONNECT 握手挂起。注册表只有 socks= 时返回 undefined（等同无系统代理）。
+    const target = map.get("https") ?? map.get("http");
+    if (!target) return undefined;
+    return /^https?:\/\//i.test(target) ? target : `http://${target}`;
+  }
+  return /^https?:\/\//i.test(value) ? value : `http://${value}`;
+}
+
+export function readWindowsSystemProxy(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  try {
+    const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+    const enableProc = Bun.spawnSync(["reg", "query", key, "/v", "ProxyEnable"]);
+    if (enableProc.exitCode !== 0) return undefined;
+    const enableOut = new TextDecoder().decode(enableProc.stdout ?? new Uint8Array());
+    if (!/ProxyEnable\s+REG_DWORD\s+0x1/i.test(enableOut)) return undefined;
+    const serverProc = Bun.spawnSync(["reg", "query", key, "/v", "ProxyServer"]);
+    if (serverProc.exitCode !== 0) return undefined;
+    const serverOut = new TextDecoder().decode(serverProc.stdout ?? new Uint8Array());
+    const match = serverOut.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
+    if (!match) return undefined;
+    return parseProxyServerValue(match[1].trim());
+  } catch {
+    return undefined;
+  }
+}
+
+// Linux 桌面 GNOME 代理读取（gsettings）。仅处理 mode='manual'（明确主机端口）；
+// 'none' 返回 undefined；'auto'（PAC）不支持（我们不实现 PAC 解析）。
+// KDE 暂不支持，用户可在 UI 手动填代理（mode=manual）。
+export function readGnomeProxy(): string | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const run = (args: string[]) =>
+      Bun.spawnSync(["gsettings", ...args], { stdout: "pipe", stderr: "ignore" });
+    const modeRaw = run(["get", "org.gnome.system.proxy", "mode"]).stdout?.toString().trim();
+    if (!modeRaw || modeRaw === "'none'") return undefined;
+    if (modeRaw !== "'manual'") return undefined; // 'auto'（PAC）未实现
+    const host = run(["get", "org.gnome.system.proxy.http", "host"]).stdout?.toString().trim().replace(/^'|'$/g, "");
+    const port = run(["get", "org.gnome.system.proxy.http", "port"]).stdout?.toString().trim();
+    if (!host || !port || host === "''" || port === "0") return undefined;
+    return `http://${host}:${port}`;
+  } catch {
+    return undefined;
+  }
+}
+
+let systemProxyCache: { value: string | undefined; ts: number } | null = null;
+export const SYSTEM_PROXY_TTL_MS = 2000;
+export function readSystemProxy(): string | undefined {
+  const now = Date.now();
+  if (systemProxyCache && now - systemProxyCache.ts < SYSTEM_PROXY_TTL_MS) {
+    return systemProxyCache.value;
+  }
+  let value: string | undefined;
+  if (RUNTIME_PLATFORM === "win") value = readWindowsSystemProxy();
+  else if (RUNTIME_PLATFORM === "linux" && !RUNNING_IN_CONTAINER) value = readGnomeProxy();
+  systemProxyCache = { value, ts: now };
+  return value;
+}
+
+export function composeProxyUrl(base: string, username: string, password: string): string {
+  const trimmed = base.trim();
+  if (!trimmed) return "";
+  if (!username && !password) return trimmed;
+  try {
+    const url = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
+    // The WHATWG URL setter encodes the value itself — don't pre-encode or we end up
+    // double-escaping characters like "@" in `user@example.com` into "user%2540example.com".
+    if (username) url.username = username;
+    if (password) url.password = password;
+    return url.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+export function resolveEffectiveProxy(cfg: ProxyConfig): { url: string | undefined; source: "manual" | "system" | "env" | "none" } {
+  const mode = cfg?.mode ?? "auto";
+
+  if (mode === "direct") {
+    // 强制直连：完全忽略系统代理声明，用户显式选择的逃生口
+    return { url: undefined, source: "none" };
+  }
+
+  if (mode === "env") {
+    // 完全由 env 控制（Docker）：读当前 env 值用于展示，不由我们写入（applyEffectiveProxy 也是 no-op）
+    const envUrl = process.env.HTTPS_PROXY?.trim() || process.env.HTTP_PROXY?.trim();
+    return { url: envUrl || undefined, source: envUrl ? "env" : "none" };
+  }
+
+  if (mode === "manual") {
+    const manual = cfg?.url?.trim();
+    if (manual) {
+      return { url: composeProxyUrl(manual, cfg!.username ?? "", cfg!.password ?? ""), source: "manual" };
+    }
+    return { url: undefined, source: "none" };
+  }
+
+  // mode === "auto": 跟随系统代理（Windows 注册表 / GNOME gsettings）
+  const system = readSystemProxy();
+  lastDetectedSystemProxy = system;
+  if (system) return { url: system, source: "system" };
+  return { url: undefined, source: "none" };
+}
+
+export function applyEffectiveProxy(cfg: ProxyConfig) {
+  // 代理的 per-request 应用由 installProxyFetchInterceptor 安装的拦截器负责。
+  // 此函数仅做日志输出，保留调用点不变（updateSettings / settings/proxy POST 都调它）。
+  const mode = cfg?.mode ?? "auto";
+  if (mode === "env") {
+    const envUrl = process.env.HTTPS_PROXY?.trim() || process.env.HTTP_PROXY?.trim();
+    console.log(envUrl ? `[proxy] env: ${redactProxyForLog(envUrl)}` : "[proxy] env: direct (no HTTPS_PROXY)");
+    return;
+  }
+  const { url, source } = resolveEffectiveProxy(cfg);
+  console.log(url ? `[proxy] ${source}: ${redactProxyForLog(url)}` : "[proxy] direct (no proxy)");
+}
+
+// bypassRules 匹配（逻辑移植自 opencode proxy-from-env 的 shouldProxy + kelivo CIDR）。
+// localhost/127.0.0.1/::1 永远 bypass（硬编码，即使没配 rules）；用户 rules 支持精确域名 /
+// 通配（*.example.com / .example.com）/ host:port 端口限定 / IPv4 CIDR 网段（10.0.0.0/8）。
+// CIDR 仅当 target 是 IP 字面量时生效（域名请求时拿到的是域名不是 IP，CIDR 没法判断）。
+export function shouldBypassProxy(targetUrl: string, userRules: string): boolean {
+  let hostname: string;
+  let port: number;
+  try {
+    const u = new URL(targetUrl);
+    hostname = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    port = u.port ? parseInt(u.port, 10) : u.protocol === "https:" || u.protocol === "wss:" ? 443 : 80;
+  } catch {
+    return false; // URL 解析不出，不 bypass（让请求正常发出，由调用方处理错误）
+  }
+  const noProxy = `localhost,127.0.0.1,::1,${userRules}`.toLowerCase();
+  for (const rule of noProxy.split(/[,\s]/)) {
+    const trimmed = rule.trim();
+    if (!trimmed) continue;
+    const parsed = trimmed.match(/^(.+):(\d+)$/);
+    const rh = parsed ? parsed[1] : trimmed;
+    const rp = parsed ? parseInt(parsed[2], 10) : 0;
+    if (rp && rp !== port) continue; // 端口限定的规则，端口不匹配跳过
+    if (rh === "*") return true; // 全 bypass
+    if (rh.includes("/")) {
+      // CIDR 网段（10.0.0.0/8）：target 必须是 IPv4 字面量
+      if (ipInCidr(hostname, rh)) return true;
+      continue;
+    }
+    if (rh.startsWith("*")) {
+      // *.example.com 匹配 example.com 及子域
+      if (hostname === rh.slice(2) || hostname.endsWith(rh.slice(1))) return true;
+    } else if (rh.startsWith(".")) {
+      // .example.com 匹配子域
+      if (hostname.endsWith(rh)) return true;
+    } else {
+      if (hostname === rh) return true;
+    }
+  }
+  return false;
+}
+
+// IPv4 点分十进制 → 无符号 32 位整数。非法格式返回 null。
+export function ipv4ToInt(ip: string): number | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const p of parts) {
+    const v = Number(p);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return null;
+    n = n * 256 + v;
+  }
+  return n >>> 0;
+}
+
+// IPv4 CIDR 网段匹配（移植自 kelivo _matchesCidr，简化为仅 IPv4）。
+// cidr 格式 "10.0.0.0/8"；prefix 0 = 全匹配，32 = 精确 IP。
+export function ipInCidr(ip: string, cidr: string): boolean {
+  const ci = cidr.indexOf("/");
+  if (ci < 0) return false;
+  const net = cidr.slice(0, ci).trim();
+  const prefix = parseInt(cidr.slice(ci + 1).trim(), 10);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  const ipInt = ipv4ToInt(ip);
+  const netInt = ipv4ToInt(net);
+  if (ipInt === null || netInt === null) return false;
+  if (prefix === 0) return true;
+  const mask = prefix === 32 ? 0xffffffff : ((1 << prefix) - 1) << (32 - prefix);
+  return ((ipInt & mask) >>> 0) === ((netInt & mask) >>> 0);
+}
+
+// Bun fetch 在进程首次网络请求时快照 HTTPS_PROXY/HTTP_PROXY/NO_PROXY env 并永久锁定
+// （实测 Bun 1.3.13）。本函数在 server 启动早期（首次 fetch 前）安装拦截：
+//   - 非容器部署：清空 env 防 Bun 锁定旧代理
+//   - 容器部署（mode=env）：保留 docker 注入的 HTTPS_PROXY，让 Bun 快照它
+//   - 替换 globalThis.fetch，per-request 按当前代理状态显式传 proxy 选项
+export function installProxyFetchInterceptor(getProxyConfig: () => ProxyConfig): void {
+  if (!RUNNING_IN_CONTAINER) {
+    delete process.env.HTTPS_PROXY;
+    delete process.env.HTTP_PROXY;
+    delete process.env.https_proxy;
+    delete process.env.http_proxy;
+    delete process.env.NO_PROXY;
+    delete process.env.no_proxy;
+  }
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = function (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) {
+    // 调用方已显式传 proxy（如 /settings/proxy/test 端点）：尊重，不拦截
+    const explicitProxy = (init as (RequestInit & { proxy?: string }) | undefined)?.proxy;
+    if (explicitProxy !== undefined) {
+      return originalFetch(input, init);
+    }
+    let target = "";
+    if (typeof input === "string") target = input;
+    else if (input instanceof URL) target = input.href;
+    else if (input instanceof Request) target = input.url;
+    const cfg = getProxyConfig();
+    const mode = cfg?.mode ?? "auto";
+    let proxy: string | undefined;
+    // env 模式（Docker）：不注入，让 Bun 用启动时快照的 docker env。
+    // direct：强制直连。其余（auto/manual）：按当前 resolveEffectiveProxy + bypass 决定。
+    if (mode !== "env" && mode !== "direct") {
+      const { url } = resolveEffectiveProxy(cfg);
+      if (url && !shouldBypassProxy(target, cfg?.bypassRules ?? "")) {
+        proxy = url;
+      }
+    }
+    if (proxy) {
+      return originalFetch(input, { ...(init as RequestInit), proxy } as RequestInit & { proxy: string });
+    }
+    return originalFetch(input, init);
+  } as typeof fetch;
+}
+
+export function redactProxyForLog(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.password) parsed.password = "***";
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+// P1-6: 识别 fetch 错误是否疑似代理问题（ECONNREFUSED/ECONNRESET/407/CONNECT 失败等）。
+// 有代理时返回友好提示（替代泛化"请求失败：..."），无代理返回 null（走原"请求失败"逻辑）。
+// 这是横向覆盖所有 provider 流式调用的最小注入点 —— send 端点 catch 调它即可。
+export function classifyProxyError(err: unknown, cfg: ProxyConfig): string | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!/ECONNREFUSED|ECONNRESET|EPIPE|_tunnel|proxy connect|407|Unable to connect|fetch failed/i.test(msg)) {
+    return null;
+  }
+  const { url, source } = resolveEffectiveProxy(cfg);
+  if (!url && source === "none") return null; // 无代理，是普通网络/API 问题，不冒充代理错误
+  const display = url ? redactProxyForLog(url) : "系统代理";
+  return `代理连接失败 (${display}) —— 请检查代理地址 / 端口 / 密码是否正确，或在 设置 → 代理 中切换为「直连」模式。\n[原始错误] ${msg}`;
+}
+
+// 测试端点（供应商 / 搜索 / 图片 / 流式）共用的错误信息构造：命中代理错误给友好提示，
+// 否则用原始消息。供应商/搜索测试的请求路径与对话相同（都走 installProxyFetchInterceptor），
+// 但各自的 catch 只报"请求未能发送"，代理错误被埋没在一堆可能原因里 —— 套这层让代理问题
+// 在所有页面都给出一致的精准提示。
+export function friendlyRequestError(err: unknown, cfg: ProxyConfig): string {
+  return classifyProxyError(err, cfg) ?? (err instanceof Error ? err.message : String(err));
+}
+
+export function proxyStatusPayload(cfg: ProxyConfig) {
+  const { url, source } = resolveEffectiveProxy(cfg);
+  // Strip credentials from the URL we send back to the UI — the UI shows the username/password
+  // fields separately, no need to echo them in the "active proxy" footer.
+  let displayUrl: string | undefined;
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      parsed.username = "";
+      parsed.password = "";
+      displayUrl = parsed.toString().replace(/\/$/, "");
+    } catch {
+      displayUrl = url;
+    }
+  }
+  return {
+    activeUrl: displayUrl ?? null,
+    source, // "manual" | "system" | "env" | "none"
+    detectedSystemProxy: lastDetectedSystemProxy ?? null,
+    // 当前 mode 与容器标记，前端据此决定 UI 分支（如 containerMode 锁定 mode=env 只读）
+    mode: cfg?.mode ?? "auto",
+    containerMode: RUNNING_IN_CONTAINER,
+    // 实际运行端口（顺延后可能与 preferredPort 不同），前端口 Card 显示
+    runningPort: actualServingPort ?? null,
+  };
+}
