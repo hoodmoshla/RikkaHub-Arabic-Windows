@@ -1,0 +1,22 @@
+// app-config/index.ts — 应用级 UI/主题/快捷键/端口/JWT 配置切片
+// 纪律：只依赖 foundation/types/settings，不依赖 server.ts 或全局 state。
+
+import type { AppConfig, Settings } from "../foundation/types/settings";
+
+export type { AppConfig } from "../foundation/types/settings";
+
+export function selectAppConfig(settings: Settings): AppConfig {
+  return {
+    dynamicColor: settings.dynamicColor,
+    themeId: settings.themeId,
+    developerMode: settings.developerMode,
+    displaySetting: settings.displaySetting,
+    preferredPort: settings.preferredPort,
+    keybindings: settings.keybindings,
+    webServerJwtEnabled: settings.webServerJwtEnabled,
+  };
+}
+
+export function patchAppConfig(settings: Settings, patch: Partial<AppConfig>): Settings {
+  return { ...settings, ...patch };
+}

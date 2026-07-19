@@ -1,0 +1,523 @@
+// foundation/types.ts — 共享类型（从 server.ts 迁出）
+// 纪律：本文件只放类型，不放运行时值，不引入副作用。
+
+import type { Settings } from "./settings";
+
+export type MupdfModule = typeof import("mupdf");
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export interface Model {
+  id: string;
+  modelId: string;
+  displayName: string;
+  type: "CHAT" | "IMAGE" | "EMBEDDING";
+  inputModalities: string[];
+  outputModalities: string[];
+  abilities: string[];
+  tools: JsonValue[];
+}
+
+export interface Provider {
+  type: "openai" | "google" | "claude";
+  id: string;
+  enabled: boolean;
+  name: string;
+  builtIn: boolean;
+  shortDescription: string;
+  description: string;
+  apiKey: string;
+  baseUrl: string;
+  chatCompletionsPath?: string;
+  useResponseApi?: boolean;
+  // 对齐安卓 commit e63d017：OpenAI provider 是否在历史回放里把
+  // assistant 的 reasoning_content 也回传给上游。默认 true（保持过去行为）；
+  // 用户可以为某些代理/平台关闭，避免它们因为不识别这个字段而拒绝请求。
+  includeHistoryReasoning?: boolean;
+  promptCaching?: boolean;
+  promptCacheTtl?: "5m" | "1h";
+  testPassed?: boolean;
+  testPassedAt?: number;
+  models: Model[];
+  balanceOption: {
+    enabled: boolean;
+    apiPath: string;
+    resultPath: string;
+  };
+}
+
+export interface WebDavConfig {
+  url: string;
+  username: string;
+  password: string;
+  path: string;
+  items: string[];
+}
+
+export interface S3Config {
+  endpoint: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  bucket: string;
+  region: string;
+  pathStyle: boolean;
+  items: string[];
+}
+
+export type ProxyMode = "auto" | "manual" | "direct" | "env";
+
+export interface ProxyConfig {
+  // 代理模式:
+  // - auto: 跟随系统代理(Windows 注册表 / GNOME gsettings), 配合活性探测自动降级
+  // - manual: 使用 url 指定的固定代理, 同样支持活性探测与降级
+  // - direct: 强制直连, 完全忽略系统代理声明(系统代理失效时的逃生口)
+  // - env: 完全由 HTTPS_PROXY/HTTP_PROXY 环境变量控制(Docker 部署), UI 只读
+  mode: ProxyMode;
+  // manual 模式下的代理地址(auto/direct/env 下被忽略)。空字符串在 manual 下等同直连。
+  url: string;
+  // Optional HTTP basic auth credentials, applied as `http://user:pass@host:port` when
+  // forwarding to upstream APIs. 仅 manual 模式生效。
+  username: string;
+  password: string;
+  // 代理绕过规则: 逗号分隔的域名/通配符列表, 命中的 URL 直连不走代理。
+  // 例 "*.internal.corp,10.0.0.0/8,git.company.com"。localhost/127.0.0.1/::1 永远 bypass(硬编码)。
+  // 仅 mode=auto/manual 生效; env(Docker) / direct 忽略。
+  bypassRules: string;
+}
+
+export interface Assistant {
+  id: string;
+  chatModelId: string | null;
+  name: string;
+  avatar: Record<string, JsonValue>;
+  useAssistantAvatar: boolean;
+  tags: string[];
+  systemPrompt: string;
+  temperature: number | null;
+  topP: number | null;
+  contextMessageSize: number;
+  streamOutput: boolean;
+  enableMemory: boolean;
+  useGlobalMemory: boolean;
+  enableRecentChatsReference: boolean;
+  messageTemplate: string;
+  presetMessages: JsonValue[];
+  quickMessageIds: string[];
+  regexes: JsonValue[];
+  reasoningLevel: string;
+  maxTokens: number | null;
+  customHeaders: JsonValue[];
+  customBodies: JsonValue[];
+  mcpServers: string[];
+  // Per-assistant MCP-tool overrides. Outer key = MCP server id, inner key = tool name, value
+  // = { enable?: boolean, needsApproval?: boolean }. PC-only extension (Android's McpPicker
+  // is server-level only). Override semantics:
+  //   - global tool.enable === false  → tool hidden everywhere, override irrelevant
+  //   - global tool.enable === true && override.enable === false  → tool not exposed to the
+  //     model for THIS assistant (other assistants still see it)
+  //   - override.needsApproval !== undefined  → overrides the global per-tool needsApproval
+  //     for THIS assistant (true forces approval prompt, false skips it)
+  //   - missing override entry → behave as the global tool definition
+  // Default `{}` = inherit everything from the global tool list.
+  mcpToolOverrides: Record<string, Record<string, { enable?: boolean; needsApproval?: boolean }>>;
+  localTools: JsonValue[];
+  background: string | null;
+  backgroundOpacity: number;
+  modeInjectionIds: string[];
+  lorebookIds: string[];
+  enabledSkills: string[];
+  enableTimeReminder: boolean;
+  allowConversationSystemPrompt: boolean;
+}
+
+export interface AsrProvider {
+  type: "openai_realtime" | "dashscope" | "volcengine";
+  id: string;
+  name: string;
+  apiKey: string;
+  websocketUrl: string;
+  model?: string;
+  language?: string;
+  prompt?: string;
+  sampleRate?: number;
+  vadThreshold?: number;
+  prefixPaddingMs?: number;
+  silenceDurationMs?: number;
+  resourceId?: string;
+}
+
+export interface TtsProvider {
+  type: "system" | "openai" | "gemini" | "minimax" | "qwen" | "groq" | "xai" | "mimo";
+  id: string;
+  name: string;
+  apiKey: string;
+  baseUrl: string;
+  model?: string;
+  voice?: string;
+  voiceName?: string;
+  voiceId?: string;
+  language?: string;
+  languageType?: string;
+  emotion?: string;
+  speed?: number;
+  speechRate?: number;
+  pitch?: number;
+}
+
+export interface Message {
+  id: string;
+  role: "USER" | "ASSISTANT" | "SYSTEM" | "TOOL";
+  parts: JsonValue[];
+  annotations: JsonValue[];
+  createdAt: string;
+  finishedAt: string | null;
+  modelId: string | null;
+  usage: JsonValue | null;
+  translation: string | null;
+}
+
+export interface MessageNode {
+  id: string;
+  messages: Message[];
+  selectIndex: number;
+}
+
+export interface AssistantMemory {
+  id: number;
+  assistantId: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// 记忆写入策略(模型提议记忆时应用如何处理)。阶段 3 启用,阶段 2 先加字段。
+// - "ask":进待确认队列,用户事后确认存哪层(默认)
+// - "always_assistant":直接存为当前助手记忆(助手层未启用则降级 ask)
+// - "always_global":直接存为全局记忆(全局未启用则降级 ask)
+// - "readonly":不暴露写入工具,只注入已有记忆
+export type WriteStrategy = "ask" | "always_assistant" | "always_global" | "readonly";
+
+export interface MemorySettings {
+  globalEnabled: boolean;       // 启用全局记忆层(注入 + 可写)
+  writeStrategy: WriteStrategy;
+}
+
+export interface Conversation {
+  id: string;
+  assistantId: string;
+  systemPrompt: string | null;
+  title: string;
+  messages: MessageNode[];
+  truncateIndex: number;
+  chatSuggestions: string[];
+  isPinned: boolean;
+  createAt: number;
+  updateAt: number;
+}
+
+export interface RequestLog {
+  id: string;
+  at: number;
+  providerId: string;
+  providerName: string;
+  url: string;
+  ok: boolean;
+  status: number;
+  error?: string;
+  kind?: string;
+  durationMs?: number;
+  method?: string;
+  requestHeaders?: Record<string, string>;
+  requestBody?: string;
+  responseBody?: string;
+  responseHeaders?: Record<string, string>;
+  toolName?: string;
+}
+
+// 与 logs 解耦的持久化请求统计累加器。logs 已改为内存态(重启清空,对齐移动端),
+// 但统计页的累计指标必须跨重启保留,所以单独维护计数器,每次请求完成时累加。
+export interface RequestStats {
+  totalRequests: number;
+  failedRequests: number;
+  byProvider: Record<string, { ok: number; failed: number }>;
+  byGroup: Record<string, { ok: number; failed: number }>;
+}
+
+export interface DailyStat {
+  date: string;
+  messages: number;
+  conversations: number;
+  characters: number;
+}
+
+export interface StoredFile {
+  id: number;
+  path: string;
+  fileName: string;
+  mime: string;
+  size: number;
+  extractedText?: string;
+  extractedAt?: number;
+}
+
+export interface GeneratedImage {
+  id: string;
+  prompt: string;
+  fileId: number;
+  url: string;
+  fileName: string;
+  mime: string;
+  model: string;
+  modelId: string;
+  type: "image_generation" | "image_edit";
+  sourceFileIds: number[];
+  sourcePaths?: string;
+  createdAt: number;
+}
+
+export interface State {
+  settings: Settings;
+  conversations: Conversation[];
+  files: StoredFile[];
+  generatedImages: GeneratedImage[];
+  logs: RequestLog[];
+  stats: RequestStats;
+  // 1.3.2 起,记忆由 memoryStore 管理(memory/ 目录),不再落进 state.json。这两个字段
+  // 保留 optional 仅为兼容 normalizeState 解析旧 state.json / 备份 incoming;迁移完成后从 state delete。
+  memories?: AssistantMemory[];
+  nextFileId: number;
+  nextMemoryId?: number;
+  nextGeneratedImageId: number;
+  launchCount: number;
+  // 一次性迁移记录。每个已应用的迁移 id 存一次,防止启动时反复执行会覆盖用户后续
+  // 手动调整的迁移(如供应商顺序重排)。老 state 没有该字段,视为空数组。
+  appliedMigrations?: string[];
+}
+
+export type SearchService = Record<string, JsonValue>;
+export type SkillMetadata = {
+  name: string;
+  description: string;
+  compatibility?: string;
+  allowedTools: string[];
+};
+
+export type GithubRelease = {
+  tag_name?: string;
+  name?: string;
+  body?: string;
+  html_url?: string;
+  assets?: { name?: string; browser_download_url?: string; size?: number }[];
+};
+
+export interface MemoryEntry {
+  id: number;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  // 来源标记(非跨端契约,备份导出时丢弃)。语义:用户手动新增/编辑过 → "manual";
+  // 模型提议且用户原样确认 → "ai"。任何手动编辑都置 manual,故 "ai" 徽章不会长期挂着已改动的记忆。
+  source: "manual" | "ai";
+}
+
+export interface GlobalMemoryFile {
+  version: 1;
+  nextMemoryId: number;
+  memories: MemoryEntry[];
+}
+
+export interface AssistantMemoryGroup {
+  assistantId: string;       // 权威键,不可变
+  assistantName: string;     // 显示快照,每次保存时从 settings 反查刷新;反查不到填 "未知助手"(M5)
+  memories: MemoryEntry[];
+}
+
+export interface AssistantMemoryFile {
+  version: 1;
+  assistants: AssistantMemoryGroup[];
+}
+
+// 阶段 3 启用;阶段 1 仅预留文件结构与类型定义。
+export interface PendingEntry {
+  pendingId: string;
+  conversationId: string;
+  conversationTitle?: string;   // 来源会话标题快照(入队时取,与会话改名/删除解耦),前端确认面板展示
+  assistantId: string;
+  assistantName: string;
+  content: string;
+  proposedAt: number;
+  messageNodeId?: string;
+}
+
+export interface PendingMemoryFile {
+  version: 1;
+  pending: PendingEntry[];
+}
+
+export interface AddMemoryInput {
+  scope: "global" | "assistant";
+  assistantId?: string;       // scope=assistant 时必填
+  content: string;
+  source?: "manual" | "ai";
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+// memory SSE 推送给前端的完整快照。globalEnabled/writeStrategy 冗余(从 settings 读),
+// 让前端少订阅一个 settings SSE 源——字段冗余但读起来方便(§10.3)。
+export interface MemorySnapshot {
+  globalEnabled: boolean;
+  writeStrategy: WriteStrategy;
+  globalMemories: MemoryEntry[];
+  assistantMemories: AssistantMemoryGroup[];
+  pending: PendingEntry[];
+  pendingCount: number;
+}
+
+// ============================================================================
+// 会话活库(SQLite,1.2.6 引入)
+//
+// 会话从 state.json 搬进 rikka_hub.db,采用 Android APP 节点级 schema 的 PC 超集
+// (pc_conversation / pc_message_node,含 system_prompt / truncate_index——Android 备份库
+// 没有这两列)。内存模型 state.conversations 不变,启动时从这里整批读入;运行时:
+//   - 流式热路径:只 upsert 当前在长的那个 pc_message_node 行(脏标记 + 200ms 节流),
+//     SQLite 只把脏页追加进 WAL,开销与总会话数/总数据量无关——这是根除"每 200ms 全量
+//     重写 state.json"的关键。
+//   - 非流式变更(改名/编辑/分叉/导入/流结束):persistConversation 全量 reconcile。
+//
+// 与下方 insertConversationsIntoDb(写 Android 的 ConversationEntity/message_node)是不同
+// 文件、不同表名、不同 schema:备份库须 Android 兼容(有损、无 PC 超集列),活库须 PC 完整。
+// 备份始终从内存 state.conversations 现场生成,代码不动。详见设计文档。
+// ============================================================================
+
+// 活库行类型(SELECT 结果)。is_pinned 存 0/1;system_prompt 空 string 对应 null。
+export interface PcConversationRow {
+  id: string;
+  assistant_id: string;
+  title: string;
+  system_prompt: string;
+  truncate_index: number;
+  suggestions: string;
+  is_pinned: number;
+  create_at: number;
+  update_at: number;
+}
+export interface PcMessageNodeRow {
+  id: string;
+  node_index: number;
+  messages: string;
+  select_index: number;
+}
+
+export type GitHubSkillInfo = { owner: string; repo: string; branch: string; path: string };
+export type GitHubSkillFile = { relativePath: string; downloadUrl: string };
+
+export type ApiMessage = Record<string, any>;
+
+export interface XmlToken {
+  type: number;
+  name?: string;
+  attrs?: Record<string, string>;
+  text?: string;
+  depth: number;
+}
+
+// ── 字体系统 ───────────────────────────────────────────────────────────────
+// 三层来源:
+//   builtin — 随应用分发。repo 根 fonts/ 经 Tauri resources 打到 executableDir/fonts/,
+//             跟 icons 完全同构;dev 时从 rootDir/fonts/ 读。
+//   custom  — 用户上传,存在 pc-data/fonts/(gitignored,更新不覆盖)。
+//   system  — 系统已装字体。Linux 走 `fc-list`,Windows 走 PowerShell +
+//             System.Drawing.Text.InstalledFontCollection(真枚举,非硬编码清单);
+//             两者都失败才降级到 COMMON_FONTS_FALLBACK。
+// 关键:@font-face 的 font-family 名由我们掌控(= 文件名 stem),所以不解析字体文件
+// 内部的 name 表——绕开了"从二进制读真实族名"这个最烦的活,也保证 @font-face 名与 CSS
+// font-family 链首项严格一致(浏览器靠这个名字匹配 @font-face 规则加载文件)。
+
+export interface FontWeightFile {
+  fileName: string;   // 字体文件名
+  weight: number;     // CSS font-weight:100-900
+  style: "normal" | "italic";
+  format?: string;    // woff2/truetype/...(@font-face 的 format() 提示)
+}
+export interface FontEntry {
+  id: string;        // catalog 内唯一:`builtin:<family>` / `custom:<file>` / `system:<name>`
+  label: string;     // 下拉框显示名
+  cssName: string;   // @font-face 的 font-family 名(builtin/custom);system 即族名本身。
+                     // 必须与 family 链首项一致——浏览器靠它匹配 @font-face。
+  family: string;    // 完整 CSS font-family 值(含 fallback 链)——root.tsx 实际注入 CSS 变量的值
+  source: "builtin" | "custom" | "system";
+  // 字体族由一个或多个文件组成。单字重字体只有一个元素。多字重字体(HarmonyOS Sans 6 个
+  // 字重)共享同一 cssName,每个文件声明对应 font-weight,这样浏览器遇到 <b>/700 自动
+  // 挑 Bold 文件,而不是用 Regular 合成假粗体。
+  weights: FontWeightFile[];
+}
+
+// 可选 builtin 清单:repo 根 fonts/manifest.json。
+// 两种写法:
+//   1) 单文件映射(向后兼容老 manifest):"<file>": { label?, family? }
+//   2) 字重族定义(一个 family 下多个文件):"<id>": { label, family, weights:[{file,weight,style?}] }
+//      weights 里每个 file 必须真实存在于 fonts/ 目录;family 是共享的 @font-face 名。
+export type ManifestWeight = { file: string; weight: number; style?: "normal" | "italic" };
+export interface ManifestEntry {
+  label?: string;
+  family?: string;
+  weights?: ManifestWeight[];
+}
+export type BuiltinManifest = Record<string, ManifestEntry>;
+
+export type StreamHooks = {
+  message?: Message;
+  conversation?: Conversation;
+  node?: MessageNode;
+};
+
+// Per-round Claude SSE reader. Returns the assistant content blocks captured during the stream
+// plus stop_reason + usage. Text/thinking/input_json deltas are emitted to the live UI as they
+// arrive. This is the building block of streamClaudeChatWithTools — we drive a tool loop on top
+// where the outer code dispatches tools and re-streams.
+export type ClaudeStreamRoundResult = {
+  blocks: Array<Record<string, any>>;
+  textOut: string;
+  thinkingOut: string;
+  stopReason: string | null;
+  usage: Message["usage"] | undefined;
+  raw: string;
+};
+
+// ===== Google / Gemini 流式 + 工具循环 =====
+// 镜像安卓 GoogleProvider.streamText：通过 streamGenerateContent?alt=sse 拿到 SSE，
+// 逐 chunk 解析 candidates[].content.parts，区分 thought(reasoning) / text / inlineData(图片)
+// / functionCall，并把增量推给实时 UI。返回该轮的聚合结果供工具循环驱动。
+export type GoogleStreamRoundResult = {
+  textOut: string;
+  thinkingOut: string;
+  functionCalls: Array<{ id: string; name: string; args: Record<string, JsonValue>; thoughtSignature?: string }>;
+  modelParts: Record<string, JsonValue>[];
+  usage: Message["usage"] | undefined;
+  raw: string;
+};
+
+export interface AuxiliaryTextOptions {
+  maxTokens?: number | null;
+  temperature?: number | null;
+  topP?: number | null;
+  reasoningLevel?: string | null;
+  customBody?: Record<string, any>;
+  stream?: boolean;
+  onDelta?: (text: string) => void;
+}
+
+export interface AsrRealtimeSession {
+  provider: AsrProvider;
+  client: any;
+  upstream: WebSocket | null;
+  completedTranscripts: string[];
+  partialTranscripts: Map<string, string>;
+  lastText: string;
+  pendingFrames: ArrayBuffer[];
+  opened: boolean;
+  finished: boolean;
+  startedAt: number;
+  volcSequence: number;
+}
