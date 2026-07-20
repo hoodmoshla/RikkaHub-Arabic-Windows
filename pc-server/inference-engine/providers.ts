@@ -4,7 +4,7 @@
 
 import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Assistant, JsonValue, Message, Provider, ApiMessage, ClaudeStreamRoundResult, GoogleStreamRoundResult } from "../foundation/types";
-import { id, isRecord, safeJsonParse, visibleReasoningFromMessage, visibleTextFromMessage } from "../foundation/utils";
+import { id, isRecord, reasoningFromParts, safeJsonParse, visibleReasoningFromMessage, visibleTextFromMessage } from "../foundation/utils";
 import { MODELS_DEV_CACHE_PATH } from "../foundation/paths";
 import { initialApprovalState, toolNeedsApproval } from "../tools/approval";
 import { openAiToolOutput, partsToToolResultText, resolvedToolOutput, toolExecutionErrorPayload } from "../tools/format";
@@ -1570,14 +1570,6 @@ export function readOpenAiSseTextIntoMessage(rawText: string, hooks: StreamHooks
     }
   }
   return { content, reasoning };
-}
-
-export function reasoningFromParts(parts: JsonValue[]) {
-  return parts
-    .map((part) => (isRecord(part) && part.type === "reasoning" ? String(part.reasoning ?? "") : ""))
-    .filter(Boolean)
-    .join("\n")
-    .trim();
 }
 
 export function compactAssistantToolMessage(content: string, toolCalls: any[], reasoningContent = "") {

@@ -194,3 +194,26 @@ export function visibleReasoningFromMessage(msg: Message | undefined) {
         .join("")
     : "";
 }
+
+export function reasoningFromParts(parts: JsonValue[]) {
+  return parts
+    .map((part) => (isRecord(part) && part.type === "reasoning" ? String(part.reasoning ?? "") : ""))
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+export function message(role: Message["role"], parts: JsonValue[], modelId: string | null = null): Message {
+  const now = new Date().toISOString();
+  return {
+    id: id(),
+    role,
+    parts,
+    annotations: [],
+    createdAt: now,
+    finishedAt: role === "ASSISTANT" ? now : null,
+    modelId,
+    usage: null,
+    translation: null,
+  };
+}

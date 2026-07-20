@@ -1,6 +1,6 @@
 import { MupdfModule, JsonValue, Model, Provider, WebDavConfig, S3Config, ProxyMode, ProxyConfig, Assistant, AsrProvider, TtsProvider, Message, MessageNode, AssistantMemory, WriteStrategy, MemorySettings, Conversation, RequestLog, RequestStats, DailyStat, StoredFile, GeneratedImage, State, SearchService, SkillMetadata, GithubRelease, MemoryEntry, GlobalMemoryFile, AssistantMemoryGroup, AssistantMemoryFile, PendingEntry, PendingMemoryFile, AddMemoryInput, MemorySnapshot, GitHubSkillInfo, GitHubSkillFile, ApiMessage, XmlToken, FontWeightFile, FontEntry, ManifestWeight, ManifestEntry, BuiltinManifest, StreamHooks, AuxiliaryTextOptions, AsrRealtimeSession } from "./foundation/types";
 import type { Settings } from "./foundation/types/settings";
-import { compareSemver, id, uniqueStrings, cloneJson, textFromParts, formatLocalDate, formatLocalTime, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, formatKeyLocal, getStringArray, isRecord, mergeById, safeJsonStringify, backupStamp, stripHtml, domainOfUrl, faviconForUrl, guessMimeFromExt, extensionFromMime, mergeObjects, safeJsonParse, visibleTextFromMessage, visibleReasoningFromMessage } from "./foundation/utils";
+import { compareSemver, id, uniqueStrings, cloneJson, textFromParts, formatLocalDate, formatLocalTime, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, formatKeyLocal, getStringArray, isRecord, mergeById, safeJsonStringify, backupStamp, stripHtml, domainOfUrl, faviconForUrl, guessMimeFromExt, extensionFromMime, mergeObjects, safeJsonParse, visibleTextFromMessage, visibleReasoningFromMessage, message, reasoningFromParts } from "./foundation/utils";
 import { sourceRootDir, executableDir, rootDir, dataDir, filesDir, skillsDir, customFontsDir, statePath, conversationsDbPath, skipVersionPath, updatesCacheDir, memoryDir, globalMemoryPath, assistantMemoryPath, pendingMemoryPath, deviceIdPath, MODELS_DEV_CACHE_PATH } from "./foundation/paths";
 import { RUNTIME_PLATFORM, RUNNING_IN_CONTAINER, osType, tempDir } from "./foundation/platform";
 import { applyEffectiveProxy, classifyProxyError, friendlyRequestError, installProxyFetchInterceptor, proxyStatusPayload, readWindowsSystemProxy, resolveEffectiveProxy, setActualServingPort, shouldBypassProxy } from "./foundation/net";
@@ -143,7 +143,6 @@ import {
   readOpenAiResponseIntoMessage,
   readOpenAiSseTextIntoMessage,
   readOpenAiStream,
-  reasoningFromParts,
   responseApiToolCallItems,
   responseEventToDelta,
   responseMessageText,
@@ -1423,21 +1422,6 @@ function presetMessageNodes(assistant: Assistant): MessageNode[] {
       return { id: id(), messages: [msg], selectIndex: 0 };
     })
     .filter(Boolean) as MessageNode[];
-}
-
-function message(role: Message["role"], parts: JsonValue[], modelId: string | null = null): Message {
-  const now = new Date().toISOString();
-  return {
-    id: id(),
-    role,
-    parts,
-    annotations: [],
-    createdAt: now,
-    finishedAt: role === "ASSISTANT" ? now : null,
-    modelId,
-    usage: null,
-    translation: null,
-  };
 }
 
 function finishMessage(msg: Message, parts: JsonValue[], usage: JsonValue | null = msg.usage) {
