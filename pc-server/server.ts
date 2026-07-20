@@ -53,6 +53,23 @@ import {
   toolOutputForApproval,
 } from "./tools/format";
 import {
+  defaultSkillContent,
+  exportSkills,
+  importSkills,
+  listSkillFiles,
+  listSkills,
+  openAiLocalTools as openAiLocalToolsCore,
+  openAiMcpTools as openAiMcpToolsCore,
+  openAiSearchTools as openAiSearchToolsCore,
+  openAiSkillTools as openAiSkillToolsCore,
+  readSkillBody,
+  readSkillContent,
+  safeSkillDir,
+  safeSkillFile,
+  skillMetadataFromFile,
+  parseSkillFrontmatter,
+} from "./tools";
+import {
   apiContentFromParts,
   apiContentText,
   appendAssistantApiMessages,
@@ -1726,140 +1743,6 @@ function reorderByIds<T extends JsonValue>(items: T[], ids: string[]) {
   return [...ordered, ...rest];
 }
 
-function safeSkillDir(skillName: string) {
-  const name = skillName.trim();
-  if (!name || name === "." || name === ".." || /[\\/]/.test(name)) return null;
-  const root = resolve(skillsDir);
-  const target = resolve(root, name);
-  if (dirname(target) !== root) return null;
-  return target;
-}
-
-function safeSkillFile(skillName: string, relativePath: string) {
-  if (!relativePath.trim()) return null;
-  const dir = safeSkillDir(skillName);
-  if (!dir) return null;
-  const root = resolve(dir);
-  const target = resolve(root, relativePath);
-  if (target !== root && !target.startsWith(root + "\\") && !target.startsWith(root + "/")) return null;
-  return target;
-}
-
-function parseSkillFrontmatter(content: string) {
-  const result: Record<string, string> = {};
-  if (!content.startsWith("---")) return result;
-  const match = content.slice(3).match(/\r?\n---(?:\r?\n|$)/);
-  if (!match || match.index === undefined) return result;
-  const yaml = content.slice(3, 3 + match.index).trim();
-  for (const line of yaml.split(/\r?\n/)) {
-    const colon = line.indexOf(":");
-    if (colon <= 0) continue;
-    const key = line.slice(0, colon).trim();
-    const value = line.slice(colon + 1).trim().replace(/^"|"$/g, "");
-    if (key && value) result[key] = value;
-  }
-  return result;
-}
-
-function extractSkillBody(content: string) {
-  if (!content.startsWith("---")) return content;
-  const match = content.slice(3).match(/\r?\n---(?:\r?\n|$)/);
-  if (!match || match.index === undefined) return content;
-  return content.slice(3 + match.index + match[0].length).replace(/^[\r\n]+/, "");
-}
-
-function skillMetadataFromFile(skillName: string): SkillMetadata | null {
-  const file = safeSkillFile(skillName, "SKILL.md");
-  if (!file || !existsSync(file)) return null;
-  const content = readFileSync(file, "utf8");
-  const frontmatter = parseSkillFrontmatter(content);
-  const name = frontmatter.name?.trim();
-  const description = frontmatter.description?.trim();
-  if (!name || !description) return null;
-  return {
-    name,
-    description,
-    compatibility: frontmatter.compatibility,
-    allowedTools: frontmatter["allowed-tools"]?.split(/\s+/).filter(Boolean) ?? [],
-  };
-}
-
-function listSkills(): SkillMetadata[] {
-  mkdirSync(skillsDir, { recursive: true });
-  return readdirSync(skillsDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => skillMetadataFromFile(entry.name))
-    .filter(Boolean) as SkillMetadata[];
-}
-
-function readSkillBody(skillName: string) {
-  const file = safeSkillFile(skillName, "SKILL.md");
-  if (!file || !existsSync(file)) return null;
-  return extractSkillBody(readFileSync(file, "utf8"));
-}
-
-function readSkillContent(skillName: string) {
-  const file = safeSkillFile(skillName, "SKILL.md");
-  if (!file || !existsSync(file)) return null;
-  return readFileSync(file, "utf8");
-}
-
-function listSkillFiles(skillName: string) {
-  const dir = safeSkillDir(skillName);
-  if (!dir || !existsSync(dir)) return [];
-  const root = resolve(dir);
-  const result: Array<{ path: string; size: number; type: "file" | "directory" }> = [];
-  const visit = (current: string) => {
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
-      if (entry.name.startsWith(".")) continue;
-      const full = join(current, entry.name);
-      const relativePath = resolve(full).slice(root.length + 1).replace(/\\/g, "/");
-      if (entry.isDirectory()) {
-        result.push({ path: relativePath, size: 0, type: "directory" });
-        visit(full);
-      } else {
-        result.push({ path: relativePath, size: statSync(full).size, type: "file" });
-      }
-    }
-  };
-  visit(root);
-  return result.sort((a, b) => a.path.localeCompare(b.path));
-}
-
-function exportSkills() {
-  return listSkills().map((skill) => ({ ...skill, content: readSkillContent(skill.name) ?? "" }));
-}
-
-function importSkills(skills: unknown) {
-  if (!Array.isArray(skills)) return;
-  for (const item of skills) {
-    if (!item || typeof item !== "object") continue;
-    const record = item as Record<string, unknown>;
-    const name = String(record.name ?? "").trim();
-    const dir = safeSkillDir(name);
-    if (!dir) continue;
-    mkdirSync(dir, { recursive: true });
-    const files = Array.isArray(record.files) ? record.files : [];
-    if (files.length > 0) {
-      for (const file of files) {
-        if (!isRecord(file)) continue;
-        const relativePath = String(file.path ?? "").replace(/\\/g, "/");
-        if (!relativePath || relativePath.includes("..") || relativePath.startsWith("/")) continue;
-        const target = resolve(dir, relativePath);
-        if (!target.startsWith(resolve(dir))) continue;
-        mkdirSync(dirname(target), { recursive: true });
-        writeFileSync(target, String(file.content ?? ""));
-      }
-      continue;
-    }
-    const content = String(record.content ?? "");
-    if (content) writeFileSync(join(dir, "SKILL.md"), content);
-  }
-}
-
-function defaultSkillContent(name = "new-skill") {
-  return `---\nname: ${name}\ndescription: Describe when this skill should be used\n---\n\nWrite the skill instructions here.\n`;
-}
 
 // 导出备份时剥离移动端无法识别的模型模态(AUDIO/VIDEO/DOCUMENT)。
 // 移动端 Modality 枚举只有 TEXT/IMAGE,kotlinx.serialization 反序列化 List<Modality>
@@ -4881,234 +4764,19 @@ async function runScrapeWeb(params: Record<string, JsonValue>) {
 }
 
 export function openAiSearchTools() {
-  return state.settings.enableWebSearch
-    ? [
-    {
-      type: "function",
-      function: {
-        name: "search_web",
-        description: `
-Search the web for up-to-date or specific information.
-Use this when the user asks for the latest news, current facts, or needs verification.
-Generate focused keywords and run multiple searches if needed.
-Today is ${formatKeyLocal(new Date())}.
-
-Response format:
-- items[].id (short id), title, url, text
-
-Citations:
-- After using results, add \`[citation,domain](id)\` after the sentence.
-- Multiple citations are allowed.
-- If no results are cited, omit citations.
-
-Example:
-The capital of France is Paris. [citation,example.com](abc123)
-The population is about 2.1 million. [citation,example.com](abc123) [citation,example2.com](def456)
-`.trim(),
-        parameters: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "Focused search query" },
-            // `max_results` deliberately omitted from the tool schema — see callSearchTool
-            // (server.ts:3369). The user-configured `resultSize` is the authoritative count;
-            // letting the LLM specify max_results caused most models to silently downgrade
-            // to 5 results even when the user had configured 10.
-          },
-          required: ["query"],
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "scrape_web",
-        description: `
-Scrape a URL for detailed page content.
-Use this when the user requests content from a specific page or when search snippets are insufficient.
-Avoid using it for common questions unless the user asks.
-`.trim(),
-        parameters: {
-          type: "object",
-          properties: { url: { type: "string" } },
-          required: ["url"],
-        },
-      },
-    },
-  ]
-    : [];
+  return openAiSearchToolsCore(state.settings.enableWebSearch);
 }
 
 export function openAiSkillTools(assistant: Assistant) {
-  const enabled = new Set(getStringArray(assistant.enabledSkills));
-  const available = listSkills().filter((skill) => enabled.has(skill.name));
-  if (available.length === 0) return [];
-  return [
-    {
-      type: "function",
-      function: {
-        name: "use_skill",
-        description: "Load and apply a skill to get specialized instructions or capabilities.",
-        parameters: {
-          type: "object",
-          properties: {
-            name: { type: "string", description: "The name of the skill to use" },
-            path: {
-              type: "string",
-              description: "Optional relative path to a file inside the skill directory. Omit to read the default SKILL.md instructions. Only use paths extracted from Markdown links in the SKILL.md content. Do NOT guess or infer paths.",
-            },
-          },
-          required: ["name"],
-        },
-      },
-    },
-  ];
+  return openAiSkillToolsCore(assistant, listSkills);
 }
 
 export function openAiLocalTools(assistant: Assistant) {
-  const enabled = new Set((assistant.localTools ?? []).map((tool) => isRecord(tool) ? String(tool.type ?? "") : String(tool)));
-  const tools = [];
-  // save_memory(1.3.2):模型只负责"提议"记忆,不感知层级(全局/助手对模型透明)。暴露条件:
-  //   (助手层 enableMemory 或 全局层 globalEnabled)至少一个开
-  //   且 writeStrategy !== "readonly"(只读模式不暴露,模型只看注入的已有记忆)
-  // 替代旧的 memory_tool(create/edit/delete)——v1 废弃模型 edit/delete,定位歧义从根本上绕开(N3)。
-  const canWriteMemory = (assistant.enableMemory || state.settings.memorySettings.globalEnabled)
-    && state.settings.memorySettings.writeStrategy !== "readonly";
-  if (canWriteMemory) {
-    tools.push({
-      type: "function",
-      function: {
-        name: "save_memory",
-        description: `Propose a memory to remember for future conversations.
-The user will later confirm whether and where to save it (you won't see this step).
-Use this when you notice durable facts worth remembering: preferred name, preferences,
-plans, work context, chat style, etc.
-Do NOT store sensitive info (ethnicity, religion, sexual orientation, political views,
-criminal records). Prefer checking the injected <memories> list first; if a similar one
-exists, propose the updated content anyway and the user will reconcile.
-Today is ${formatKeyLocal(new Date())}.
-Do not mention to the user that you are saving a memory.`,
-        parameters: {
-          type: "object",
-          properties: {
-            content: { type: "string", description: "The memory content to propose" },
-          },
-          required: ["content"],
-        },
-      },
-    });
-  }
-  if (enabled.has("time_info")) {
-    tools.push({
-      type: "function",
-      function: {
-        name: "get_time_info",
-        description: "Get the current local date and time info from the device. Returns year/month/day, weekday, ISO date/time strings, timezone, and timestamp.",
-        parameters: { type: "object", properties: {} },
-      },
-    });
-  }
-  if (enabled.has("javascript_engine")) {
-    tools.push({
-      type: "function",
-      function: {
-        name: "eval_javascript",
-        description: "Execute JavaScript code using QuickJS engine (ES2020). The result is the value of the last expression in the code. For calculations with decimals, use toFixed() to control precision. Console output (log/info/warn/error) is captured and returned in 'logs' field. No DOM or Node.js APIs available. Example: '1 + 2' returns 3; 'const x = 5; x * 2' returns 10.",
-        parameters: {
-          type: "object",
-          properties: { code: { type: "string", description: "JavaScript code to evaluate" } },
-          required: ["code"],
-        },
-      },
-    });
-  }
-  if (enabled.has("clipboard")) {
-    tools.push({
-      type: "function",
-      function: {
-        name: "clipboard_tool",
-        description: "Read or write plain text from the device clipboard. Use action: read or write. For write, provide text. Do NOT write to the clipboard unless the user has explicitly requested it.",
-        parameters: {
-          type: "object",
-          properties: {
-            action: { type: "string", enum: ["read", "write"], description: "Operation to perform: read or write" },
-            text: { type: "string", description: "Text to write to the clipboard (required for write)" },
-          },
-          required: ["action"],
-        },
-      },
-    });
-  }
-  if (enabled.has("tts")) {
-    tools.push({
-      type: "function",
-      function: {
-        name: "text_to_speech",
-        description: "Speak text aloud to the user using the device's text-to-speech engine. Use this when the user asks you to read something aloud, or when audio output is appropriate. The tool returns immediately; audio plays in the background on the device. Provide natural, readable text without markdown formatting.",
-        parameters: {
-          type: "object",
-          properties: { text: { type: "string", description: "The text to speak aloud" } },
-          required: ["text"],
-        },
-      },
-    });
-  }
-  if (enabled.has("ask_user")) {
-    tools.push({
-      type: "function",
-      function: {
-        name: "ask_user",
-        description: "Ask the user one or more questions when you need clarification, additional information, or confirmation. Each question can optionally provide a list of suggested options for the user to choose from. The user may select an option or provide their own free-text answer for each question. The answers will be returned as a JSON object mapping question IDs to the user's responses.",
-        parameters: {
-          type: "object",
-          properties: {
-            questions: {
-              type: "array",
-              description: "List of questions to ask the user",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string", description: "Unique identifier for this question" },
-                  question: { type: "string", description: "The question text to display to the user" },
-                  options: { type: "array", description: "Optional suggested options", items: { type: "string" } },
-                  selection_type: { type: "string", enum: ["text", "single", "multi"], description: "Answer type" },
-                },
-                required: ["id", "question"],
-              },
-            },
-          },
-          required: ["questions"],
-        },
-      },
-    });
-  }
-  return tools;
+  return openAiLocalToolsCore(assistant, state.settings.memorySettings);
 }
 
 export function openAiMcpTools(assistant: Assistant) {
-  const selected = new Set(getStringArray(assistant.mcpServers));
-  return (state.settings.mcpServers as Array<Record<string, JsonValue>>)
-    .filter((server) => selected.has(String(server.id ?? "")) && isRecord(server.commonOptions) && server.commonOptions.enable !== false)
-    .flatMap((server) => {
-      const serverId = String(server.id ?? "");
-      const serverName = String((server.commonOptions as Record<string, JsonValue>).name ?? server.id ?? "mcp");
-      const tools = Array.isArray((server.commonOptions as Record<string, JsonValue>).tools)
-        ? ((server.commonOptions as Record<string, JsonValue>).tools as JsonValue[])
-        : [];
-      // Apply both the global tool.enable filter AND the per-assistant override. A tool that
-      // the user disabled at the chat-input MCP picker for this assistant is invisible to
-      // the model on this turn — matching how the chat-input MCP server switch already hides
-      // an entire server from the model.
-      return tools.filter(isRecord)
-        .filter((tool) => isMcpToolEnabledForAssistant(assistant, serverId, tool))
-        .map((tool) => ({
-          type: "function",
-          function: {
-            name: `mcp__${String(tool.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_")}`,
-            description: String(tool.description ?? `MCP tool from ${serverName}`),
-            parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} },
-          },
-        })).filter((tool) => tool.function.name !== "mcp__");
-    });
+  return openAiMcpToolsCore(assistant, state.settings.mcpServers);
 }
 
 function headersFromMcpServer(server: Record<string, JsonValue>) {

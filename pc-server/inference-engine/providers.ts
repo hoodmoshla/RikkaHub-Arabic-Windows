@@ -33,10 +33,6 @@ import {
   conversationResponseApiInstructions,
   endpointFor,
   MAX_TOOL_STEPS,
-  openAiLocalTools,
-  openAiMcpTools,
-  openAiSearchTools,
-  openAiSkillTools,
   touchStream,
 } from "../server";
 
