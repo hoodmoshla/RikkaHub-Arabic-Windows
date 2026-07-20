@@ -8230,64 +8230,6 @@ function mergeClaudeUsage(
   };
 }
 
-async function streamClaudeChat(
-  url: string,
-  headers: Record<string, string>,
-  body: Record<string, any>,
-  providerItem: Provider,
-  signal: AbortSignal | undefined,
-  hooks: StreamHooksWithSink,
-) {
-  const started = Date.now();
-  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-  if (!response.ok) {
-    const text = await response.text();
-    addLog({
-      providerId: providerItem.id,
-      providerName: providerItem.name,
-      url,
-      ok: false,
-      status: response.status,
-      kind: "provider:chat:stream",
-      durationMs: Date.now() - started,
-      method: "POST",
-      requestHeaders: headers,
-      responseHeaders: Object.fromEntries(response.headers.entries()),
-      requestBody: jsonBody(body),
-      responseBody: textBody(text),
-      error: textBody(text),
-    });
-    throw new Error(`${providerItem.name} ${response.status}: ${text.slice(0, 500)}`);
-  }
-  let usage: Message["usage"] | undefined;
-  const full = await readClaudeStream(response, (text, raw) => {
-    if (text) addStreamText(hooks, text);
-    if (raw && isRecord(raw) && ((raw as any).usage || (raw as any).message?.usage)) {
-      const u: any = (raw as any).usage ?? (raw as any).message?.usage;
-      usage = mergeClaudeUsage(u, usage);
-    }
-  }, signal);
-  if (hooks.message && usage) {
-    if (hooks.sink) hooks.sink({ kind: "usage", usage });
-    else hooks.message.usage = usage;
-  }
-  addLog({
-    providerId: providerItem.id,
-    providerName: providerItem.name,
-    url,
-    ok: true,
-    status: response.status,
-    kind: "provider:chat:stream",
-    durationMs: Date.now() - started,
-    method: "POST",
-    requestHeaders: headers,
-    responseHeaders: Object.fromEntries(response.headers.entries()),
-    requestBody: jsonBody(body),
-    responseBody: textBody(full),
-  });
-  return full || "(empty response)";
-}
-
 async function readClaudeStreamingRound(
   response: Response,
   hooks: StreamHooksWithSink,
@@ -8347,15 +8289,21 @@ async function readClaudeStreamingRound(
             output: [],
             approvalState: initialApprovalState(String(block.name ?? ""), assistant),
           };
-          replaceLoadingReasoningWithTool(hooks.message, toolPart, hooks.sink);
+          hooks.sink?.({
+            kind: "tool_call_created",
+            toolCallId: String(block.id ?? ""),
+            toolName: String(block.name ?? ""),
+            input: "",
+            approvalState: initialApprovalState(String(block.name ?? ""), assistant),
+          });
           touchStream(hooks);
         }
       } else if (type === "text" && block.text) {
         textOut += block.text;
-        addStreamText(hooks, String(block.text));
+        hooks.sink?.({ kind: "text_delta", text: String(block.text) });
       } else if (type === "thinking" && block.thinking) {
         thinkingOut += block.thinking;
-        appendReasoningDelta(hooks, String(block.thinking));
+        hooks.sink?.({ kind: "reasoning_delta", text: String(block.thinking) });
       }
       return;
     }
@@ -8365,10 +8313,10 @@ async function readClaudeStreamingRound(
       const block = blocks.get(index) ?? {};
       if (dtype === "text_delta" && typeof delta.text === "string") {
         textOut += delta.text;
-        addStreamText(hooks, delta.text);
+        hooks.sink?.({ kind: "text_delta", text: delta.text });
       } else if (dtype === "thinking_delta" && typeof delta.thinking === "string") {
         thinkingOut += delta.thinking;
-        appendReasoningDelta(hooks, delta.thinking);
+        hooks.sink?.({ kind: "reasoning_delta", text: delta.thinking });
       } else if (dtype === "signature_delta" && typeof delta.signature === "string") {
         block.signature = String(block.signature ?? "") + delta.signature;
         blocks.set(index, block);
@@ -8653,7 +8601,7 @@ async function fetchClaudeTextWithTools(
     const text = claudeTextFromContent(content);
     if (text) {
       allContent += `${allContent ? "\n" : ""}${text}`;
-      addStreamText(hooks, text);
+      hooks.sink?.({ kind: "text_delta", text });
     }
     const toolUses = content.filter((item) => isRecord(item) && item.type === "tool_use");
     if (toolUses.length === 0) return allContent.trim() || "(empty response)";
@@ -8672,7 +8620,7 @@ async function fetchClaudeTextWithTools(
           arguments: JSON.stringify(isRecord(toolUse.input) ? toolUse.input : {}),
         },
       };
-      const toolPart: JsonValue = {
+      const toolPart: Record<string, JsonValue> = {
         type: "tool",
         toolCallId: toolCall.id,
         toolName: toolCall.function.name,
@@ -8682,7 +8630,13 @@ async function fetchClaudeTextWithTools(
       };
       if (hooks?.message) {
         finishReasoningParts(hooks.message);
-        replaceLoadingReasoningWithTool(hooks.message, toolPart, hooks.sink);
+        hooks.sink?.({
+          kind: "tool_call_created",
+          toolCallId: String(toolPart.toolCallId),
+          toolName: String(toolPart.toolName),
+          input: String(toolPart.input),
+          approvalState: toolPart.approvalState,
+        });
         touchStream(hooks);
       }
       if (hasPendingInBatch) {
@@ -8770,11 +8724,11 @@ async function readGoogleStreamingRound(
       if (typeof part.text === "string" && part.text) {
         if (part.thought === true) {
           result.thinkingOut += part.text;
-          appendReasoningDelta(hooks, part.text);
+          hooks.sink?.({ kind: "reasoning_delta", text: part.text });
         } else {
           result.textOut += part.text;
           result.modelParts.push({ text: part.text });
-          addStreamText(hooks, part.text);
+          hooks.sink?.({ kind: "text_delta", text: part.text });
         }
       } else if (isRecord(part.inlineData)) {
         const mime = String((part.inlineData as any).mimeType ?? "image/png");
@@ -8784,7 +8738,7 @@ async function readGoogleStreamingRound(
           continue;
         }
         if (data && mime.startsWith("image/")) {
-          addStreamImage(hooks, `data:${mime};base64,${data}`);
+          hooks.sink?.({ kind: "image_delta", url: `data:${mime};base64,${data}` });
         }
       } else if (isRecord(part.functionCall)) {
         const fc = part.functionCall as any;
@@ -8800,14 +8754,13 @@ async function readGoogleStreamingRound(
         });
         if (hooks.message) {
           finishReasoningParts(hooks.message);
-          replaceLoadingReasoningWithTool(hooks.message, {
-            type: "tool",
+          hooks.sink?.({
+            kind: "tool_call_created",
             toolCallId: callId,
             toolName: name,
             input: JSON.stringify(args),
-            output: [],
             approvalState: initialApprovalState(name, assistant),
-          }, hooks.sink);
+          });
           touchStream(hooks);
         }
       }
@@ -9011,7 +8964,7 @@ async function fetchOpenAiText(
     const content = completionMessageText(raw);
     if (content) {
       allContent += content;
-      addStreamText(hooks, content);
+      hooks.sink?.({ kind: "text_delta", text: content });
     }
     const toolCalls = Array.isArray(assistantMessage.tool_calls) ? assistantMessage.tool_calls : [];
     if (toolCalls.length === 0) return allContent.trim() || "(empty response)";
@@ -9030,7 +8983,13 @@ async function fetchOpenAiText(
       };
       if (hooks?.message) {
         finishReasoningParts(hooks.message);
-        replaceLoadingReasoningWithTool(hooks.message, toolPart, hooks.sink);
+        hooks.sink?.({
+          kind: "tool_call_created",
+          toolCallId: String(toolPart.toolCallId),
+          toolName: String(toolPart.toolName),
+          input: String(toolPart.input),
+          approvalState: toolPart.approvalState,
+        });
         touchStream(hooks);
       }
       if (hasPendingInBatch) {
@@ -9345,7 +9304,7 @@ function applyOpenAiDelta(
       : reasoningDelta;
     if (nextReasoning) {
       reasoning += nextReasoning;
-      appendReasoningDelta(hooks, nextReasoning, deltaMetadata);
+      hooks.sink?.({ kind: "reasoning_delta", text: nextReasoning, metadata: deltaMetadata });
     }
   }
   const contentDelta = deltaTextContent(delta);
@@ -9356,11 +9315,11 @@ function applyOpenAiDelta(
       : contentDelta;
     if (nextContent) {
       content += nextContent;
-      addStreamText(hooks, nextContent);
+      hooks.sink?.({ kind: "text_delta", text: nextContent });
     }
   }
   if (typeof delta.image_url === "string") {
-    addStreamImage(hooks, delta.image_url, isRecord(delta.metadata) ? delta.metadata as Record<string, JsonValue> : {});
+    hooks.sink?.({ kind: "image_delta", url: delta.image_url, metadata: isRecord(delta.metadata) ? delta.metadata as Record<string, JsonValue> : {} });
   }
   if (Array.isArray(delta.tool_calls)) {
     const mode = isSnapshot || delta.tool_calls.some((call: any) => call?._rikkahubSnapshot) ? "snapshot" : "delta";
@@ -9783,8 +9742,8 @@ async function readOpenAiResponseIntoMessage(
     const message = raw.choices?.[0]?.message ?? {};
     content = completionMessageText(raw);
     reasoning = String(message.reasoning_content ?? message.reasoning ?? "").trim();
-    if (reasoning) appendReasoningDelta(hooks, reasoning);
-    if (content) addStreamText(hooks, content);
+    if (reasoning) hooks.sink?.({ kind: "reasoning_delta", text: reasoning });
+    if (content) hooks.sink?.({ kind: "text_delta", text: content });
     if (Array.isArray(message.tool_calls)) {
       mergeToolCallDeltas(toolCalls, message.tool_calls.map((call: any, index: number) => ({ ...call, index })), "snapshot");
     }
@@ -9858,7 +9817,7 @@ async function fetchOpenAiTextStreaming(
       });
       if (!forceNonStream && requestBody.stream !== false && !signal?.aborted) {
         forceNonStream = true;
-        appendReasoningDelta(hooks, `\n流式连接失败，正在按非流式重试... ${detail}`);
+        hooks.sink?.({ kind: "reasoning_delta", text: `\n流式连接失败，正在按非流式重试... ${detail}` });
         round -= 1;
         continue;
       }
@@ -9905,7 +9864,7 @@ async function fetchOpenAiTextStreaming(
       });
       if (!forceNonStream && !signal?.aborted) {
         forceNonStream = true;
-        appendReasoningDelta(hooks, "\n流式连接中断，正在按非流式重试...");
+        hooks.sink?.({ kind: "reasoning_delta", text: "\n流式连接中断，正在按非流式重试..." });
         round -= 1;
         continue;
       }
@@ -9968,7 +9927,13 @@ async function fetchOpenAiTextStreaming(
       };
       if (hooks.message) {
         finishReasoningParts(hooks.message);
-        replaceLoadingReasoningWithTool(hooks.message, toolPart, hooks.sink);
+        hooks.sink?.({
+          kind: "tool_call_created",
+          toolCallId: String(toolPart.toolCallId),
+          toolName: String(toolPart.toolName),
+          input: String(toolPart.input),
+          approvalState: toolPart.approvalState,
+        });
         touchStream(hooks);
       }
       if (hasPendingInBatch) {
