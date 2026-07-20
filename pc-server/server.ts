@@ -1,12 +1,12 @@
-import { MupdfModule, JsonValue, Model, Provider, WebDavConfig, S3Config, ProxyMode, ProxyConfig, Assistant, AsrProvider, TtsProvider, Message, MessageNode, AssistantMemory, WriteStrategy, MemorySettings, Conversation, RequestLog, RequestStats, DailyStat, StoredFile, GeneratedImage, State, SearchService, SkillMetadata, GithubRelease, MemoryEntry, GlobalMemoryFile, AssistantMemoryGroup, AssistantMemoryFile, PendingEntry, PendingMemoryFile, AddMemoryInput, MemorySnapshot, GitHubSkillInfo, GitHubSkillFile, ApiMessage, XmlToken, FontWeightFile, FontEntry, ManifestWeight, ManifestEntry, BuiltinManifest, StreamHooks, AuxiliaryTextOptions, AsrRealtimeSession } from "./foundation/types";
+import { JsonValue, Model, Provider, WebDavConfig, S3Config, ProxyMode, ProxyConfig, Assistant, AsrProvider, TtsProvider, Message, MessageNode, AssistantMemory, WriteStrategy, Conversation, RequestLog, RequestStats, DailyStat, StoredFile, GeneratedImage, State, SearchService, GithubRelease, GlobalMemoryFile, AssistantMemoryFile, GitHubSkillInfo, GitHubSkillFile, ApiMessage, FontWeightFile, FontEntry, ManifestEntry, BuiltinManifest, StreamHooks, AuxiliaryTextOptions, AsrRealtimeSession } from "./foundation/types";
 import type { Settings } from "./foundation/types/settings";
-import { compareSemver, id, uniqueStrings, cloneJson, textFromParts, formatLocalDate, formatLocalTime, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, formatKeyLocal, getStringArray, isRecord, mergeById, safeJsonStringify, backupStamp, stripHtml, domainOfUrl, faviconForUrl, guessMimeFromExt, extensionFromMime, mergeObjects, safeJsonParse, visibleTextFromMessage, visibleReasoningFromMessage, message, reasoningFromParts } from "./foundation/utils";
-import { sourceRootDir, executableDir, rootDir, dataDir, filesDir, skillsDir, customFontsDir, statePath, conversationsDbPath, skipVersionPath, updatesCacheDir, memoryDir, globalMemoryPath, assistantMemoryPath, pendingMemoryPath, deviceIdPath, MODELS_DEV_CACHE_PATH } from "./foundation/paths";
-import { RUNTIME_PLATFORM, RUNNING_IN_CONTAINER, osType, tempDir } from "./foundation/platform";
+import { compareSemver, id, uniqueStrings, cloneJson, textFromParts, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, getStringArray, isRecord, mergeById, safeJsonStringify, backupStamp, stripHtml, domainOfUrl, faviconForUrl, guessMimeFromExt, extensionFromMime, message, reasoningFromParts } from "./foundation/utils";
+import { executableDir, rootDir, dataDir, filesDir, skillsDir, customFontsDir, statePath, updatesCacheDir, globalMemoryPath, assistantMemoryPath, pendingMemoryPath, deviceIdPath } from "./foundation/paths";
+import { RUNTIME_PLATFORM, RUNNING_IN_CONTAINER, tempDir } from "./foundation/platform";
 import { applyEffectiveProxy, classifyProxyError, friendlyRequestError, installProxyFetchInterceptor, proxyStatusPayload, readWindowsSystemProxy, resolveEffectiveProxy, setActualServingPort, shouldBypassProxy } from "./foundation/net";
-import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveInitialState, saveState, scheduleThrottledSaveState, setState, state, writeSlimStateJsonSync, writeSlimStateJsonSyncForMemory } from "./persistence/json-store";
-import { GLOBAL_MEMORY_ID, buildMemoryPrompt, buildRecentChatsPrompt, memoriesForAssistant, memoryStore } from "./memory/index";
-import { extractDocxText, extractEpubText, extractPdfText, extractPptxText, extractStoredFileText, extractStoredFileTextSync, fallbackDocumentText, getStoredFileSize, loadMupdf, readZipEntries, stripXmlText } from "./files/index";
+import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state, writeSlimStateJsonSync, writeSlimStateJsonSyncForMemory } from "./persistence/json-store";
+import { GLOBAL_MEMORY_ID, buildMemoryPrompt, buildRecentChatsPrompt, memoryStore } from "./memory/index";
+import { extractStoredFileText, readZipEntries, stripXmlText } from "./files/index";
 import { APP_VERSION, UPDATE_R2_BASE, fetchGithubLatestRelease, fetchLatestReleaseFromHtmlRedirect, probeCachedInstaller, readSkippedVersion, writeSkippedVersion } from "./updates/index";
 import {
   applyCustomBody,
@@ -37,31 +37,18 @@ import {
   TENCENT_PROVIDER_ID,
 } from "./model-providers";
 import {
-  getMcpToolOverride,
-  isMcpToolApprovalRequiredForAssistant,
-  isMcpToolEnabledForAssistant,
-  initialApprovalState,
-  toolNeedsApproval,
-} from "./tools/approval";
-import {
   apiToolCallFromPart,
-  openAiToolOutput,
-  parseToolInput,
-  partsToToolResultText,
   resolvedToolOutput,
   toolExecutionErrorPayload,
-  toolOutputForApproval,
 } from "./tools/format";
 import {
   callMcpTool,
   cancelAllSystemTts,
   defaultSkillContent,
   exportSkills,
-  fetchMcpTools,
   importSkills,
   listSkillFiles,
   listSkills,
-  mcpJsonRpc,
   openAiLocalTools as openAiLocalToolsCore,
   openAiMcpTools as openAiMcpToolsCore,
   openAiSearchTools as openAiSearchToolsCore,
