@@ -19,23 +19,25 @@ import {
 import { ensureReasoningPart, finishReasoningParts, normalizeGeneratedImageUrl } from "./parts";
 import type { StreamHooksWithSink, ToolCall, ToolDispatchContext, ToolResult } from "./events";
 import {
-  addLog,
   applyCustomBody,
   applyRequestHeaders,
+  findModel,
+  jsonBody,
+  textBody,
+} from "../model-providers";
+import {
+  addLog,
   buildGoogleRequestBody,
   conversationMessagesForApi,
   conversationResponseApiInput,
   conversationResponseApiInstructions,
   endpointFor,
   findAssistant,
-  findModel,
-  jsonBody,
   MAX_TOOL_STEPS,
   openAiLocalTools,
   openAiMcpTools,
   openAiSearchTools,
   openAiSkillTools,
-  textBody,
   touchStream,
 } from "../server";
 
