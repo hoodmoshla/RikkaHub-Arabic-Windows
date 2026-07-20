@@ -7,3 +7,4 @@ export * from "./skills";
 export * from "./definitions";
 export * from "./platform";
 export * from "./local";
+export * from "./mcp";

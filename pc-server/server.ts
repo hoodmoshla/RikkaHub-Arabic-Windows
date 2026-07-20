@@ -53,12 +53,15 @@ import {
   toolOutputForApproval,
 } from "./tools/format";
 import {
+  callMcpTool,
   cancelAllSystemTts,
   defaultSkillContent,
   exportSkills,
+  fetchMcpTools,
   importSkills,
   listSkillFiles,
   listSkills,
+  mcpJsonRpc,
   openAiLocalTools as openAiLocalToolsCore,
   openAiMcpTools as openAiMcpToolsCore,
   openAiSearchTools as openAiSearchToolsCore,
@@ -76,6 +79,7 @@ import {
   skillMetadataFromFile,
   parseSkillFrontmatter,
   speakSystemText,
+  syncMcpServerTools,
   synthesizeSystemTtsToWav,
   writeSystemClipboardText,
 } from "./tools";
@@ -4789,349 +4793,6 @@ export function openAiMcpTools(assistant: Assistant) {
   return openAiMcpToolsCore(assistant, state.settings.mcpServers);
 }
 
-function headersFromMcpServer(server: Record<string, JsonValue>) {
-  const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
-  const common = isRecord(server.commonOptions) ? server.commonOptions : {};
-  const rawHeaders = Array.isArray(common.headers) ? common.headers : [];
-  for (const header of rawHeaders) {
-    if (Array.isArray(header)) {
-      const [key, value] = header;
-      if (key) headers[String(key)] = String(value ?? "");
-    } else if (isRecord(header)) {
-      const key = String(header.key ?? header.name ?? header.first ?? "").trim();
-      const value = String(header.value ?? header.second ?? "");
-      if (key) headers[key] = value;
-    }
-  }
-  return headers;
-}
-
-function parseMcpResponseText(text: string) {
-  const trimmed = text.trim();
-  if (!trimmed) return {};
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const dataLines = trimmed
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.replace(/^data:\s?/, "").trim())
-      .filter((line) => line && line !== "[DONE]");
-    for (const line of dataLines.reverse()) {
-      try {
-        return JSON.parse(line);
-      } catch {
-        // Continue scanning older SSE data frames.
-      }
-    }
-    return { text };
-  }
-}
-
-function resolveMcpSseEndpoint(baseUrl: string, endpoint: string) {
-  const trimmed = endpoint.trim();
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return new URL(trimmed, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`).toString();
-}
-
-const mcpSessionCache = new Map<string, { sessionId: string; protocolVersion?: string }>();
-const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
-
-function mcpSessionCacheKey(server: Record<string, JsonValue>) {
-  const common = isRecord(server.commonOptions) ? server.commonOptions : {};
-  const headers = Array.isArray(common.headers) ? common.headers : [];
-  return JSON.stringify({
-    id: String(server.id ?? ""),
-    type: String(server.type ?? "streamable_http"),
-    url: String(server.url ?? ""),
-    headers,
-  });
-}
-
-async function readMcpSseUntilEndpoint(response: Response, timeoutMs = 15000) {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("SSE MCP response has no body");
-  const decoder = new TextDecoder();
-  let buffer = "";
-  const started = Date.now();
-  try {
-    for (;;) {
-      if (Date.now() - started > timeoutMs) throw new Error("SSE MCP endpoint event timeout");
-      const read = await Promise.race([
-        reader.read(),
-        new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) =>
-          setTimeout(() => reject(new Error("SSE MCP endpoint event timeout")), 1000),
-        ),
-      ]);
-      if (read.done) break;
-      buffer += decoder.decode(read.value, { stream: true });
-      const events = buffer.split(/\n\n+/);
-      buffer = events.pop() ?? "";
-      for (const eventBlock of events) {
-        const eventName = eventBlock.split(/\r?\n/).find((line) => line.startsWith("event:"))?.replace(/^event:\s*/, "").trim() ?? "";
-        const data = eventBlock
-          .split(/\r?\n/)
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.replace(/^data:\s?/, ""))
-          .join("\n")
-          .trim();
-        if (eventName === "endpoint" && data) return data;
-      }
-    }
-  } finally {
-    try {
-      await reader.cancel();
-    } catch {
-      // Ignore cancellation errors from the long-lived SSE stream.
-    }
-  }
-  throw new Error("SSE MCP endpoint event was not received");
-}
-
-async function mcpSsePostEndpoint(server: Record<string, JsonValue>) {
-  const cached = String(server.ssePostEndpoint ?? "").trim();
-  if (cached) return cached;
-  const target = String(server.url ?? "").trim();
-  if (!/^https?:\/\//i.test(target)) throw new Error("MCP SSE server URL must be http(s)");
-  const started = Date.now();
-  // 给握手阶段的 fetch 加 30s 超时——SSE 流读取本身已有内部 15s 超时
-  // (readMcpSseUntilEndpoint)，但外层 fetch 在服务器吊死/不回响应头时
-  // 永远不会返回，导致前端"连接异常"被卡在 connecting 状态。
-  const ac = new AbortController();
-  const timeoutId = setTimeout(() => ac.abort(), 30_000);
-  let response: Response;
-  try {
-    response = await fetch(target, { headers: headersFromMcpServer(server), signal: ac.signal });
-  } catch (err) {
-    clearTimeout(timeoutId);
-    const aborted = err instanceof Error && (err.name === "AbortError" || /abort/i.test(err.message));
-    throw new Error(aborted ? "MCP SSE handshake timed out after 30s" : err instanceof Error ? err.message : String(err));
-  }
-  clearTimeout(timeoutId);
-  const endpoint = resolveMcpSseEndpoint(target, await readMcpSseUntilEndpoint(response));
-  addLog({
-    providerId: String(server.id ?? "mcp"),
-    providerName: String(isRecord(server.commonOptions) ? server.commonOptions.name ?? "MCP Server" : "MCP Server"),
-    url: target,
-    ok: true,
-    status: response.status,
-    kind: "mcp:sse:endpoint",
-    durationMs: Date.now() - started,
-    responseBody: endpoint,
-    toolName: "endpoint",
-  });
-  server.ssePostEndpoint = endpoint;
-  return endpoint;
-}
-
-async function postMcpJsonRpc(
-  server: Record<string, JsonValue>,
-  method: string,
-  params: Record<string, JsonValue> | undefined,
-  extraHeaders: Record<string, string> = {},
-  options: { notification?: boolean } = {},
-) {
-  const target = String(server.type ?? "streamable_http") === "sse"
-    ? await mcpSsePostEndpoint(server)
-    : String(server.url ?? "").trim();
-  if (!/^https?:\/\//i.test(target)) throw new Error("MCP server URL must be http(s)");
-  const body = options.notification
-    ? { jsonrpc: "2.0", method, params: params ?? {} }
-    : { jsonrpc: "2.0", id: id(), method, params: params ?? {} };
-  const started = Date.now();
-  // 给 fetch 加 30s 超时，避免 MCP 服务卡死时把"启用/同步工具"流程一直
-  // 卡在 connecting 状态——对齐安卓 commit 4d257320 的修复目标：sync
-  // 必须有失败终点，前端才能切换到错误态。
-  const ac = new AbortController();
-  const timeoutId = setTimeout(() => ac.abort(), 30_000);
-  let response: Response;
-  let text: string;
-  const requestHeaders = { ...headersFromMcpServer(server), ...extraHeaders };
-  try {
-    response = await fetch(target, {
-      method: "POST",
-      headers: requestHeaders,
-      body: JSON.stringify(body),
-      signal: ac.signal,
-    });
-    text = await response.text();
-  } catch (err) {
-    clearTimeout(timeoutId);
-    const aborted = err instanceof Error && (err.name === "AbortError" || /abort/i.test(err.message));
-    const reason = aborted ? "MCP request timed out after 30s" : err instanceof Error ? err.message : String(err);
-    addLog({
-      providerId: String(server.id ?? "mcp"),
-      providerName: String(isRecord(server.commonOptions) ? server.commonOptions.name ?? "MCP Server" : "MCP Server"),
-      url: target,
-      ok: false,
-      status: 0,
-      kind: `mcp:${method}`,
-      durationMs: Date.now() - started,
-      method: "POST",
-      requestHeaders,
-      requestBody: jsonBody(body),
-      responseBody: "",
-      toolName: method,
-      error: reason,
-    });
-    throw new Error(reason);
-  }
-  clearTimeout(timeoutId);
-  const raw: any = parseMcpResponseText(text);
-  addLog({
-    providerId: String(server.id ?? "mcp"),
-    providerName: String(isRecord(server.commonOptions) ? server.commonOptions.name ?? "MCP Server" : "MCP Server"),
-    url: target,
-    ok: response.ok && !raw.error,
-    status: response.status,
-    kind: `mcp:${method}`,
-    durationMs: Date.now() - started,
-    method: "POST",
-    requestHeaders,
-    responseHeaders: Object.fromEntries(response.headers.entries()),
-    requestBody: jsonBody(body),
-    responseBody: textBody(text),
-    toolName: method,
-    error: response.ok && !raw.error ? undefined : jsonBody(raw.error ?? text),
-  });
-  if (!response.ok) throw new Error(`${response.status}: ${text.slice(0, 500)}`);
-  if (raw.error) throw new Error(jsonBody(raw.error, 500));
-  return {
-    result: raw.result ?? raw,
-    sessionId: response.headers.get("mcp-session-id") ?? response.headers.get("Mcp-Session-Id") ?? undefined,
-    protocolVersion: typeof raw.result?.protocolVersion === "string" ? raw.result.protocolVersion : undefined,
-  };
-}
-
-async function mcpSessionHeaders(server: Record<string, JsonValue>) {
-  const cacheKey = mcpSessionCacheKey(server);
-  const cached = mcpSessionCache.get(cacheKey);
-  if (cached?.sessionId) {
-    return {
-      "mcp-session-id": cached.sessionId,
-      ...(cached.protocolVersion ? { "mcp-protocol-version": cached.protocolVersion } : {}),
-    };
-  }
-  let init: Awaited<ReturnType<typeof postMcpJsonRpc>> | null = null;
-  let lastError: unknown = null;
-  for (const protocolVersion of MCP_PROTOCOL_VERSIONS) {
-    try {
-      init = await postMcpJsonRpc(server, "initialize", {
-        protocolVersion,
-        capabilities: {},
-        clientInfo: { name: "RikkaHub PC", version: "pc-dev" },
-      });
-      break;
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  if (!init) {
-    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "MCP initialize failed"));
-  }
-  if (init.sessionId) mcpSessionCache.set(cacheKey, { sessionId: init.sessionId, protocolVersion: init.protocolVersion });
-  const headers = init.sessionId
-    ? {
-      "mcp-session-id": init.sessionId,
-      ...(init.protocolVersion ? { "mcp-protocol-version": init.protocolVersion } : {}),
-    }
-    : {};
-  await postMcpJsonRpc(server, "notifications/initialized", {}, headers, { notification: true });
-  return headers;
-}
-
-async function mcpJsonRpc(server: Record<string, JsonValue>, method: string, params?: Record<string, JsonValue>) {
-  const cacheKey = mcpSessionCacheKey(server);
-  const headers = await mcpSessionHeaders(server);
-  try {
-    const response = await postMcpJsonRpc(server, method, params, headers);
-    return response.result;
-  } catch (err) {
-    if (!mcpSessionCache.has(cacheKey)) throw err;
-    mcpSessionCache.delete(cacheKey);
-    const retryHeaders = await mcpSessionHeaders(server);
-    const response = await postMcpJsonRpc(server, method, params, retryHeaders);
-    return response.result;
-  }
-}
-
-async function fetchMcpTools(server: Record<string, JsonValue>) {
-  const result = await mcpJsonRpc(server, "tools/list");
-  const tools = Array.isArray(result.tools) ? result.tools : [];
-  return tools.map((tool: any) => ({
-    enable: true,
-    name: String(tool.name ?? ""),
-    description: tool.description ? String(tool.description) : null,
-    inputSchema: tool.inputSchema ?? tool.input_schema ?? { type: "object", properties: {} },
-    needsApproval: tool.needsApproval === true,
-  })).filter((tool) => tool.name);
-}
-
-async function syncMcpServerTools(server: Record<string, JsonValue>) {
-  const common = isRecord(server.commonOptions) ? server.commonOptions : {};
-  // Preserve user-set per-tool toggles (enable / needsApproval) across re-syncs. Without
-  // this, every detail-save would re-fetch tools/list and reset the user's switches —
-  // because settings/mcp-server/detail unconditionally calls this function whenever the
-  // server is enabled, including when the user toggled a single per-tool field in the UI.
-  const existingTools = Array.isArray(common.tools) ? common.tools.filter(isRecord) : [];
-  const prefs = new Map<string, { enable: boolean; needsApproval: boolean }>();
-  for (const t of existingTools) {
-    const n = String(t.name ?? "");
-    if (!n) continue;
-    prefs.set(n, {
-      enable: t.enable !== false,
-      needsApproval: t.needsApproval === true,
-    });
-  }
-  try {
-    const fetched = await fetchMcpTools(server);
-    const tools = fetched.map((tool) => {
-      const pref = prefs.get(tool.name);
-      return pref ? { ...tool, enable: pref.enable, needsApproval: pref.needsApproval } : tool;
-    });
-    return {
-      ...server,
-      commonOptions: {
-        ...common,
-        tools,
-        lastSyncAt: Date.now(),
-        lastSyncError: "",
-        connected: true,
-      },
-    };
-  } catch (err) {
-    return {
-      ...server,
-      commonOptions: {
-        ...common,
-        lastSyncAt: Date.now(),
-        lastSyncError: err instanceof Error ? err.message : String(err),
-        connected: false,
-      },
-    };
-  }
-}
-
-// Read this assistant's per-tool override (PC-only). Returns the override entry or undefined
-// if the assistant hasn't customized this tool. Outer key is the server id from the global
-// MCP server list; inner key is the tool name (NOT the `mcp__<sanitized>` LLM-facing alias).
-async function callMcpTool(assistant: Assistant, toolName: string, args: Record<string, JsonValue>) {
-  const selected = new Set(getStringArray(assistant.mcpServers));
-  const servers = (state.settings.mcpServers as Array<Record<string, JsonValue>>)
-    .filter((server) => selected.has(String(server.id ?? "")) && isRecord(server.commonOptions) && server.commonOptions.enable !== false);
-  for (const server of servers) {
-    const common = server.commonOptions as Record<string, JsonValue>;
-    const tools = Array.isArray(common.tools) ? common.tools.filter(isRecord) : [];
-    const matched = tools.find((tool) =>
-      isMcpToolEnabledForAssistant(assistant, String(server.id ?? ""), tool)
-      && `mcp__${String(tool.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_")}` === toolName,
-    );
-    if (!matched) continue;
-    const result = await mcpJsonRpc(server, "tools/call", { name: String(matched.name), arguments: args });
-    return result;
-  }
-  throw new Error(`MCP tool '${toolName}' is not available for this assistant`);
-}
 
 /** save_memory 工具执行(1.3.2)。模型只提议 content,应用按 writeStrategy 决定落地方式:
  *  - always_assistant + 助手层启用 → 直接存助手层
@@ -5233,7 +4894,7 @@ async function executeToolCall(
     return { name: skillName, content };
   }
   if (name.startsWith("mcp__")) {
-    return callMcpTool(assistant, name, args);
+    return callMcpTool(assistant, name, args, state.settings.mcpServers, addLog);
   }
   throw new Error(`Unknown tool: ${name}`);
 }
@@ -8807,7 +8468,7 @@ async function routeApi(request: Request, url: URL) {
       },
     };
     if (isRecord(server.commonOptions) && server.commonOptions.enable !== false && String(server.url ?? "").trim()) {
-      server = await syncMcpServerTools(server);
+      server = await syncMcpServerTools(server, addLog);
     }
     // ── Master/child switch coupling ─────────────────────────────────────────────────
     // The MCP server's `commonOptions.enable` is a master switch; each tool's `enable`
@@ -8869,7 +8530,7 @@ async function routeApi(request: Request, url: URL) {
     const body = await readJson<{ serverId: string }>(request);
     const server = (state.settings.mcpServers as Array<Record<string, JsonValue>>).find((item) => String(item.id) === body.serverId);
     if (!server) return error("MCP server not found", 404);
-    const nextServer = await syncMcpServerTools(server);
+    const nextServer = await syncMcpServerTools(server, addLog);
     const result = upsertById(state.settings.mcpServers as JsonValue[], nextServer);
     updateSettings({ ...state.settings, mcpServers: result.items });
     const common = (isRecord(nextServer.commonOptions) ? nextServer.commonOptions : {}) as Record<string, JsonValue>;
