@@ -53,6 +53,7 @@ import {
   toolOutputForApproval,
 } from "./tools/format";
 import {
+  cancelAllSystemTts,
   defaultSkillContent,
   exportSkills,
   importSkills,
@@ -64,10 +65,19 @@ import {
   openAiSkillTools as openAiSkillToolsCore,
   readSkillBody,
   readSkillContent,
+  readSystemClipboardText,
+  runAskUserTool,
+  runClipboardTool,
+  runEvalJavascriptTool,
+  runGetTimeInfoTool,
+  runTextToSpeechTool,
   safeSkillDir,
   safeSkillFile,
   skillMetadataFromFile,
   parseSkillFrontmatter,
+  speakSystemText,
+  synthesizeSystemTtsToWav,
+  writeSystemClipboardText,
 } from "./tools";
 import {
   apiContentFromParts,
@@ -5123,208 +5133,6 @@ async function callMcpTool(assistant: Assistant, toolName: string, args: Record<
   throw new Error(`MCP tool '${toolName}' is not available for this assistant`);
 }
 
-async function runPowerShell(command: string, input = "") {
-  const proc = Bun.spawn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command], {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (input) {
-    proc.stdin.write(input);
-  }
-  proc.stdin.end();
-  const [exitCode, stdout, stderr] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  if (exitCode !== 0) throw new Error(stderr.trim() || `PowerShell exited with code ${exitCode}`);
-  return stdout;
-}
-
-function clipboardCommand(): string | null {
-  if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland") {
-    return "wl";
-  }
-  if (process.env.DISPLAY || process.env.XDG_SESSION_TYPE === "x11") {
-    return "x11";
-  }
-  return null;
-}
-
-async function readSystemClipboardText() {
-  if (process.platform === "win32") {
-    return runPowerShell("[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Get-Clipboard -Raw");
-  }
-  const backend = clipboardCommand();
-  try {
-    if (backend === "wl") {
-      const proc = Bun.spawnSync(["wl-paste"]);
-      if (proc.exitCode === 0) return new TextDecoder().decode(proc.stdout).trim();
-    } else if (backend === "x11") {
-      const proc = Bun.spawnSync(["xclip", "-selection", "clipboard", "-o"]);
-      if (proc.exitCode === 0) return new TextDecoder().decode(proc.stdout).trim();
-    }
-  } catch (e) { console.warn("[clipboard] read failed:", e); }
-  return "";
-}
-
-async function writeSystemClipboardText(text: string) {
-  if (process.platform === "win32") {
-    await runPowerShell("[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); Set-Clipboard -Value ([Console]::In.ReadToEnd())", text);
-    return;
-  }
-  const backend = clipboardCommand();
-  try {
-    if (backend === "wl") {
-      const proc = Bun.spawn(["wl-copy"], { stdin: "pipe" });
-      proc.stdin.write(text);
-      proc.stdin.end();
-      await proc.exited;
-    } else if (backend === "x11") {
-      const proc = Bun.spawn(["xclip", "-selection", "clipboard"], { stdin: "pipe" });
-      proc.stdin.write(text);
-      proc.stdin.end();
-      await proc.exited;
-    }
-  } catch (e) { console.warn("[clipboard] write failed:", e); }
-}
-
-// Global serialization lock for system TTS. Without this, parallel client
-// fetches (chunked-playback prefetch) would each spawn their own TTS process,
-// producing the "multiple voices speaking at once" bug.
-let systemTtsChain: Promise<void> = Promise.resolve();
-
-// All currently-spawned system-TTS processes — keyed by Subprocess so we can
-// `kill()` them when the client calls /api/tts/cancel.
-const activeSystemTtsProcs = new Set<ReturnType<typeof Bun.spawn>>();
-
-async function speakSystemText(text: string, speechRate = 1) {
-  const prev = systemTtsChain;
-  let release: () => void = () => {};
-  systemTtsChain = new Promise<void>((resolve) => { release = resolve; });
-  try {
-    await prev.catch(() => undefined);
-    if (process.platform === "win32") {
-      const rate = Math.max(-10, Math.min(10, Math.round((speechRate - 1) * 5)));
-      const script = [
-        "Add-Type -AssemblyName System.Speech",
-        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer",
-        `$s.Rate = ${rate}`,
-        "$s.Speak([Console]::In.ReadToEnd())",
-        "$s.Dispose()",
-      ].join("; ");
-      const proc = Bun.spawn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      activeSystemTtsProcs.add(proc);
-      try {
-        proc.stdin.write(text);
-        proc.stdin.end();
-        const exitCode = await proc.exited;
-        if (exitCode !== 0 && exitCode !== null) {
-          const stderrText = await new Response(proc.stderr).text().catch(() => "");
-          if (stderrText.trim()) console.warn(`[tts] System TTS exited ${exitCode}: ${stderrText.slice(0, 200)}`);
-        }
-      } finally {
-        activeSystemTtsProcs.delete(proc);
-      }
-    } else {
-      const speed = Math.max(80, Math.min(450, Math.round(175 * speechRate)));
-      const proc = Bun.spawn(["espeak-ng", "--stdin", "-s", String(speed)], {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      activeSystemTtsProcs.add(proc);
-      try {
-        proc.stdin.write(text);
-        proc.stdin.end();
-        const exitCode = await proc.exited;
-        if (exitCode !== 0 && exitCode !== null) {
-          const stderrText = await new Response(proc.stderr).text().catch(() => "");
-          if (stderrText.trim()) console.warn(`[tts] espeak-ng exited ${exitCode}: ${stderrText.slice(0, 200)}`);
-        }
-      } finally {
-        activeSystemTtsProcs.delete(proc);
-      }
-    }
-  } finally {
-    release();
-  }
-}
-
-async function synthesizeSystemTtsToWav(text: string, speechRate = 1): Promise<Buffer> {
-  const prev = systemTtsChain;
-  let release: () => void = () => {};
-  systemTtsChain = new Promise<void>((resolve) => { release = resolve; });
-  const tmpWav = join(tempDir(), `tts-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.wav`);
-  try {
-    await prev.catch(() => undefined);
-    if (process.platform === "win32") {
-      const rate = Math.max(-10, Math.min(10, Math.round((speechRate - 1) * 5)));
-      const script = [
-        "Add-Type -AssemblyName System.Speech",
-        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer",
-        `$s.Rate = ${rate}`,
-        `$s.SetOutputToWaveFile('${tmpWav.replace(/'/g, "''")}')`,
-        "$s.Speak([Console]::In.ReadToEnd())",
-        "$s.Dispose()",
-      ].join("; ");
-      const proc = Bun.spawn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      activeSystemTtsProcs.add(proc);
-      try {
-        proc.stdin.write(text);
-        proc.stdin.end();
-        const exitCode = await proc.exited;
-        if (exitCode !== 0 && exitCode !== null) {
-          const stderrText = await new Response(proc.stderr).text().catch(() => "");
-          if (stderrText.trim()) console.warn(`[tts] System TTS exited ${exitCode}: ${stderrText.slice(0, 200)}`);
-        }
-      } finally {
-        activeSystemTtsProcs.delete(proc);
-      }
-    } else {
-      const speed = Math.max(80, Math.min(450, Math.round(175 * speechRate)));
-      const proc = Bun.spawn(["espeak-ng", "-w", tmpWav, "-s", String(speed), "--stdin"], {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      activeSystemTtsProcs.add(proc);
-      try {
-        proc.stdin.write(text);
-        proc.stdin.end();
-        const exitCode = await proc.exited;
-        if (exitCode !== 0 && exitCode !== null) {
-          const stderrText = await new Response(proc.stderr).text().catch(() => "");
-          if (stderrText.trim()) console.warn(`[tts] espeak-ng exited ${exitCode}: ${stderrText.slice(0, 200)}`);
-        }
-      } finally {
-        activeSystemTtsProcs.delete(proc);
-      }
-    }
-    if (!existsSync(tmpWav)) throw new Error("System TTS failed to produce audio file");
-    return readFileSync(tmpWav);
-  } finally {
-    release();
-    try { if (existsSync(tmpWav)) rmSync(tmpWav); } catch { /* best-effort */ }
-  }
-}
-
-function cancelAllSystemTts() {
-  for (const proc of activeSystemTtsProcs) {
-    try { proc.kill(); } catch { /* best-effort */ }
-  }
-  activeSystemTtsProcs.clear();
-}
-
 /** save_memory 工具执行(1.3.2)。模型只提议 content,应用按 writeStrategy 决定落地方式:
  *  - always_assistant + 助手层启用 → 直接存助手层
  *  - always_global + 全局层启用 → 直接存全局层
@@ -5405,67 +5213,11 @@ async function executeToolCall(
     }
     return runScrapeWeb(args);
   }
-  if (name === "get_time_info") {
-    const now = new Date();
-    return {
-      year: now.getFullYear(),
-      month: now.getMonth() + 1,
-      day: now.getDate(),
-      weekday: new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(now),
-      weekday_en: new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(now),
-      date: formatKeyLocal(now),
-      time: now.toLocaleTimeString(),
-      datetime: `${formatKeyLocal(now)} ${now.toLocaleTimeString()}`,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      timestamp_ms: now.getTime(),
-    };
-  }
-  if (name === "eval_javascript") {
-    const code = String(args.code ?? "");
-    if (code.length > 20_000) throw new Error("JavaScript code is too long");
-    const logs: string[] = [];
-    const toolConsole = {
-      log: (...values: unknown[]) => logs.push(`[LOG] ${values.map((value) => String(value)).join(" ")}`),
-      info: (...values: unknown[]) => logs.push(`[INFO] ${values.map((value) => String(value)).join(" ")}`),
-      warn: (...values: unknown[]) => logs.push(`[WARN] ${values.map((value) => String(value)).join(" ")}`),
-      error: (...values: unknown[]) => logs.push(`[ERROR] ${values.map((value) => String(value)).join(" ")}`),
-    };
-    const fn = new Function("code", "console", "process", "Bun", "require", "globalThis", "\"use strict\"; return eval(code);");
-    const result = fn(code, toolConsole, undefined, undefined, undefined, undefined);
-    return { ...(logs.length ? { logs: logs.join("\n") } : {}), result: result == null ? null : String(result) };
-  }
-  if (name === "clipboard_tool") {
-    const action = String(args.action ?? "").trim();
-    if (action === "write") {
-      const text = String(args.text ?? "");
-      await writeSystemClipboardText(text);
-      return {
-        success: true,
-        text,
-      };
-    }
-    if (action === "read") {
-      return {
-        text: await readSystemClipboardText(),
-      };
-    }
-    throw new Error("unknown action: " + action + ", must be one of [read, write]");
-  }
-  if (name === "text_to_speech") {
-    const text = String(args.text ?? "").trim();
-    if (!text) throw new Error("text is required");
-    await speakSystemText(text);
-    return {
-      success: true,
-    };
-  }
-  if (name === "ask_user") {
-    return {
-      pending: true,
-      questions: Array.isArray(args.questions) ? args.questions : [],
-      note: "The question has been shown in the conversation. Wait for the user answer before continuing.",
-    };
-  }
+  if (name === "get_time_info") return runGetTimeInfoTool();
+  if (name === "eval_javascript") return runEvalJavascriptTool(args);
+  if (name === "clipboard_tool") return runClipboardTool(args);
+  if (name === "text_to_speech") return runTextToSpeechTool(args);
+  if (name === "ask_user") return runAskUserTool(args);
   if (name === "use_skill") {
     const skillName = String(args.name ?? "").trim();
     if (!getStringArray(assistant.enabledSkills).includes(skillName)) {
