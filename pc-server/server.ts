@@ -3696,14 +3696,6 @@ function importSkillsFromZipBuffer(buf: Buffer): string[] {
   return importedNames;
 }
 
-function activeModeInjections(assistant: Assistant) {
-  return activeModeInjectionsCore(assistant, state.settings.modeInjections);
-}
-
-function activeLorebookInjections(assistant: Assistant, messages: Message[]) {
-  return activeLorebookInjectionsCore(assistant, messages, state.settings.lorebooks);
-}
-
 function activePromptInjections(assistant: Assistant, messages: Message[]) {
   return activePromptInjectionsCore(assistant, messages, state.settings.lorebooks, state.settings.modeInjections);
 }
