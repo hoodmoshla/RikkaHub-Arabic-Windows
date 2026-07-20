@@ -32,7 +32,6 @@ import {
   conversationResponseApiInput,
   conversationResponseApiInstructions,
   endpointFor,
-  findAssistant,
   MAX_TOOL_STEPS,
   openAiLocalTools,
   openAiMcpTools,

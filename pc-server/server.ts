@@ -171,6 +171,18 @@ import {
   toListDto,
   truncateConversationForRegenerate,
 } from "./conversations";
+import {
+  activeLorebookInjections as activeLorebookInjectionsCore,
+  activeModeInjections as activeModeInjectionsCore,
+  activePromptInjections as activePromptInjectionsCore,
+  applyInputRegexTransformParts,
+  applyMessageTemplateToParts,
+  applyOutputTransforms,
+  applyPromptInjectionsToMessages,
+  defaultAssistant,
+  findAssistant as findAssistantCore,
+  templateVariables as templateVariablesCore,
+} from "./assistants";
 
 import { createHash, createHmac } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -373,43 +385,6 @@ function startAnalytics(): void {
 
 const LOG_PREVIEW_LIMIT = 256_000;
 
-
-function defaultAssistant(): Assistant {
-  return {
-    id: DEFAULT_ASSISTANT_ID,
-    chatModelId: null,
-    name: "",
-    avatar: { type: "dummy" },
-    useAssistantAvatar: false,
-    tags: [],
-    systemPrompt: "",
-    temperature: null,
-    topP: null,
-    contextMessageSize: 0,
-    streamOutput: true,
-    enableMemory: false,
-    useGlobalMemory: false,
-    enableRecentChatsReference: false,
-    messageTemplate: "{{ message }}",
-    presetMessages: [],
-    quickMessageIds: [],
-    regexes: [],
-    reasoningLevel: "AUTO",
-    maxTokens: null,
-    customHeaders: [],
-    customBodies: [],
-    mcpServers: [],
-    mcpToolOverrides: {},
-    localTools: [{ type: "time_info" }],
-    background: null,
-    backgroundOpacity: 1,
-    modeInjectionIds: [],
-    lorebookIds: [],
-    enabledSkills: [],
-    enableTimeReminder: false,
-    allowConversationSystemPrompt: false,
-  };
-}
 
 function defaultSettings(): Settings {
   const assistant = defaultAssistant();
@@ -1368,7 +1343,7 @@ async function readJson<T>(request: Request): Promise<T> {
 }
 
 export function findAssistant(idValue = state.settings.assistantId) {
-  return state.settings.assistants.find((assistant) => assistant.id === idValue) ?? state.settings.assistants[0];
+  return findAssistantCore(state.settings.assistants, idValue);
 }
 
 function ensureConversation(idValue: string) {
@@ -1437,94 +1412,6 @@ function appendTextPart(msg: Message, text: string) {
   } else {
     msg.parts.push({ type: "text", text });
   }
-}
-
-function applyThinkTagTransform(msg: Message) {
-  if (msg.role !== "ASSISTANT") return;
-  const now = new Date().toISOString();
-  const transformed: JsonValue[] = [];
-  const thinkRegex = /<think>([\s\S]*?)(?:<\/think>|$)/gi;
-  for (const part of msg.parts) {
-    if (!isRecord(part) || part.type !== "text") {
-      transformed.push(part);
-      continue;
-    }
-    const text = String(part.text ?? "");
-    if (!/<think>/i.test(text)) {
-      transformed.push(part);
-      continue;
-    }
-    let reasoning = "";
-    const stripped = text.replace(thinkRegex, (_match, capture) => {
-      reasoning += `${reasoning ? "\n" : ""}${String(capture ?? "").trim()}`;
-      return "";
-    }).replace(/<\/think>/gi, "");
-    if (reasoning.trim()) {
-      transformed.push({
-        type: "reasoning",
-        reasoning: reasoning.trim(),
-        createdAt: msg.createdAt,
-        finishedAt: now,
-      });
-    }
-    if (stripped.trim()) transformed.push({ ...part, text: stripped });
-  }
-  msg.parts = transformed;
-}
-
-function regexScopes(value: unknown) {
-  return new Set(getStringArray(value).map((item) => item.toUpperCase()));
-}
-
-function activeRegexesForScope(assistant: Assistant, scope: "USER" | "ASSISTANT") {
-  return Array.isArray(assistant.regexes)
-    ? assistant.regexes.filter((regex) =>
-        isRecord(regex) &&
-        regex.enabled !== false &&
-        regex.visualOnly !== true &&
-        regexScopes(regex.affectingScope).has(scope) &&
-        String(regex.findRegex ?? "").trim(),
-      )
-    : [];
-}
-
-function applyRegexesToText(text: string, regexes: JsonValue[]) {
-  let value = text;
-  for (const regex of regexes) {
-    if (!isRecord(regex)) continue;
-    try {
-      value = value.replace(new RegExp(String(regex.findRegex ?? ""), "g"), String(regex.replaceString ?? ""));
-    } catch {
-      // Match Android's fault tolerance: invalid regex leaves content unchanged.
-    }
-  }
-  return value;
-}
-
-function applyInputRegexTransformParts(parts: JsonValue[], assistant: Assistant) {
-  const activeRegexes = activeRegexesForScope(assistant, "USER");
-  if (activeRegexes.length === 0) return parts;
-  return parts.map((part) =>
-    isRecord(part) && part.type === "text"
-      ? { ...part, text: applyRegexesToText(String(part.text ?? ""), activeRegexes) }
-      : part,
-  );
-}
-
-function applyRegexOutputTransform(msg: Message, assistant: Assistant) {
-  if (msg.role !== "ASSISTANT" || !Array.isArray(assistant.regexes) || assistant.regexes.length === 0) return;
-  const activeRegexes = activeRegexesForScope(assistant, "ASSISTANT");
-  if (activeRegexes.length === 0) return;
-  msg.parts = msg.parts.map((part) => {
-    if (!isRecord(part) || (part.type !== "text" && part.type !== "reasoning")) return part;
-    const key = part.type === "reasoning" ? "reasoning" : "text";
-    return { ...part, [key]: applyRegexesToText(String(part[key] ?? ""), activeRegexes) };
-  });
-}
-
-function applyOutputTransforms(msg: Message, assistant: Assistant) {
-  applyThinkTagTransform(msg);
-  applyRegexOutputTransform(msg, assistant);
 }
 
 function hasTextPart(msg: Message, marker: string) {
@@ -1642,51 +1529,13 @@ function finishInterruptedPendingToolsInConversation(conversation: Conversation)
 }
 
 function templateVariables(messageText: string, role: string, assistant: Assistant, modelItem: Model) {
-  const now = new Date();
-  const display = state.settings.displaySetting;
-  const user = String(display.userNickname ?? "").trim() || "User";
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const locale = Intl.DateTimeFormat().resolvedOptions().locale;
-  return {
-    message: messageText,
+  return templateVariablesCore(
+    messageText,
     role,
-    time: formatLocalTime(now),
-    date: formatLocalDate(now),
-    cur_time: formatLocalTime(now),
-    cur_date: formatLocalDate(now),
-    cur_datetime: new Intl.DateTimeFormat(undefined, { dateStyle: "full", timeStyle: "medium" }).format(now),
-    timezone,
-    locale,
-    user,
-    nickname: user,
-    char: assistant.name?.trim() || "Assistant",
-    model_id: modelItem.modelId,
-    model_name: modelItem.displayName?.trim() || modelItem.modelId,
-    system_version: `${osType()} PC (${process.platform})`,
-    device_info: "RikkaHub PC",
-    battery_level: "unknown",
-  };
-}
-
-function renderAssistantMessageTemplate(template: string, messageText: string, role: string) {
-  const variables = {
-    message: messageText,
-    role: role.toLowerCase(),
-    time: formatLocalTime(new Date()),
-    date: formatLocalDate(new Date()),
-  };
-  return renderTemplate(template || "{{ message }}", variables);
-}
-
-function transformedTextPart(part: JsonValue, text: string): JsonValue {
-  return isRecord(part) ? { ...part, text } : part;
-}
-
-function applyMessageTemplateToParts(parts: JsonValue[], role: string, template: string) {
-  return parts.map((part) => {
-    if (!isRecord(part) || part.type !== "text") return part;
-    return transformedTextPart(part, renderAssistantMessageTemplate(template, String(part.text ?? ""), role));
-  });
+    assistant,
+    modelItem,
+    String(state.settings.displaySetting.userNickname ?? "").trim() || "User",
+  );
 }
 
 function computeStats() {
@@ -3963,149 +3812,16 @@ function importSkillsFromZipBuffer(buf: Buffer): string[] {
   return importedNames;
 }
 
-function normalizeInjectionPosition(value: unknown) {
-  return String(value ?? "").toLowerCase();
-}
-
-function roleForInjection(value: unknown) {
-  return String(value ?? "USER").toLowerCase() === "assistant" ? "assistant" : "user";
-}
-
 function activeModeInjections(assistant: Assistant) {
-  const selected = new Set(getStringArray(assistant.modeInjectionIds));
-  return (state.settings.modeInjections as Array<Record<string, JsonValue>>)
-    .filter((item) => item.enabled !== false && selected.has(String(item.id ?? "")))
-    .sort((left, right) => Number(right.priority ?? 0) - Number(left.priority ?? 0));
-}
-
-function regexMatches(injection: Record<string, JsonValue>, context: string) {
-  if (injection.enabled === false) return false;
-  if (injection.constantActive === true) return true;
-  const keywords = getStringArray(injection.keywords);
-  if (keywords.length === 0) return false;
-  const useRegex = injection.useRegex === true;
-  const caseSensitive = injection.caseSensitive === true;
-  return keywords.some((keyword) => {
-    if (useRegex) {
-      try {
-        return new RegExp(keyword, caseSensitive ? "" : "i").test(context);
-      } catch {
-        return false;
-      }
-    }
-    return caseSensitive ? context.includes(keyword) : context.toLowerCase().includes(keyword.toLowerCase());
-  });
-}
-
-function contextForMatchingMessages(messages: Message[], scanDepth: number) {
-  return messages
-    .filter((message) => message.role !== "SYSTEM")
-    .slice(-Math.max(1, scanDepth || 4))
-    .map((message) => textFromParts(message.parts) || reasoningFromParts(message.parts))
-    .filter(Boolean)
-    .join("\n");
+  return activeModeInjectionsCore(assistant, state.settings.modeInjections);
 }
 
 function activeLorebookInjections(assistant: Assistant, messages: Message[]) {
-  const selected = new Set(getStringArray(assistant.lorebookIds));
-  return (state.settings.lorebooks as Array<Record<string, JsonValue>>)
-    .filter((book) => book.enabled !== false && selected.has(String(book.id ?? "")))
-    .flatMap((book) => (Array.isArray(book.entries) ? book.entries : []))
-    .filter(isRecord)
-    .filter((entry) => regexMatches(entry, contextForMatchingMessages(messages, Number(entry.scanDepth ?? 4))))
-    .sort((left, right) => Number(right.priority ?? 0) - Number(left.priority ?? 0));
+  return activeLorebookInjectionsCore(assistant, messages, state.settings.lorebooks);
 }
 
 function activePromptInjections(assistant: Assistant, messages: Message[]) {
-  return [...activeModeInjections(assistant), ...activeLorebookInjections(assistant, messages)]
-    .filter((item) => item.enabled !== false)
-    .sort((left, right) => Number(right.priority ?? 0) - Number(left.priority ?? 0));
-}
-
-function applySystemPromptInjections(systemPrompt: string, injections: Array<Record<string, JsonValue>>) {
-  let before = "";
-  let after = "";
-  for (const injection of injections) {
-    const content = String(injection.content ?? "").trim();
-    if (!content) continue;
-    const position = normalizeInjectionPosition(injection.position);
-    if (position === "before_system_prompt") before += `${content}\n`;
-    if (position === "after_system_prompt") after += `\n${content}`;
-  }
-  return `${before}${systemPrompt}${after}`.trim();
-}
-
-function mergedInjectionMessages(injections: Array<Record<string, JsonValue>>): Message[] {
-  const grouped = new Map<string, string[]>();
-  for (const injection of injections) {
-    const content = String(injection.content ?? "").trim();
-    if (!content) continue;
-    const role = roleForInjection(injection.role).toUpperCase();
-    grouped.set(role, [...(grouped.get(role) ?? []), content]);
-  }
-  return [...grouped.entries()].map(([role, content]) =>
-    message(role === "ASSISTANT" ? "ASSISTANT" : "USER", [{ type: "text", text: content.join("\n") }]),
-  );
-}
-
-function hasAssistantToolsForSafeInsert(messageValue: Message | undefined) {
-  return messageValue?.role === "ASSISTANT" && messageValue.parts.some((part) => isRecord(part) && part.type === "tool");
-}
-
-function findSafeInsertIndex(messages: Message[], targetIndex: number) {
-  let index = Math.max(0, Math.min(targetIndex, messages.length));
-  while (index > 0) {
-    const prev = messages[index - 1];
-    const current = messages[index];
-    if (prev?.role === "USER" && hasAssistantToolsForSafeInsert(current)) index -= 1;
-    else break;
-  }
-  return index;
-}
-
-function insertInjectionMessages(items: Message[], targetIndex: number, injections: Array<Record<string, JsonValue>>) {
-  const messages = mergedInjectionMessages(injections);
-  if (messages.length === 0) return;
-  const insertIndex = findSafeInsertIndex(items, targetIndex);
-  items.splice(insertIndex, 0, ...messages);
-}
-
-function applyPromptInjectionsToMessages(messages: Message[], injections: Array<Record<string, JsonValue>>) {
-  const result = messages.map((item) => cloneJson(item));
-  const systemIndex = result.findIndex((item) => item.role === "SYSTEM");
-  const systemContent = systemIndex >= 0 ? applySystemPromptInjections(textFromParts(result[systemIndex].parts), injections) : "";
-  if (systemIndex >= 0) {
-    if (systemContent) result[systemIndex] = { ...result[systemIndex], parts: [{ type: "text", text: systemContent }] };
-    else result.splice(systemIndex, 1);
-  } else {
-    const injectedSystem = applySystemPromptInjections("", injections);
-    if (injectedSystem) result.unshift(message("SYSTEM", [{ type: "text", text: injectedSystem }]));
-  }
-
-  const firstUserIndex = result.findIndex((item) => item.role === "USER");
-  insertInjectionMessages(
-    result,
-    firstUserIndex >= 0 ? firstUserIndex : result.length,
-    injections.filter((injection) => normalizeInjectionPosition(injection.position) === "top_of_chat"),
-  );
-  insertInjectionMessages(
-    result,
-    Math.max(0, result.length - 1),
-    injections.filter((injection) => normalizeInjectionPosition(injection.position) === "bottom_of_chat"),
-  );
-  for (const depth of [...new Set(injections
-    .filter((injection) => normalizeInjectionPosition(injection.position) === "at_depth")
-    .map((injection) => Math.max(1, Number(injection.injectDepth ?? 4))))].sort((left, right) => right - left)) {
-    insertInjectionMessages(
-      result,
-      Math.max(0, result.length - depth),
-      injections.filter((injection) =>
-        normalizeInjectionPosition(injection.position) === "at_depth" &&
-        Math.max(1, Number(injection.injectDepth ?? 4)) === depth,
-      ),
-    );
-  }
-  return result;
+  return activePromptInjectionsCore(assistant, messages, state.settings.lorebooks, state.settings.modeInjections);
 }
 
 function timeReminderContent(current: Message, previous?: Message) {
