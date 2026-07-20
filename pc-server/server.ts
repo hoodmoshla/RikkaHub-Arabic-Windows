@@ -73,6 +73,19 @@ import {
   supportsOutputModality,
   withClaudeCacheOnLastBlock,
 } from "./inference-engine/message-builder";
+import {
+  addStreamImage,
+  addStreamText,
+  appendReasoningDelta,
+  ensureReasoningPart,
+  finishReasoningParts,
+  hasOpenReasoningPart,
+  markStreamFirstContent,
+  normalizeGeneratedImageUrl,
+  replaceLoadingReasoningWithTool,
+  setMessageLoading,
+  streamStartedMessages,
+} from "./inference-engine/parts";
 import type { GenerationEvent, GenerationEventSink, ToolCall, ToolContext, ToolExecutor, ToolResult } from "./inference-engine/events";
 import {
   checkpointConversationsDb,
@@ -1751,49 +1764,6 @@ function imageParts(parts: JsonValue[]) {
   return parts.filter((part): part is Record<string, JsonValue> =>
     !!part && typeof part === "object" && !Array.isArray(part) && part.type === "image" && typeof part.url === "string"
   );
-}
-
-function setMessageLoading(msg: Message, label = "正在生成回复") {
-  if (msg.parts.length > 0) return;
-  msg.parts = [{ type: "loading", label }];
-}
-
-function finishReasoningParts(msg: Message) {
-  const now = new Date().toISOString();
-  msg.parts = msg.parts.map((part) => {
-    if (part && typeof part === "object" && !Array.isArray(part) && part.type === "reasoning" && !part.finishedAt) {
-      return { ...part, finishedAt: now };
-    }
-    return part;
-  });
-}
-
-function hasOpenReasoningPart(msg: Message) {
-  return msg.parts.some((part) =>
-    part && typeof part === "object" && !Array.isArray(part) && part.type === "reasoning" && !part.finishedAt
-  );
-}
-
-function replaceLoadingReasoningWithTool(msg: Message, toolPart: JsonValue, sink?: GenerationEventSink) {
-  if (sink) {
-    const tp = isRecord(toolPart) ? toolPart : {};
-    sink({
-      kind: "tool_call_created",
-      toolCallId: String(tp.toolCallId ?? ""),
-      toolName: String(tp.toolName ?? ""),
-      input: String(tp.input ?? ""),
-      approvalState: tp.approvalState ?? { type: "auto" },
-    });
-    return;
-  }
-  markStreamFirstContent(msg);
-  msg.parts = msg.parts.filter((part) => !(
-    part &&
-    typeof part === "object" &&
-    !Array.isArray(part) &&
-    (part.type === "loading" || (part.type === "reasoning" && part.reasoning === "正在生成回复"))
-  ));
-  msg.parts.push(toolPart);
 }
 
 function summaryAsText(msg: Message) {
@@ -7903,44 +7873,6 @@ function toolCallContext(hooks?: StreamHooksWithSink): ToolDispatchContext | und
   };
 }
 
-// Tracks which assistant messages have already received their first real streaming chunk.
-// We use it to rewrite `createdAt` from "when the send button was pressed" to "when the
-// first content delta arrived" — matching the Android client, which only constructs the
-// assistant UIMessage object on the first chunk. Without this correction, the token/s and
-// duration stats include the upstream TTFT (time-to-first-token) wait, understating speed.
-// In-memory only: it doesn't persist, which is fine because finished messages never stream
-// again; on reload they keep whatever createdAt was recorded during generation.
-const streamStartedMessages = new WeakSet<Message>();
-
-function markStreamFirstContent(msg: Message | undefined) {
-  if (!msg) return;
-  if (streamStartedMessages.has(msg)) return;
-  streamStartedMessages.add(msg);
-  msg.createdAt = new Date().toISOString();
-}
-
-function addStreamText(hooks: StreamHooksWithSink | undefined, text: string) {
-  if (!hooks?.message || !text) return;
-  // 事件流模式：只把增量抛给协调器，由协调器负责 message mutation / SSE / 持久化。
-  if (hooks.sink) {
-    hooks.sink({ kind: "text_delta", text });
-    return;
-  }
-  markStreamFirstContent(hooks.message);
-  const hadOpenReasoning = hasOpenReasoningPart(hooks.message);
-  hooks.message.parts = hooks.message.parts.filter((part) => !(
-    part &&
-    typeof part === "object" &&
-    !Array.isArray(part) &&
-    (part.type === "loading" || (part.type === "reasoning" && part.reasoning === "正在生成回复"))
-  ));
-  if (hadOpenReasoning) {
-    finishReasoningParts(hooks.message);
-  }
-  appendTextPart(hooks.message, text);
-  touchStream(hooks);
-}
-
 // models.dev 开源模型目录缓存 —— 用于查询模型的最大上下文窗口,显示在对话统计行
 // (分子 = 当前上下文 = promptTokens,分母 = 模型 contextLimit)。
 // 数据源 https://models.dev/api.json,缓存到 pc-data,7 天 TTL,fetch 失败降级为空(不报错)。
@@ -9649,63 +9581,6 @@ function mergeToolCallDeltas(existing: any[], deltaCalls: any[], mode: "delta" |
       },
     };
   }
-}
-
-function ensureReasoningPart(hooks: StreamHooksWithSink, metadata?: Record<string, JsonValue>) {
-  if (!hooks.message) return null;
-  hooks.message.parts = hooks.message.parts.filter((part) => !(
-    part &&
-    typeof part === "object" &&
-    !Array.isArray(part) &&
-    (part.type === "loading" || (part.type === "reasoning" && part.reasoning === "正在生成回复"))
-  ));
-  const last = hooks.message.parts[hooks.message.parts.length - 1];
-  if (last && typeof last === "object" && !Array.isArray(last) && last.type === "reasoning") {
-    if (metadata && Object.keys(metadata).length > 0) {
-      last.metadata = { ...(isRecord(last.metadata) ? last.metadata : {}), ...metadata };
-    }
-    return last;
-  }
-  const next = {
-    type: "reasoning",
-    reasoning: "",
-    createdAt: new Date().toISOString(),
-    finishedAt: null,
-    ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
-  };
-  hooks.message.parts.push(next);
-  return next;
-}
-
-function appendReasoningDelta(hooks: StreamHooksWithSink, text: string, metadata?: Record<string, JsonValue>) {
-  if (!hooks.message) return;
-  if (hooks.sink) {
-    hooks.sink({ kind: "reasoning_delta", text, metadata });
-    return;
-  }
-  markStreamFirstContent(hooks.message);
-  const part = ensureReasoningPart(hooks, metadata);
-  if (part && text) part.reasoning = String(part.reasoning ?? "") + text;
-  touchStream(hooks);
-}
-
-function normalizeGeneratedImageUrl(value: string) {
-  const text = value.trim();
-  if (!text || text.startsWith("data:") || /^https?:\/\//i.test(text)) return text;
-  return `data:image/png;base64,${text}`;
-}
-
-function addStreamImage(hooks: StreamHooksWithSink | undefined, url: string, metadata: Record<string, JsonValue> = {}) {
-  if (!hooks?.message) return;
-  if (hooks.sink) {
-    hooks.sink({ kind: "image_delta", url, metadata });
-    return;
-  }
-  const normalized = normalizeGeneratedImageUrl(url);
-  if (!normalized) return;
-  markStreamFirstContent(hooks.message);
-  hooks.message.parts.push({ type: "image", url: normalized, metadata });
-  touchStream(hooks);
 }
 
 async function readOpenAiResponseIntoMessage(

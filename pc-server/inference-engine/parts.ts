@@ -1,0 +1,141 @@
+// inference-engine/parts.ts — 流式消息 part 操作辅助
+// 纪律：只负责单个 Message 的 part 增删/改写，不直接写 state.json、不广播 SSE。
+// 调用方通过 hooks.sink 把事件交给协调器处理。
+
+import type { JsonValue, Message } from "../foundation/types";
+import { isRecord } from "../foundation/utils";
+
+export function setMessageLoading(msg: Message, label = "正在生成回复") {
+  if (msg.parts.length > 0) return;
+  msg.parts = [{ type: "loading", label }];
+}
+
+export function finishReasoningParts(msg: Message) {
+  const now = new Date().toISOString();
+  msg.parts = msg.parts.map((part) => {
+    if (part && typeof part === "object" && !Array.isArray(part) && part.type === "reasoning" && !part.finishedAt) {
+      return { ...part, finishedAt: now };
+    }
+    return part;
+  });
+}
+
+export function hasOpenReasoningPart(msg: Message) {
+  return msg.parts.some((part) =>
+    part && typeof part === "object" && !Array.isArray(part) && part.type === "reasoning" && !part.finishedAt
+  );
+}
+
+/** 把 loading / 占位 reasoning 替换成工具 part。事件流模式下只发事件，不直接改 message。 */
+export function replaceLoadingReasoningWithTool(msg: Message, toolPart: JsonValue, sink?: (event: any) => void) {
+  if (sink) {
+    const tp = isRecord(toolPart) ? toolPart : {};
+    sink({
+      kind: "tool_call_created",
+      toolCallId: String(tp.toolCallId ?? ""),
+      toolName: String(tp.toolName ?? ""),
+      input: String(tp.input ?? ""),
+      approvalState: tp.approvalState ?? { type: "auto" },
+    });
+    return;
+  }
+  markStreamFirstContent(msg);
+  msg.parts = msg.parts.filter((part) => !(
+    part &&
+    typeof part === "object" &&
+    !Array.isArray(part) &&
+    (part.type === "loading" || (part.type === "reasoning" && part.reasoning === "正在生成回复"))
+  ));
+  msg.parts.push(toolPart);
+}
+
+const streamStartedMessages = new WeakSet<Message>();
+
+export { streamStartedMessages };
+
+export function markStreamFirstContent(msg: Message | undefined) {
+  if (!msg) return;
+  if (streamStartedMessages.has(msg)) return;
+  streamStartedMessages.add(msg);
+  msg.createdAt = new Date().toISOString();
+}
+
+export function ensureReasoningPart(hooks: { message?: Message }, metadata?: Record<string, JsonValue>) {
+  if (!hooks.message) return null;
+  hooks.message.parts = hooks.message.parts.filter((part) => !(
+    part &&
+    typeof part === "object" &&
+    !Array.isArray(part) &&
+    (part.type === "loading" || (part.type === "reasoning" && part.reasoning === "正在生成回复"))
+  ));
+  const last = hooks.message.parts[hooks.message.parts.length - 1];
+  if (last && typeof last === "object" && !Array.isArray(last) && last.type === "reasoning") {
+    if (metadata && Object.keys(metadata).length > 0) {
+      last.metadata = { ...(isRecord(last.metadata) ? last.metadata : {}), ...metadata };
+    }
+    return last;
+  }
+  const next = {
+    type: "reasoning",
+    reasoning: "",
+    createdAt: new Date().toISOString(),
+    finishedAt: null,
+    ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
+  };
+  hooks.message.parts.push(next);
+  return next;
+}
+
+export function appendReasoningDelta(hooks: { message?: Message; sink?: (event: any) => void }, text: string, metadata?: Record<string, JsonValue>) {
+  if (!hooks.message) return;
+  if (hooks.sink) {
+    hooks.sink({ kind: "reasoning_delta", text, metadata });
+    return;
+  }
+  markStreamFirstContent(hooks.message);
+  const part = ensureReasoningPart(hooks, metadata);
+  if (part && text) part.reasoning = String(part.reasoning ?? "") + text;
+}
+
+export function normalizeGeneratedImageUrl(value: string) {
+  const text = value.trim();
+  if (!text || text.startsWith("data:") || /^https?:\/\//i.test(text)) return text;
+  return `data:image/png;base64,${text}`;
+}
+
+export function addStreamImage(hooks: { message?: Message; sink?: (event: any) => void } | undefined, url: string, metadata: Record<string, JsonValue> = {}) {
+  if (!hooks?.message) return;
+  if (hooks.sink) {
+    hooks.sink({ kind: "image_delta", url, metadata });
+    return;
+  }
+  const normalized = normalizeGeneratedImageUrl(url);
+  if (!normalized) return;
+  markStreamFirstContent(hooks.message);
+  hooks.message.parts.push({ type: "image", url: normalized, metadata });
+}
+
+export function addStreamText(hooks: { message?: Message; sink?: (event: any) => void } | undefined, text: string) {
+  if (!hooks?.message || !text) return;
+  if (hooks.sink) {
+    hooks.sink({ kind: "text_delta", text });
+    return;
+  }
+  markStreamFirstContent(hooks.message);
+  const hadOpenReasoning = hasOpenReasoningPart(hooks.message);
+  hooks.message.parts = hooks.message.parts.filter((part) => !(
+    part &&
+    typeof part === "object" &&
+    !Array.isArray(part) &&
+    (part.type === "loading" || (part.type === "reasoning" && part.reasoning === "正在生成回复"))
+  ));
+  if (hadOpenReasoning) {
+    finishReasoningParts(hooks.message);
+  }
+  const last = hooks.message.parts[hooks.message.parts.length - 1];
+  if (last && isRecord(last) && last.type === "text") {
+    last.text = String(last.text ?? "") + text;
+  } else {
+    hooks.message.parts.push({ type: "text", text });
+  }
+}
