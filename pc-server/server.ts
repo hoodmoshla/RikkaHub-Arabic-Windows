@@ -8,6 +8,22 @@ import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveInitia
 import { GLOBAL_MEMORY_ID, buildMemoryPrompt, buildRecentChatsPrompt, memoriesForAssistant, memoryStore } from "./memory/index";
 import { extractDocxText, extractEpubText, extractPdfText, extractPptxText, extractStoredFileText, extractStoredFileTextSync, fallbackDocumentText, getStoredFileSize, loadMupdf, readZipEntries, stripXmlText } from "./files/index";
 import { APP_VERSION, UPDATE_R2_BASE, fetchGithubLatestRelease, fetchLatestReleaseFromHtmlRedirect, probeCachedInstaller, readSkippedVersion, writeSkippedVersion } from "./updates/index";
+import {
+  getMcpToolOverride,
+  isMcpToolApprovalRequiredForAssistant,
+  isMcpToolEnabledForAssistant,
+  initialApprovalState,
+  toolNeedsApproval,
+} from "./tools/approval";
+import {
+  apiToolCallFromPart,
+  openAiToolOutput,
+  parseToolInput,
+  partsToToolResultText,
+  resolvedToolOutput,
+  toolExecutionErrorPayload,
+  toolOutputForApproval,
+} from "./tools/format";
 import type { GenerationEvent, GenerationEventSink, ToolCall, ToolContext, ToolExecutor, ToolResult } from "./inference-engine/events";
 import {
   checkpointConversationsDb,
@@ -5926,32 +5942,6 @@ async function syncMcpServerTools(server: Record<string, JsonValue>) {
 // Read this assistant's per-tool override (PC-only). Returns the override entry or undefined
 // if the assistant hasn't customized this tool. Outer key is the server id from the global
 // MCP server list; inner key is the tool name (NOT the `mcp__<sanitized>` LLM-facing alias).
-function getMcpToolOverride(assistant: Assistant, serverId: string, toolName: string): { enable?: boolean; needsApproval?: boolean } | undefined {
-  const overrides = isRecord(assistant.mcpToolOverrides) ? assistant.mcpToolOverrides as Record<string, Record<string, { enable?: boolean; needsApproval?: boolean }>> : undefined;
-  if (!overrides) return undefined;
-  const perServer = overrides[serverId];
-  if (!perServer) return undefined;
-  return perServer[toolName];
-}
-
-// Per-assistant resolved enable state for a tool. Global tool.enable=false ⇒ false (override
-// can never reactivate a globally-disabled tool — matches the user's stated rule "设置中关闭
-// 的工具会话里看不见"). Otherwise, the override.enable wins; absence falls back to true.
-function isMcpToolEnabledForAssistant(assistant: Assistant, serverId: string, tool: Record<string, JsonValue>): boolean {
-  if (tool.enable === false) return false;
-  const override = getMcpToolOverride(assistant, serverId, String(tool.name ?? ""));
-  if (override?.enable === false) return false;
-  return true;
-}
-
-// Per-assistant resolved needsApproval state. Override wins when set (true/false), otherwise
-// falls back to the global per-tool needsApproval flag.
-function isMcpToolApprovalRequiredForAssistant(assistant: Assistant, serverId: string, tool: Record<string, JsonValue>): boolean {
-  const override = getMcpToolOverride(assistant, serverId, String(tool.name ?? ""));
-  if (typeof override?.needsApproval === "boolean") return override.needsApproval;
-  return tool.needsApproval === true;
-}
-
 async function callMcpTool(assistant: Assistant, toolName: string, args: Record<string, JsonValue>) {
   const selected = new Set(getStringArray(assistant.mcpServers));
   const servers = (state.settings.mcpServers as Array<Record<string, JsonValue>>)
@@ -5968,34 +5958,6 @@ async function callMcpTool(assistant: Assistant, toolName: string, args: Record<
     return result;
   }
   throw new Error(`MCP tool '${toolName}' is not available for this assistant`);
-}
-
-// Returns true if this tool requires user approval before executing — mirrors Android's
-// GenerationHandler.kt:184-189 logic (`toolDef?.needsApproval == true && state is Auto -> Pending`).
-// PC scope: `ask_user` is always pending (it's literally a "ask the user" prompt), and any
-// MCP tool whose effective needsApproval (override-resolved) is true gets pending too. Local
-// built-ins (search/scrape/memory/etc.) currently never need approval — Android matches.
-function toolNeedsApproval(toolName: string, assistant: Assistant): boolean {
-  if (!toolName) return false;
-  if (toolName === "ask_user") return true;
-  if (!toolName.startsWith("mcp__")) return false;
-  const selected = new Set(getStringArray(assistant.mcpServers));
-  const servers = (state.settings.mcpServers as Array<Record<string, JsonValue>>)
-    .filter((server) => selected.has(String(server.id ?? "")) && isRecord(server.commonOptions) && server.commonOptions.enable !== false);
-  for (const server of servers) {
-    const common = server.commonOptions as Record<string, JsonValue>;
-    const tools = Array.isArray(common.tools) ? common.tools.filter(isRecord) : [];
-    const matched = tools.find((tool) =>
-      isMcpToolEnabledForAssistant(assistant, String(server.id ?? ""), tool)
-      && `mcp__${String(tool.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_")}` === toolName,
-    );
-    if (matched) return isMcpToolApprovalRequiredForAssistant(assistant, String(server.id ?? ""), matched);
-  }
-  return false;
-}
-
-function initialApprovalState(toolName: string, assistant: Assistant): JsonValue {
-  return toolNeedsApproval(toolName, assistant) ? { type: "pending" } : { type: "auto" };
 }
 
 async function runPowerShell(command: string, input = "") {
@@ -6361,39 +6323,6 @@ async function executeToolCall(
   throw new Error(`Unknown tool: ${name}`);
 }
 
-function toolExecutionErrorPayload(err: unknown) {
-  if (err instanceof Error) {
-    return {
-      error: `[${err.name || "Error"}] ${err.message}${err.stack ? `\n${err.stack}` : ""}`,
-    };
-  }
-  return { error: String(err) };
-}
-
-function openAiToolOutput(parts: JsonValue[]) {
-  const text = textFromParts(parts);
-  if (text) return text;
-  return parts.length ? JSON.stringify(parts) : "";
-}
-
-function toolOutputForApproval(part: Record<string, JsonValue>) {
-  const approvalState = isRecord(part.approvalState) ? part.approvalState : { type: "auto" };
-  const type = String(approvalState.type ?? "auto");
-  if (type === "answered") return String(approvalState.answer ?? "");
-  if (type === "denied") {
-    const reason = String(approvalState.reason ?? "").trim() || "No reason provided";
-    return JSON.stringify({ error: `Tool execution denied by user. Reason: ${reason}` });
-  }
-  return "";
-}
-
-function resolvedToolOutput(part: Record<string, JsonValue>) {
-  const output = Array.isArray(part.output) ? part.output : [];
-  const fromOutput = openAiToolOutput(output);
-  if (fromOutput) return fromOutput;
-  return toolOutputForApproval(part);
-}
-
 function fileEntryFromApiUrl(url: string) {
   const match = url.match(/^\/api\/files\/(\d+)\/content(?:\?.*)?$/) ?? url.match(/^\/files\/(\d+)\/content(?:\?.*)?$/);
   if (!match) return null;
@@ -6663,19 +6592,6 @@ function claudeBlocksFromUiParts(parts: JsonValue[]) {
     }
   }
   return blocks.length ? blocks : [claudeTextBlock("")];
-}
-
-function parseToolInput(value: unknown) {
-  if (isRecord(value)) return value;
-  if (typeof value !== "string") return {};
-  const trimmed = value.trim();
-  if (!trimmed) return {};
-  try {
-    const parsed = JSON.parse(trimmed);
-    return isRecord(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
 }
 
 function claudeToolUseBlock(toolCall: any) {
@@ -9980,14 +9896,6 @@ async function streamGoogleChatWithTools(
 
 // functionResponse 的 result 文本：把工具输出 parts 拼成纯文本，对齐安卓
 // toFunctionResponsePart（只取 Text part 拼接）。
-function partsToToolResultText(parts: JsonValue[]): string {
-  if (!Array.isArray(parts)) return "";
-  return parts
-    .map((part) => (isRecord(part) && part.type === "text" ? String(part.text ?? "") : ""))
-    .filter(Boolean)
-    .join("\n");
-}
-
 async function fetchOpenAiText(
   url: string,
   headers: Record<string, string>,
@@ -10627,17 +10535,6 @@ function responseApiToolCallItems(toolCalls: any[]) {
     name: String(toolCall.function?.name ?? ""),
     arguments: String(toolCall.function?.arguments ?? "{}"),
   }));
-}
-
-function apiToolCallFromPart(part: Record<string, JsonValue>) {
-  return {
-    id: String(part.toolCallId ?? id()),
-    type: "function",
-    function: {
-      name: String(part.toolName ?? ""),
-      arguments: String(part.input ?? "{}"),
-    },
-  };
 }
 
 async function executeApprovedToolPart(part: Record<string, JsonValue>, assistant: Assistant) {
