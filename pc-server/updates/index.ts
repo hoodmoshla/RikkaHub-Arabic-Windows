@@ -17,9 +17,10 @@ export function writeSkippedVersion(version: string) {
   try { writeFileSync(skipVersionPath, version.trim()); } catch { /* best-effort */ }
 }
 
-// MUST be kept in sync with web-ui/src-tauri/tauri.conf.json's `version` field. The update
-// checker compares this against the latest GitHub release tag and the version is also shown
-// verbatim in the About page. If you bump tauri.conf.json's version, bump this too.
+// 版本号唯一修改入口：`bun run version:bump <x.y.z>`（scripts/bump-version.ts），
+// 一次同步本处 + tauri.conf.json + Cargo.toml 三处；请勿手改单处（CI 的
+// check-version-sync.ts 会红灯）。更新检查用本值对比 GitHub release tag，
+// 关于页也原样展示。
 export const APP_VERSION = "1.4.1";
 
 export async function fetchGithubLatestRelease(repo: string): Promise<GithubRelease> {
