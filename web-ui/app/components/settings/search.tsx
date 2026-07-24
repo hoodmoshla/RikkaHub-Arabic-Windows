@@ -1,0 +1,735 @@
+// components/settings/search.tsx — 搜索服务分区（17 种服务配置/测试/排序，纯搬迁自 routes/settings.tsx）
+
+import * as React from "react";
+import { useTranslation } from "react-i18next";
+import { CheckCircle2, Database, Loader2, Plus, Search, Trash2, X, XCircle } from "lucide-react";
+import { toast } from "sonner";
+import { AIIcon } from "~/components/ui/ai-icon";
+import { Button } from "~/components/ui/button";
+import { Input } from "~/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
+import { Textarea } from "~/components/ui/textarea";
+import { cn } from "~/lib/utils";
+import api from "~/services/api";
+import type { SearchServiceOption, Settings } from "~/types";
+import {
+  clone,
+  moveItem,
+  numberText,
+  PasswordInput,
+  SectionHeader,
+  SortableRow,
+  textValue,
+} from "~/components/settings/shared";
+
+// Canonical labels for search services. Used in both the settings dropdown and as the
+// AIIcon lookup key so the logo follows the type, not the user-entered display name.
+const SEARCH_SERVICE_TYPE_LABELS: Record<string, string> = {
+  bing_local: "Bing",
+  rikkahub: "RikkaHub",
+  tavily: "Tavily",
+  exa: "Exa",
+  zhipu: "智谱",
+  tinyfish: "Tinyfish",
+  brave: "Brave",
+  perplexity: "Perplexity",
+  bocha: "博查",
+  linkup: "LinkUp",
+  metaso: "秘塔",
+  ollama: "Ollama",
+  jina: "Jina",
+  firecrawl: "Firecrawl",
+  grok: "Grok",
+  searxng: "SearXNG",
+  custom_js: "Custom JS",
+};
+
+function searchServiceLabelForType(type: string | null | undefined): string {
+  const key = String(type ?? "")
+    .trim()
+    .toLowerCase();
+  if (!key) return "Search";
+  return SEARCH_SERVICE_TYPE_LABELS[key] ?? key;
+}
+
+// 分隔符与后端 splitSearchApiKeys / APP KeyRoulette 一字一致(/[\s,]+/)。前端把字符串拆成多框编辑,
+// 写回时再 join 成单字符串——数据结构不变,备份/APP 兼容零感知。
+const SEARCH_KEY_SPLIT = /[\s,]+/;
+
+/** 搜索服务多 Key 编辑器:每框一个 key,框尾「×」删除,底部「+」追加。
+ *  测试结果按 key 精确匹配后内联显示绿勾/红叉(汇总区另有保留)。
+ *
+ *  数据流:父组件存字符串(后端 splitSearchApiKeys 契约,APP 兼容),但字符串往返
+ *  (split/join)无法稳定表示"空框"——filter(Boolean) 会吃掉空串,点「+」追加的空框
+ *  在 value 往返后消失(曾导致+号无反应)。故本地用 state 维护框数组,onChange 只回写
+ *  非空 key 序列;外部 value 变化(切换服务/父重置)经 useEffect 比对非空序列后才同步,
+ *  防覆盖编辑中的空框、也防 commit→onChange→value 往返触发循环。 */
+function SearchApiKeyList({
+  value,
+  onChange,
+  testEntries,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  testEntries: Array<{ key: string; status: "ok" | "fail"; failCode?: string }>;
+}) {
+  const { t } = useTranslation();
+  const [keys, setKeys] = React.useState<string[]>(() => {
+    const parts = value.split(SEARCH_KEY_SPLIT).map((k) => k.trim()).filter(Boolean);
+    return parts.length > 0 ? parts : [""];
+  });
+
+  // 外部 value 变化时同步。只在"非空 key 序列"不一致时才 setKeys——既覆盖切换服务/
+  // 父重置,又避免覆盖编辑中的空框/中间状态,还阻断 commit→onChange→value 往返循环。
+  React.useEffect(() => {
+    const parts = value.split(SEARCH_KEY_SPLIT).map((k) => k.trim()).filter(Boolean);
+    const external = parts.length > 0 ? parts : [""];
+    const localNonEmpty = keys.filter((k) => k.trim()).map((k) => k.trim());
+    if (localNonEmpty.join("\n") !== external.join("\n")) setKeys(external);
+    // 故意不依赖 keys:commit 时本地已 setKeys,不需要 value 回来再同步
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  // 本地立即更新(保留空框);onChange 只回写非空 key(换行 join——换行属于 \s,
+  // 与后端 /[\s,]+/ 兼容,key 不含换行,比逗号/空格更不易和 key 本身冲突)。
+  const commit = (next: string[]) => {
+    setKeys(next);
+    onChange(next.filter((k) => k.trim()).join("\n"));
+  };
+  const update = (index: number, val: string) => {
+    const next = [...keys];
+    next[index] = val;
+    commit(next);
+  };
+  const add = () => commit([...keys, ""]);
+  const remove = (index: number) => {
+    if (keys.length <= 1) {
+      commit([""]); // 唯一框:删 = 清空,仍保留一个可编辑框
+      return;
+    }
+    commit(keys.filter((_, i) => i !== index));
+  };
+  // 失焦时收掉尾部连续空框(点 + 又没填)。中间空框不动——用户可能还要填。
+  const trimTrailingEmpty = () => {
+    let next = [...keys];
+    while (next.length > 1 && next[next.length - 1].trim() === "") next.pop();
+    if (next.length !== keys.length) commit(next);
+  };
+
+  return (
+    <div className="space-y-2">
+      {keys.map((key, index) => {
+        // 改了 key 后字符串变化,旧测试结果自动对不上、图标消失——符合预期。
+        const entry = key ? testEntries.find((e) => e.key === key) : undefined;
+        return (
+          <div key={index} className="flex items-center gap-2">
+            <div className="flex-1">
+              <PasswordInput value={key} onChange={(v) => update(index, v)} onBlur={trimTrailingEmpty} />
+            </div>
+            {entry ? (
+              entry.status === "ok" ? (
+                <CheckCircle2
+                  className="size-4 shrink-0 text-emerald-500"
+                  aria-label={t("settings:search.key_ok")}
+                />
+              ) : (
+                <XCircle
+                  className="size-4 shrink-0 text-destructive"
+                  aria-label={t(`settings:search.key_fail_${entry.failCode ?? "other"}`)}
+                />
+              )
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => remove(index)}
+              aria-label={t("settings:search.key_remove")}
+              title={t("settings:search.key_remove")}
+            >
+              <X className="size-4" />
+            </Button>
+          </div>
+        );
+      })}
+      {/* +号独立放底部:所有 key 框只有 input+叉号,等宽;末框不再被+号挤窄。 */}
+      <Button type="button" variant="outline" size="sm" onClick={add} className="w-full justify-center">
+        <Plus className="size-4" />
+        {t("settings:search.key_add")}
+      </Button>
+    </div>
+  );
+}
+
+const DEFAULT_CUSTOM_JS_SEARCH_SCRIPT = `async function search(query, resultSize) {
+  const encoded = encodeURIComponent(query);
+  const res = await fetch("https://example.com/search?q=" + encoded + "&limit=" + resultSize);
+  const data = await res.json();
+  return {
+    items: data.results.map(function(r) {
+      return { title: r.title, url: r.url, text: r.snippet };
+    })
+  };
+}`;
+
+const DEFAULT_CUSTOM_JS_SCRAPE_SCRIPT = `async function scrape(urls) {
+  return {
+    urls: await Promise.all(urls.map(async function(url) {
+      const res = await fetch(url);
+      const body = await res.text();
+      return { url: url, content: body };
+    }))
+  };
+}`;
+
+function createSearchService(): Record<string, unknown> {
+  return {
+    id: crypto.randomUUID(),
+    type: "tavily",
+    name: "Tavily",
+    apiKey: "",
+    depth: "advanced",
+  };
+}
+
+function toSearchService(value: Record<string, unknown>): SearchServiceOption {
+  return { ...value, id: String(value.id ?? crypto.randomUUID()) } as SearchServiceOption;
+}
+
+export function SearchSection({
+  settings,
+  onSettings,
+}: {
+  settings: Settings;
+  onSettings: (settings: Settings) => void;
+}) {
+  const [selectedId, setSelectedId] = React.useState(
+    String(
+      settings.searchServices[settings.searchServiceSelected]?.id ??
+        settings.searchServices[0]?.id ??
+        "",
+    ),
+  );
+  const selected = (settings.searchServices.find((item) => String(item.id) === selectedId) ??
+    settings.searchServices[0]) as Record<string, unknown> | undefined;
+  const [draft, setDraft] = React.useState<Record<string, unknown>>(
+    selected ? clone(selected) : createSearchService(),
+  );
+  const [testing, setTesting] = React.useState(false);
+  const [testResult, setTestResult] = React.useState("");
+  const [keyTestEntries, setKeyTestEntries] = React.useState<
+    Array<{ key: string; status: "ok" | "fail"; failCode?: string }>
+  >([]);
+  const dirtyRef = React.useRef(false);
+  const { t } = useTranslation();
+
+  // searchServicesRef: avoid re-running this effect after every autosave → onSettings
+  // round-trip (would overwrite mid-flight keystrokes). See McpServerEditor for rationale.
+  const searchServicesRef = React.useRef(settings.searchServices);
+  searchServicesRef.current = settings.searchServices;
+  React.useEffect(() => {
+    const next = (searchServicesRef.current.find((item) => String(item.id) === selectedId) ??
+      searchServicesRef.current[0]) as Record<string, unknown> | undefined;
+    if (next) setDraft(clone(next));
+    dirtyRef.current = false;
+    setTestResult("");
+  }, [selectedId]);
+
+  const patchDraft = (patch: Record<string, unknown>) => {
+    dirtyRef.current = true;
+    setDraft({ ...draft, ...patch });
+  };
+
+  const moveSearchService = async (from: number, to: number) => {
+    const searchServices = moveItem(settings.searchServices, from, to);
+    const selectedId = settings.searchServices[settings.searchServiceSelected]?.id;
+    const searchServiceSelected = Math.max(
+      0,
+      searchServices.findIndex((item) => item.id === selectedId),
+    );
+    const next = { ...settings, searchServices, searchServiceSelected };
+    onSettings(next);
+    await api.post("settings/search/reorder", {
+      ids: searchServices.map((item) => item.id),
+      selectedId,
+    });
+  };
+  const selectService = async (index: number) => {
+    setSelectedId(String(settings.searchServices[index]?.id ?? ""));
+    onSettings({ ...settings, searchServiceSelected: index });
+    await api.post("settings/search/service", { index });
+  };
+  const save = async () => {
+    const result = await api.post<{ service: Record<string, unknown> }>(
+      "settings/search/service/detail",
+      draft,
+    );
+    const savedService = toSearchService(result.service);
+    const exists = settings.searchServices.some(
+      (item) => String(item.id) === String(result.service.id),
+    );
+    const searchServices = exists
+      ? settings.searchServices.map((item) =>
+          String(item.id) === String(savedService.id) ? savedService : item,
+        )
+      : [...settings.searchServices, savedService];
+    onSettings({
+      ...settings,
+      searchServices,
+      searchServiceSelected: searchServices.findIndex(
+        (item) => String(item.id) === String(savedService.id),
+      ),
+    });
+    setSelectedId(String(savedService.id));
+    toast.success(t("settings:search.saved"));
+  };
+  React.useEffect(() => {
+    if (!dirtyRef.current) return;
+    const timer = window.setTimeout(() => {
+      void api
+        .post<{ service: Record<string, unknown> }>("settings/search/service/detail", draft)
+        .then((result) => {
+          dirtyRef.current = false;
+          const savedService = toSearchService(result.service);
+          const exists = settings.searchServices.some(
+            (item) => String(item.id) === String(savedService.id),
+          );
+          const searchServices = exists
+            ? settings.searchServices.map((item) =>
+                String(item.id) === String(savedService.id) ? savedService : item,
+              )
+            : [...settings.searchServices, savedService];
+          onSettings({ ...settings, searchServices });
+        })
+        .catch((error: Error) =>
+          toast.error(error.message || t("settings:search.autosave_failed")),
+        );
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [draft, onSettings, settings]);
+  const addService = () => {
+    const service = createSearchService();
+    void api
+      .post<{ service: Record<string, unknown> }>("settings/search/service/detail", service)
+      .then((result) => {
+        const savedService = toSearchService(result.service);
+        const searchServices = [...settings.searchServices, savedService];
+        onSettings({
+          ...settings,
+          searchServices,
+          searchServiceSelected: searchServices.length - 1,
+        });
+        setDraft(savedService as unknown as Record<string, unknown>);
+        setSelectedId(String(savedService.id));
+        setTestResult("");
+        toast.success(t("settings:search.added"));
+      })
+      .catch((error: Error) => toast.error(error.message || t("settings:search.add_failed")));
+  };
+  const test = async () => {
+    setTesting(true);
+    setTestResult(t("settings:search.testing_start"));
+    setKeyTestEntries([]);
+    try {
+      await save();
+      const result = await api.post<{
+        status: "ok" | "fail";
+        endpoint: string;
+        preview: string;
+        keys?: Array<{ key: string; status: "ok" | "fail"; failCode?: string }>;
+      }>("settings/search/service/test", draft);
+      const keys = Array.isArray(result.keys) ? result.keys : [];
+      const okCount = keys.filter((k) => k.status === "ok").length;
+      if (result.status === "ok") {
+        if (keys.length > 1 && okCount < keys.length) {
+          setTestResult(
+            t("settings:search.test_partial", {
+              endpoint: result.endpoint,
+              ok: okCount,
+              total: keys.length,
+              failed: keys.length - okCount,
+              preview: result.preview,
+            }),
+          );
+        } else if (keys.length > 1) {
+          setTestResult(
+            t("settings:search.test_all_ok", {
+              endpoint: result.endpoint,
+              count: keys.length,
+              preview: result.preview,
+            }),
+          );
+        } else {
+          setTestResult(
+            t("settings:search.test_success", { endpoint: result.endpoint, preview: result.preview }),
+          );
+        }
+        toast.success(t("settings:search.test_ok"));
+        // Refresh settings so the "已通过测试" badge updates (server marks testPassed on success).
+        onSettings(await api.get<Settings>("settings"));
+      } else {
+        // 多 key 全部失败:展示汇总 + 每个 key 的失败明细;单 key 失败:直接给出友好原因
+        // (如"密钥无效或已过期"),比原来的 "401: {body}" 更易懂。
+        const singleFailReason =
+          keys.length === 1
+            ? t(`settings:search.key_fail_${keys[0]?.failCode ?? "other"}`)
+            : null;
+        setTestResult(
+          keys.length > 1
+            ? t("settings:search.test_all_failed", { count: keys.length })
+            : singleFailReason ?? t("settings:search.test_failed"),
+        );
+        toast.error(singleFailReason ?? t("settings:search.test_failed"));
+      }
+      setKeyTestEntries(keys);
+    } catch (error) {
+      // 无 key 服务(searxng/custom_js)失败、网络异常等仍以非 2xx 抛出,走这里。
+      const message = error instanceof Error ? error.message : t("settings:search.test_failed");
+      setTestResult(message);
+      setKeyTestEntries([]);
+      toast.error(message);
+    } finally {
+      setTesting(false);
+    }
+  };
+  const remove = async () => {
+    if (
+      !window.confirm(
+        t("settings:search.delete_confirm", {
+          name: textValue(draft.name) || textValue(draft.type),
+        }),
+      )
+    )
+      return;
+    await api.delete(`settings/search/service/${encodeURIComponent(String(draft.id))}`);
+    const searchServices = settings.searchServices.filter(
+      (item) => String(item.id) !== String(draft.id),
+    );
+    onSettings({ ...settings, searchServices, searchServiceSelected: 0 });
+    setSelectedId(String(searchServices[0]?.id ?? ""));
+    toast.success(t("settings:search.deleted"));
+  };
+
+  return (
+    <>
+      <SectionHeader
+        icon={Search}
+        title={t("settings:search.title")}
+        subtitle={t("settings:search.subtitle")}
+      />
+      <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <div className="space-y-2 rounded-lg border bg-card p-2">
+          <Button className="w-full justify-start" variant="outline" onClick={addService}>
+            <Plus className="size-4" />
+            {t("settings:search.add")}
+          </Button>
+          {settings.searchServices.map((service, index) => (
+            <SortableRow
+              key={String(service.id ?? index)}
+              id={String(service.id ?? index)}
+              index={index}
+              active={String(service.id) === String(draft.id)}
+              onSelect={() => selectService(index)}
+              onMove={moveSearchService}
+            >
+              <span className="grid min-w-0 grid-cols-[34px_minmax(0,1fr)_36px] items-center gap-3 text-left">
+                <AIIcon
+                  name={searchServiceLabelForType(textValue(service.type))}
+                  size={30}
+                  className="justify-self-start"
+                />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-1.5 truncate font-medium">
+                    {(() => {
+                      const type = String(service.type ?? "").toLowerCase();
+                      const isPreset = type === "bing_local" || type === "rikkahub";
+                      const passed =
+                        isPreset || (service as Record<string, unknown>).testPassed === true;
+                      return (
+                        <span
+                          aria-hidden
+                          className={cn(
+                            "size-2 shrink-0 rounded-full",
+                            passed ? "bg-emerald-500" : "bg-muted-foreground/40",
+                          )}
+                          title={
+                            passed
+                              ? isPreset
+                                ? t("settings:search.preset_ok")
+                                : t("settings:search.passed")
+                              : t("settings:search.not_passed")
+                          }
+                        />
+                      );
+                    })()}
+                    <span className="truncate">
+                      {textValue(service.name) ||
+                        searchServiceLabelForType(textValue(service.type))}
+                    </span>
+                  </span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {textValue(service.type) || JSON.stringify(service)}
+                  </span>
+                </span>
+                {index === settings.searchServiceSelected ? (
+                  <span className="shrink-0 text-xs text-primary">
+                    {t("settings:search.current")}
+                  </span>
+                ) : null}
+              </span>
+            </SortableRow>
+          ))}
+        </div>
+        <div className="space-y-5 rounded-lg border bg-card p-5">
+          <div className="flex items-center gap-3">
+            <AIIcon name={searchServiceLabelForType(textValue(draft.type))} size={40} />
+            <div>
+              <div className="text-lg font-medium">
+                {textValue(draft.name) ||
+                  searchServiceLabelForType(textValue(draft.type)) ||
+                  t("settings:search.service_default")}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {textValue(draft.type) || "custom"}
+              </div>
+            </div>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="space-y-2">
+              <span className="text-sm font-medium">{t("settings:search.name")}</span>
+              <Input
+                value={textValue(draft.name)}
+                onChange={(event) => patchDraft({ name: event.target.value })}
+              />
+            </label>
+            <label className="space-y-2">
+              <span className="text-sm font-medium">{t("settings:search.type")}</span>
+              <Select
+                value={textValue(draft.type) || "tavily"}
+                onValueChange={(type) => {
+                  // Re-sync `name` whenever it was still the previous type's default label —
+                  // that way the row icon and detail-pane logo follow the chosen type. Manual
+                  // names (anything not matching the canonical label) are preserved.
+                  const previousType = textValue(draft.type);
+                  const previousLabel = searchServiceLabelForType(previousType);
+                  const currentName = textValue(draft.name);
+                  const isDefaultName =
+                    !currentName || currentName === previousLabel || currentName === previousType;
+                  patchDraft({
+                    type,
+                    name: isDefaultName ? searchServiceLabelForType(type) : currentName,
+                    ...(type === "custom_js" && !textValue(draft.searchScript)
+                      ? {
+                          searchScript: DEFAULT_CUSTOM_JS_SEARCH_SCRIPT,
+                          scrapeScript: DEFAULT_CUSTOM_JS_SCRAPE_SCRIPT,
+                        }
+                      : {}),
+                  });
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(
+                    [
+                      "bing_local",
+                      "rikkahub",
+                      "tavily",
+                      "exa",
+                      "zhipu",
+                      "tinyfish",
+                      "brave",
+                      "perplexity",
+                      "bocha",
+                      "linkup",
+                      "metaso",
+                      "ollama",
+                      "jina",
+                      "firecrawl",
+                      "grok",
+                      "searxng",
+                      "custom_js",
+                    ] as const
+                  ).map((type) => (
+                    <SelectItem key={type} value={type}>
+                      <span className="flex items-center gap-2">
+                        <AIIcon
+                          name={searchServiceLabelForType(type)}
+                          size={16}
+                          className="bg-transparent"
+                        />
+                        {searchServiceLabelForType(type)}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+            {textValue(draft.type) !== "searxng" && textValue(draft.type) !== "custom_js" ? (
+              <div className="space-y-2 md:col-span-2">
+                <span className="text-sm font-medium">API Key</span>
+                <SearchApiKeyList
+                  value={textValue(draft.apiKey)}
+                  onChange={(apiKey) => patchDraft({ apiKey })}
+                  testEntries={keyTestEntries}
+                />
+                <span className="text-xs text-muted-foreground">{t("settings:search.api_key_hint")}</span>
+              </div>
+            ) : null}
+            {textValue(draft.type) === "searxng" ? (
+              <>
+                <label className="space-y-2 md:col-span-2">
+                  <span className="text-sm font-medium">SearXNG URL</span>
+                  <Input
+                    value={textValue(draft.url)}
+                    onChange={(event) => patchDraft({ url: event.target.value })}
+                    placeholder="https://search.example.com"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="text-sm font-medium">Engines</span>
+                  <Input
+                    value={textValue(draft.engines)}
+                    onChange={(event) => patchDraft({ engines: event.target.value })}
+                    placeholder="google,bing"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="text-sm font-medium">Language</span>
+                  <Input
+                    value={textValue(draft.language)}
+                    onChange={(event) => patchDraft({ language: event.target.value })}
+                    placeholder="zh-CN"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="text-sm font-medium">Username</span>
+                  <Input
+                    value={textValue(draft.username)}
+                    onChange={(event) => patchDraft({ username: event.target.value })}
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="text-sm font-medium">Password</span>
+                  <PasswordInput
+                    value={textValue(draft.password)}
+                    onChange={(password) => patchDraft({ password })}
+                  />
+                </label>
+              </>
+            ) : null}
+            {textValue(draft.type) === "custom_js" ? (
+              <>
+                <label className="space-y-2 md:col-span-2">
+                  <span className="text-sm font-medium">Search Script</span>
+                  <Textarea
+                    value={textValue(draft.searchScript)}
+                    onChange={(event) => patchDraft({ searchScript: event.target.value })}
+                    className="min-h-56 font-mono text-xs"
+                    placeholder={
+                      "async function search(query, resultSize) {\n  const res = await fetch('https://example.com/search?q=' + encodeURIComponent(query));\n  const data = await res.json();\n  return { items: data.results.map((r) => ({ title: r.title, url: r.url, text: r.snippet })) };\n}"
+                    }
+                  />
+                </label>
+                <label className="space-y-2 md:col-span-2">
+                  <span className="text-sm font-medium">Scrape Script</span>
+                  <Textarea
+                    value={textValue(draft.scrapeScript)}
+                    onChange={(event) => patchDraft({ scrapeScript: event.target.value })}
+                    className="min-h-40 font-mono text-xs"
+                    placeholder={
+                      "async function scrape(urls) {\n  return { urls: await Promise.all(urls.map(async (url) => {\n    const res = await fetch(url);\n    return { url, content: await res.text() };\n  })) };\n}"
+                    }
+                  />
+                </label>
+              </>
+            ) : null}
+            <label className="space-y-2">
+              <span className="text-sm font-medium">{t("settings:search.depth")}</span>
+              <Select
+                value={textValue(draft.depth) || "standard"}
+                onValueChange={(depth) => patchDraft({ depth })}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="basic">Basic</SelectItem>
+                  <SelectItem value="standard">Standard</SelectItem>
+                  <SelectItem value="advanced">Advanced</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <label className="space-y-2">
+              <span className="text-sm font-medium">{t("settings:search.result_count")}</span>
+              <Input
+                value={numberText(
+                  draft.resultSize ??
+                    (settings.searchCommonOptions as Record<string, unknown> | undefined)
+                      ?.resultSize,
+                )}
+                onChange={(event) => patchDraft({ resultSize: Number(event.target.value) || 10 })}
+              />
+            </label>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={test} disabled={testing}>
+              {testing ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Database className="size-4" />
+              )}
+              {t("settings:search.test")}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={remove}
+              disabled={
+                !settings.searchServices.some((item) => String(item.id) === String(draft.id))
+              }
+            >
+              <Trash2 className="size-4" />
+              {t("settings:search.delete")}
+            </Button>
+            <div className="flex items-center px-2 text-xs text-muted-foreground">
+              {t("settings:search.autosaved")}
+            </div>
+          </div>
+          {testResult ? (
+            <pre className="max-h-56 overflow-auto rounded-md border bg-muted p-3 text-xs whitespace-pre-wrap">
+              {testResult}
+            </pre>
+          ) : null}
+          {keyTestEntries.length > 1 ? (
+            <div className="space-y-1.5 rounded-md border bg-card p-3">
+              <div className="text-xs font-medium text-muted-foreground">
+                {t("settings:search.key_status_title")}
+              </div>
+              {keyTestEntries.map((entry, index) => (
+                <div key={index} className="flex items-center gap-2 text-xs">
+                  {entry.status === "ok" ? (
+                    <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
+                  ) : (
+                    <XCircle className="size-3.5 shrink-0 text-destructive" />
+                  )}
+                  <code className="font-mono">{entry.key}</code>
+                  <span
+                    className={cn(
+                      "text-muted-foreground",
+                      entry.status === "fail" && "text-destructive",
+                    )}
+                  >
+                    {entry.status === "ok"
+                      ? t("settings:search.key_ok")
+                      : t(`settings:search.key_fail_${entry.failCode ?? "other"}`)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </>
+  );
+}
