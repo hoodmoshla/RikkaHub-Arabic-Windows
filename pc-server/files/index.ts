@@ -1,10 +1,11 @@
 // files/index.ts — 文件上传、OCR、文档解析
 // 纪律：负责文档解析与文件元数据读取，不直接修改业务状态。
 
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { StoredFile, XmlToken, MupdfModule } from "../foundation/types";
+import { dataDir, filesDir } from "../foundation/paths";
 
 // mupdf-wasm.wasm 通过 `with { type: "file" }` 让 bun build --compile 把这个 9.6MB 的
 // wasm 二进制嵌进单 exe。运行时通过 readFileSync(mupdfWasmPath) 读出字节,塞进 mupdf 暴露
@@ -820,3 +821,20 @@ export function extractPptxShapeText(p: XmlPull, result: string[]) {
   }
 }
 
+export function safeDataFilePath(relativePath: string) {
+  let decoded = "";
+  try {
+    decoded = decodeURIComponent(relativePath).replace(/\\/g, "/").replace(/^\/+/, "");
+  } catch {
+    return null;
+  }
+  if (!decoded || decoded.split("/").some((part) => part === "..")) return null;
+  const roots = [resolve(dataDir), resolve(filesDir)];
+  const separator = process.platform === "win32" ? "\\" : "/";
+  const candidates = [resolve(dataDir, decoded), resolve(filesDir, decoded)];
+  return candidates.find((candidate) =>
+    roots.some((root) => (candidate === root || candidate.startsWith(`${root}${separator}`))) &&
+    existsSync(candidate) &&
+    statSync(candidate).isFile()
+  ) ?? null;
+}

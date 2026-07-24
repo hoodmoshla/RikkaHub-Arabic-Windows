@@ -2,13 +2,13 @@
 // 纪律：纯搬迁自 server.ts routeApi()。
 
 import { existsSync } from "node:fs";
+import { safeDataFilePath } from "../../files";
 import { extname, join } from "node:path";
 import type { StoredFile } from "../../foundation/types";
 import { filesDir } from "../../foundation/paths";
 import { saveState, state } from "../../persistence/json-store";
 import { extractStoredFileText } from "../../files/index";
 import { error, json, mime } from "../request";
-import { safeDataFilePath } from "../../server";
 
 export async function handleFileRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
   if (path === "files/upload" && request.method === "POST") {
