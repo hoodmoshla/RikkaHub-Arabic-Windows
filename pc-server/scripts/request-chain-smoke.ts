@@ -1217,8 +1217,6 @@ async function runMcpImageToolSmoke() {
   // Verify Android 2.1.11 fix: MCP tool returning image content block is forwarded to the provider
   // as an image in the tool_result, and the image part is persisted on the assistant message.
   await configure(false);
-  const settings = await api("/api/settings");
-  const assistantId = settings.assistantId;
   const server = await api("/api/settings/mcp-server/detail", {
     method: "POST",
     body: JSON.stringify({

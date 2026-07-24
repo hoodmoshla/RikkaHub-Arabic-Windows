@@ -3,7 +3,6 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { compareSemver } from "../foundation/utils";
 import { skipVersionPath, updatesCacheDir } from "../foundation/paths";
 import type { GithubRelease } from "../foundation/types";
 

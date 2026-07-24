@@ -3,10 +3,10 @@
 // 不处理网络请求、不读写 state.json、不广播 SSE。
 
 import { existsSync, readFileSync } from "node:fs";
-import type { ApiMessage, Assistant, Conversation, JsonValue, Message, MessageNode, Model, Provider } from "../foundation/types";
-import { id, isRecord, textFromParts } from "../foundation/utils";
+import type { ApiMessage, Assistant, JsonValue, Message, Model, Provider } from "../foundation/types";
+import { id, isRecord } from "../foundation/utils";
 import { extractStoredFileTextSync, fallbackDocumentText } from "../files/index";
-import { openAiToolOutput, parseToolInput, partsToToolResultText, resolvedToolOutput } from "../tools/format";
+import { parseToolInput, resolvedToolOutput } from "../tools/format";
 import { scheduleThrottledSaveState, state } from "../persistence/json-store";
 
 export function fileEntryFromApiUrl(url: string) {

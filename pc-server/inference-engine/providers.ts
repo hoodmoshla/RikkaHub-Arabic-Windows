@@ -11,27 +11,16 @@ import { openAiToolOutput, partsToToolResultText, resolvedToolOutput, toolExecut
 import {
   apiContentText,
   claudeBlocksFromUiParts,
-  responseApiBuiltInTools,
-  responseApiIncludeForProvider,
-  responseApiReasoningForProvider,
-  supportsAbility,
 } from "./message-builder";
 import { ensureReasoningPart, finishReasoningParts, normalizeGeneratedImageUrl } from "./parts";
 import type { StreamHooksWithSink, ToolCall, ToolDispatchContext, ToolResult } from "./events";
 import {
-  applyCustomBody,
-  applyRequestHeaders,
   findModel,
   jsonBody,
   textBody,
 } from "../model-providers";
 import {
   addLog,
-  buildGoogleRequestBody,
-  conversationMessagesForApi,
-  conversationResponseApiInput,
-  conversationResponseApiInstructions,
-  endpointFor,
   MAX_TOOL_STEPS,
   touchStream,
 } from "../server";
@@ -307,14 +296,6 @@ export async function readClaudeStreamingRound(
         // when Claude announces the call, even before the input_json_delta arrives.
         if (hooks.message) {
           finishReasoningParts(hooks.message);
-          const toolPart: JsonValue = {
-            type: "tool",
-            toolCallId: String(block.id ?? ""),
-            toolName: String(block.name ?? ""),
-            input: "",
-            output: [],
-            approvalState: initialApprovalState(String(block.name ?? ""), assistant),
-          };
           hooks.sink?.({
             kind: "tool_call_created",
             toolCallId: String(block.id ?? ""),
@@ -1679,7 +1660,6 @@ export async function fetchOpenAiTextStreaming(
   hooks: StreamHooksWithSink,
   signal?: AbortSignal,
 ) {
-  const started = Date.now();
   const useResponseInput = Array.isArray(body.input) && !Array.isArray(body.messages);
   let messages = [...(useResponseInput ? body.input ?? [] : body.messages ?? [])];
   let currentBody: Record<string, any> = useResponseInput ? { ...body, input: messages } : { ...body, messages };

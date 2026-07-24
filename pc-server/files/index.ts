@@ -1,12 +1,10 @@
 // files/index.ts — 文件上传、OCR、文档解析
 // 纪律：负责文档解析与文件元数据读取，不直接修改业务状态。
 
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { extname, join } from "node:path";
-import { gunzipSync, inflateRawSync } from "node:zlib";
-import { stripHtml, textFromParts } from "../foundation/utils";
-import { filesDir } from "../foundation/paths";
-import type { JsonValue, StoredFile, XmlToken, MupdfModule } from "../foundation/types";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { inflateRawSync } from "node:zlib";
+import type { StoredFile, XmlToken, MupdfModule } from "../foundation/types";
 
 // mupdf-wasm.wasm 通过 `with { type: "file" }` 让 bun build --compile 把这个 9.6MB 的
 // wasm 二进制嵌进单 exe。运行时通过 readFileSync(mupdfWasmPath) 读出字节,塞进 mupdf 暴露
@@ -256,7 +254,7 @@ export function extractEpubText(pathValue: string) {
     if (!opfEntry) return extractEpubFallback(entries);
 
     const opfDir = opfPath.includes("/") ? opfPath.substring(0, opfPath.lastIndexOf("/")) : "";
-    return extractEpubFromOpf(entries, entryMap, opfEntry.data.toString("utf8"), opfDir);
+    return extractEpubFromOpf(entryMap, opfEntry.data.toString("utf8"), opfDir);
   } catch (err) {
     console.warn("[document] EPUB extract failed:", err);
     return "";
@@ -275,7 +273,6 @@ export function findEpubOpfPath(containerXml: string): string | null {
 }
 
 export function extractEpubFromOpf(
-  entries: Array<{ name: string; data: Buffer }>,
   entryMap: Map<string, { name: string; data: Buffer }>,
   opfXml: string,
   opfDir: string,

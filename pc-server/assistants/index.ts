@@ -4,12 +4,10 @@
 
 import type { Assistant, JsonValue, Message, Model } from "../foundation/types";
 import {
-  applyPlaceholders,
   cloneJson,
   formatLocalDate,
   formatLocalTime,
   getStringArray,
-  id,
   isRecord,
   message,
   reasoningFromParts,

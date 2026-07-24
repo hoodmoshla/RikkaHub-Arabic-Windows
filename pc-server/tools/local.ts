@@ -2,7 +2,7 @@
 // 纪律：实现具体工具业务，不直接读写 state；依赖通过参数注入。
 
 import { formatKeyLocal } from "../foundation/utils";
-import type { Assistant, JsonValue } from "../foundation/types";
+import type { JsonValue } from "../foundation/types";
 import { readSystemClipboardText, writeSystemClipboardText, speakSystemText } from "./platform";
 
 export function runGetTimeInfoTool() {

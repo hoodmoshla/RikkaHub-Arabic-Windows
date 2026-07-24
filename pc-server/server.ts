@@ -55,7 +55,6 @@ import {
   openAiSkillTools as openAiSkillToolsCore,
   readSkillBody,
   readSkillContent,
-  readSystemClipboardText,
   runAskUserTool,
   runClipboardTool,
   runEvalJavascriptTool,
@@ -65,35 +64,25 @@ import {
   safeSkillFile,
   skillMetadataFromFile,
   parseSkillFrontmatter,
-  speakSystemText,
   syncMcpServerTools,
   synthesizeSystemTtsToWav,
-  writeSystemClipboardText,
 } from "./tools";
 import {
   apiContentFromParts,
   apiContentText,
   appendAssistantApiMessages,
-  claudeBlocksFromUiParts,
   claudeCacheControlEphemeral,
   claudeMessagesFromApiMessages,
   claudeSystemContent,
   claudeThinkingPayload,
   claudeToolsFromOpenAiTools,
-  contentPartsForApi,
   dataUrlForMessageUrl,
-  documentPromptText,
-  fileEntryFromApiUrl,
   googleContentsFromApiMessages,
   googleFunctionDeclarations,
   googleGenerationConfig,
-  googlePartsFromApiContent,
-  googleStripSchemaKeys,
   GOOGLE_SAFETY_SETTINGS,
-  groupAssistantPartsByToolBoundary,
   hasBuiltInTool,
   hostOfProvider,
-  isDeepSeekModel,
   isModelAllowTemperature,
   openAiChatCompletionsModalities,
   parseDataUrl,
@@ -101,42 +90,25 @@ import {
   reasoningPayloadForProvider,
   auxiliaryReasoningPayloadForProvider,
   responseApiBuiltInTools,
-  responseApiContent,
-  responseApiContentFromUiParts,
-  responseApiDocumentPart,
-  responseApiImageGenerationItem,
-  responseApiImagePart,
   responseApiIncludeForProvider,
-  responseApiInstructions,
-  responseApiMessages,
   responseApiMessagesFromUiMessages,
   responseApiReasoningForProvider,
-  responseApiReasoningItem,
-  responseApiTextPart,
-  responseProviderCapabilities,
   supportsAbility,
   supportsInputModality,
   supportsOutputModality,
-  withClaudeCacheOnLastBlock,
 } from "./inference-engine/message-builder";
 import {
   addStreamImage,
   addStreamText,
   appendReasoningDelta,
-  ensureReasoningPart,
   finishReasoningParts,
-  hasOpenReasoningPart,
-  markStreamFirstContent,
-  normalizeGeneratedImageUrl,
   replaceLoadingReasoningWithTool,
   setMessageLoading,
   streamStartedMessages,
 } from "./inference-engine/parts";
-import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolCall, ToolContext, ToolDispatchContext, ToolExecutor, ToolResult } from "./inference-engine/events";
+import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolExecutor, ToolResult } from "./inference-engine/events";
 import {
   appendUsageFromRaw,
-  claudeEventText,
-  claudeTextFromContent,
   completionMessageText,
   deltaReasoningContent,
   deltaTextContent,
@@ -148,25 +120,13 @@ import {
   fetchOpenAiTextStreaming,
   fetchText,
   fillContextLimit,
-  googleUsageFromMeta,
   loadModelsDev,
   lookupContextLimit,
-  mergeClaudeUsage,
-  mergeToolCallDeltas,
   modelsDevCache,
   parseSseChunks,
-  readClaudeStream,
-  readClaudeStreamingRound,
-  readGoogleStreamingRound,
-  readOpenAiResponseIntoMessage,
-  readOpenAiSseTextIntoMessage,
-  readOpenAiStream,
-  responseApiToolCallItems,
   responseEventToDelta,
-  responseMessageText,
   streamClaudeChatWithTools,
   streamGoogleChatWithTools,
-  toolCallContext,
 } from "./inference-engine/providers";
 import {
   checkpointConversationsDb,
@@ -190,8 +150,6 @@ import {
   truncateConversationForRegenerate,
 } from "./conversations";
 import {
-  activeLorebookInjections as activeLorebookInjectionsCore,
-  activeModeInjections as activeModeInjectionsCore,
   activePromptInjections as activePromptInjectionsCore,
   applyInputRegexTransformParts,
   applyMessageTemplateToParts,
@@ -204,10 +162,9 @@ import {
 
 import { createHash, createHmac } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import * as fsPromises from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import process from "node:process";
-import { gunzipSync, gzipSync, inflateRawSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { Database } from "bun:sqlite";
 
 const DEFAULT_LEARNING_MODE_ID = "b87eaf16-f5cd-4ac1-9e4f-b11ae3a61d74";
@@ -397,12 +354,6 @@ function startAnalytics(): void {
     }, 10 * 60 * 1000); // every 10 minutes
   } catch { /* analytics must never break the app */ }
 }
-
-/** Compare two dotted-version strings. Returns -1/0/1 like `a - b`. Tolerates "v" prefix,
- *  missing patch parts (treated as 0), and non-numeric trailing labels (compared as strings). */
-
-const LOG_PREVIEW_LIMIT = 256_000;
-
 
 function defaultSettings(): Settings {
   const assistant = defaultAssistant();
@@ -1432,18 +1383,6 @@ function appendTextPart(msg: Message, text: string) {
   }
 }
 
-function hasTextPart(msg: Message, marker: string) {
-  return msg.parts.some((part) =>
-    part && typeof part === "object" && !Array.isArray(part) && part.type === "text" && String(part.text ?? "").includes(marker)
-  );
-}
-
-function imageParts(parts: JsonValue[]) {
-  return parts.filter((part): part is Record<string, JsonValue> =>
-    !!part && typeof part === "object" && !Array.isArray(part) && part.type === "image" && typeof part.url === "string"
-  );
-}
-
 function summaryAsText(msg: Message) {
   return `[${msg.role}]: ${textFromParts(msg.parts)}`;
 }
@@ -1775,25 +1714,11 @@ function sanitizeModelModalitiesForExport(settings: Settings): Settings {
   };
 }
 
-function backupPayload() {
-  return {
-    version: 1,
-    app: "RikkaHub PC",
-    exportedAt: new Date().toISOString(),
-    state,
-    skills: exportSkills(),
-    files: state.files.map((file) => ({
-      ...file,
-      data: existsSync(file.path) ? readFileSync(file.path).toString("base64") : null,
-    })),
-  };
-}
-
-// Same shape as backupPayload() but does NOT base64-inline file bytes — file data lives in
+// Backup payload that does NOT base64-inline file bytes — file data lives in
 // the surrounding zip's `upload/<displayName>` entries, and only file metadata (id, fileName,
 // mime, size) survives the JSON round-trip. This is the format used inside
 // `pc-backup.json` of a zip backup, and is the only OOM-safe path for users with multi-GB
-// of attachments (the inline-base64 variant above can easily push a couple GB of files into
+// of attachments (inlining base64 file bytes can easily push a couple GB of files into
 // a JS string, blowing the V8 heap limit).
 function backupPayloadMetadataOnly(settingsOverride?: Settings) {
   const settings = settingsOverride ?? state.settings;
@@ -2831,135 +2756,7 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>) {
   txn();
 }
 
-function createSettingsBackupZip(): Buffer {
-  const tmpRoot = join(tempDir(), `rikkahub-backup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-  const stageDir = join(tmpRoot, "stage");
-  mkdirSync(stageDir, { recursive: true });
-  try {
-    // settings.json — Android reads this via SettingsJsonMigrator + Json {ignoreUnknownKeys=true},
-    // so PC-only fields are tolerated. PC's state.settings is structurally aligned with
-    // Android's Settings class (this is a port). Fields Android doesn't recognize fall through
-    // to defaults, which matches what happens when you restore a PC-origin backup to Android.
-    // Rewrite PC's short avatar.type strings into Android's FQN form so the manifest
-    // parses cleanly on the phone. PC's own pc-backup.json keeps the short form (we
-    // round-trip it through our normalize logic).
-    writeFileSync(
-      join(stageDir, "settings.json"),
-      JSON.stringify(rewriteAvatarsInSettings(state.settings, PC_AVATAR_TYPE_TO_ANDROID), null, 2),
-    );
-
-    // pc-backup.json — full PC state for lossless self-restore. Critically, this does NOT
-    // contain file byte data (`backupPayloadMetadataOnly()` strips it); the bytes live in
-    // upload/<fileName> entries below and get re-linked during restoreFromPcBackupExtractDir.
-    // Without this separation a user with multi-GB of attachments would OOM on JSON.stringify.
-    writeFileSync(join(stageDir, "pc-backup.json"), JSON.stringify(backupPayloadMetadataOnly(), null, 2));
-    // Generate rikka_hub.db so Android can restore conversations. PC stores conversations
-    // in state.json; Android stores them in a Room SQLite database. We create a compatible
-    // db from PC's conversation data so the zip is fully restorable on the phone.
-    let dbGenerated = false;
-    if (state.conversations.length > 0 || memoryStore.exportFlat().length > 0) {
-      const dbPath = join(stageDir, "rikka_hub.db");
-      try {
-        dbGenerated = generateRikkaHubDb(dbPath);
-      } catch (dbErr) {
-        console.error("[backup] generateRikkaHubDb failed:", dbErr);
-        if (existsSync(dbPath)) try { rmSync(dbPath); } catch { /* */ }
-      }
-      if (dbGenerated) {
-        for (const suffix of ["-wal", "-shm", "-journal"]) {
-          const p = dbPath + suffix;
-          if (existsSync(p)) try { rmSync(p); } catch { /* */ }
-        }
-        writeFileSync(join(stageDir, "rikka_hub-wal"), Buffer.alloc(0));
-        writeFileSync(join(stageDir, "rikka_hub-shm"), Buffer.alloc(0));
-      } else {
-        if (existsSync(dbPath)) try { rmSync(dbPath); } catch { /* */ }
-      }
-    }
-
-    // upload/<displayName> — Android writes one entry per uploaded file under FileFolders.UPLOAD,
-    // keyed by the file's display name. PC stores files on disk as `<numericId>.<ext>` but tracks
-    // the original display name in state.files[].fileName; we honor that name in the zip so the
-    // Android side can restore them under their original identity. The bytes are copied via
-    // readFileSync/writeFileSync chunk-by-chunk into the staging dir, never held in memory all
-    // at once.
-    if (state.files.length > 0) {
-      const uploadStage = join(stageDir, "upload");
-      mkdirSync(uploadStage, { recursive: true });
-      const usedNames = new Set<string>();
-      let skippedFiles = 0;
-      for (const file of state.files) {
-        // path 可能因跨机器/跨平台迁移 state.json、或 dataDir 漂移而失效(指向不存在的文件)。
-        // PC 文件命名固定为 <id>.<ext>,path 找不到时回退到 filesDir 下按 id 重找,尽量不丢附件。
-        let srcPath = file.path;
-        if (!srcPath || !existsSync(srcPath)) {
-          const ext = extname(file.fileName || "") || extname(file.path || "") || "";
-          const fallback = join(filesDir, `${file.id}${ext}`);
-          srcPath = existsSync(fallback) ? fallback : "";
-        }
-        if (!srcPath) {
-          skippedFiles++;
-          continue;
-        }
-        let name = file.fileName || `${file.id}${extname(srcPath) || ""}`;
-        // Two separately-uploaded files can legitimately share a display name. Disambiguate by
-        // suffixing the PC numeric id so neither gets overwritten in the zip.
-        if (usedNames.has(name)) {
-          const ext = extname(name);
-          const stem = name.slice(0, name.length - ext.length);
-          name = `${stem}_${file.id}${ext}`;
-        }
-        usedNames.add(name);
-        try {
-          // Bun.file().readableStream().pipe-style copy would be ideal but Bun.write supports
-          // a File source which streams under the hood. Use that for OOM safety on huge files.
-          const srcFile = Bun.file(srcPath);
-          // Synchronous variant — keeps the existing single-threaded compile flow. For >2GB
-          // single files this could still spike, but those are rare in the wild and the JS
-          // engine can stream a single file fine; the real OOM risk was the *aggregate*
-          // base64-inlining path, which is now gone.
-          writeFileSync(join(uploadStage, name), readFileSync(srcPath));
-          void srcFile;
-        } catch (copyErr) {
-          console.warn("[backup] failed to stage upload file", srcPath, copyErr);
-        }
-      }
-      if (skippedFiles > 0) {
-        console.warn(`[backup] ⚠️ ${skippedFiles}/${state.files.length} attachment(s) skipped — source file missing (path invalid or file deleted). They will NOT be in the backup.`);
-      }
-    }
-
-    // skills/<skillName>/<...> — Android writes the entire skills directory recursively;
-    // we do the same since PC's on-disk layout (skillsDir/<skillName>/...) matches.
-    if (existsSync(skillsDir)) {
-      const skillsStage = join(stageDir, "skills");
-      mkdirSync(skillsStage, { recursive: true });
-      copyDirRecursive(skillsDir, skillsStage);
-    }
-
-    const zipPath = join(tmpRoot, "backup.zip");
-    if (process.platform === "win32") {
-      const script = [
-        "Add-Type -AssemblyName System.IO.Compression.FileSystem",
-        `[System.IO.Compression.ZipFile]::CreateFromDirectory('${stageDir.replace(/'/g, "''")}', '${zipPath.replace(/'/g, "''")}')`,
-      ].join("; ");
-      const proc = Bun.spawnSync(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]);
-      if (proc.exitCode !== 0) {
-        throw new Error(`Failed to create backup zip: ${new TextDecoder().decode(proc.stderr ?? new Uint8Array()).slice(0, 300)}`);
-      }
-    } else {
-      const proc = Bun.spawnSync(["zip", "-rq", zipPath, "."], { cwd: stageDir });
-      if (proc.exitCode !== 0) {
-        throw new Error(`Failed to create backup zip: ${new TextDecoder().decode(proc.stderr ?? new Uint8Array()).slice(0, 300)}`);
-      }
-    }
-    return readFileSync(zipPath);
-  } finally {
-    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
-  }
-}
-
-// Variant that writes the zip directly to a caller-provided path and returns its size. Used
+// Writes the backup zip directly to a caller-provided path and returns its size. Used
 // by the local-export endpoint to avoid pulling the whole zip into a Buffer just to turn
 // around and stream it as the HTTP response — for users with multi-GB attachments, the zip
 // itself can exceed 4 GB and Buffer.from(...) on it is an OOM in waiting.
@@ -3077,28 +2874,6 @@ function createSettingsBackupZipToPath(targetZipPath: string, onProgress?: (mess
   } finally {
     try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
-}
-
-// Restore from either a legacy `.json` backup (PC's pre-zip format) or a `.zip` backup
-// (current cross-platform format — same layout whether the zip was written by Android or PC).
-// All zip restores route through applyAndroidZipBackupFromPath, which already understands the
-// Android backup layout (settings.json + upload/ + skills/ + rikka_hub.db).
-function restoreBackupBuffer(buffer: Buffer, fileName: string): void {
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith(".zip")) {
-    const tmpRoot = join(tempDir(), `rikkahub-restore-${Date.now()}`);
-    mkdirSync(tmpRoot, { recursive: true });
-    const zipPath = join(tmpRoot, fileName.replace(/[^A-Za-z0-9._\-]/g, "_") || "backup.zip");
-    try {
-      writeFileSync(zipPath, buffer);
-      applyAndroidZipBackupFromPath(zipPath);
-    } finally {
-      try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
-    }
-    return;
-  }
-  // Legacy JSON path — backups written by older PC versions before zip support.
-  applyBackupPayload(JSON.parse(buffer.toString("utf-8")));
 }
 
 /** Stream an HTTP response body to a temp file (no in-JS-memory buffering) and route the
@@ -3809,7 +3584,7 @@ async function customJsHttpRequest(
   };
 }
 
-async function runCustomJsFunction(service: Record<string, JsonValue>, script: string, invocation: string, args: JsonValue[]) {
+async function runCustomJsFunction(script: string, invocation: string, args: JsonValue[]) {
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const userFetch = async (targetUrl: string, options: Record<string, JsonValue> = {}) => {
     const response = await customJsHttpRequest(
@@ -3971,7 +3746,7 @@ async function runSearchKeyTestResult(
 async function runCustomJsSearch(service: Record<string, JsonValue>, query: string, maxResults: number) {
   const script = String(service.searchScript ?? "").trim();
   if (!script) throw new Error("Custom JS search script is empty");
-  const raw = await runCustomJsFunction(service, script, "search", [query, maxResults]);
+  const raw = await runCustomJsFunction(script, "search", [query, maxResults]);
   const items = Array.isArray(raw?.items) ? raw.items : [];
   return {
     query,
@@ -3986,7 +3761,7 @@ async function runCustomJsSearch(service: Record<string, JsonValue>, query: stri
 async function runCustomJsScrape(service: Record<string, JsonValue>, target: string) {
   const script = String(service.scrapeScript ?? "").trim();
   if (!script) throw new Error("Custom JS scrape script is empty");
-  const raw = await runCustomJsFunction(service, script, "scrape", [[target]]);
+  const raw = await runCustomJsFunction(script, "scrape", [[target]]);
   const item = Array.isArray(raw?.urls) ? raw.urls[0] : raw;
   return {
     url: String(item?.url ?? target),
@@ -5151,18 +4926,6 @@ export function endpointFor(providerItem: Provider) {
   return `${base}/models/{model}:generateContent`;
 }
 
-function reasoningEffortForApi(level: string | null | undefined) {
-  const normalized = String(level ?? "").toLowerCase();
-  if (!["low", "medium", "high"].includes(normalized)) return undefined;
-  return normalized;
-}
-
-function reasoningForApi(level: string | null | undefined) {
-  const normalized = String(level ?? "").toLowerCase();
-  if (!["low", "medium", "high"].includes(normalized)) return undefined;
-  return { effort: normalized };
-}
-
 async function fetchProviderModels(providerItem: Provider) {
   const endpoint = modelsEndpointFor(providerItem);
   const started = Date.now();
@@ -5539,7 +5302,7 @@ async function runProviderCheck(providerItem: Provider, mode: "non_stream" | "st
   };
 }
 
-function markProviderTestResult(providerItem: Provider, models: Model[], checks: Array<{ mode: string; ok: boolean }>) {
+function markProviderTestResult(providerItem: Provider, checks: Array<{ mode: string; ok: boolean }>) {
   if (!providerTestCorePassed(checks)) return;
   updateSettings({
     ...state.settings,
@@ -6359,22 +6122,6 @@ async function resumeApprovedToolParts(
   }
   return toolMessages;
 }
-
-function extractToolNameFromArguments(text: string) {
-  const trimmed = text.trim();
-  if (!trimmed) return "";
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (typeof parsed?.name === "string") return parsed.name;
-    if (typeof parsed?.tool_name === "string") return parsed.tool_name;
-  } catch {
-    // Leave the original tool name unchanged if arguments are partial or non-JSON.
-  }
-  return "";
-}
-
-
-
 
 function cleanAuxiliaryText(text: string, fallback = "") {
   const cleaned = text.replace(/^["“”'‘’]+|["“”'‘’]+$/g, "").trim();
@@ -8263,7 +8010,6 @@ async function routeApi(request: Request, url: URL) {
         // override doesn't disable a tool, the user has expressed an intentional subset —
         // leave overrides untouched.
         const prevServers = new Set(getStringArray(assistant.mcpServers));
-        const nextServers = new Set(mcpServerIds);
         const newlyAdded: string[] = mcpServerIds.filter((sid) => !prevServers.has(sid));
         const overrides = isRecord(assistant.mcpToolOverrides)
           ? { ...assistant.mcpToolOverrides as Record<string, Record<string, { enable?: boolean; needsApproval?: boolean }>> }
@@ -8797,7 +8543,7 @@ async function routeApi(request: Request, url: URL) {
           preview: friendlyRequestError(err, state.settings.proxyConfig),
         })));
       }
-      markProviderTestResult(providerItem, result.models, checks);
+      markProviderTestResult(providerItem, checks);
       return json({
         status: "ok",
         endpoint: result.endpoint,
@@ -8876,7 +8622,7 @@ async function routeApi(request: Request, url: URL) {
             checks.push(check);
             send("check", check);
           }
-          markProviderTestResult(providerItem, result.models, checks);
+          markProviderTestResult(providerItem, checks);
           send("done", {
             status: "ok",
             endpoint: result.endpoint,
