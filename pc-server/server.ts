@@ -6,7 +6,7 @@ import { RUNTIME_PLATFORM, RUNNING_IN_CONTAINER, tempDir } from "./foundation/pl
 import { applyEffectiveProxy, classifyProxyError, friendlyRequestError, installProxyFetchInterceptor, proxyStatusPayload, readWindowsSystemProxy, resolveEffectiveProxy, setActualServingPort } from "./foundation/net";
 import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state, writeSlimStateJsonSync, writeSlimStateJsonSyncForMemory } from "./persistence/json-store";
 import { GLOBAL_MEMORY_ID, buildMemoryPrompt, buildRecentChatsPrompt, memoryStore } from "./memory/index";
-import { extractStoredFileText, readZipEntries } from "./files/index";
+import { readZipEntries } from "./files/index";
 import { APP_VERSION, UPDATE_R2_BASE, fetchGithubLatestRelease, fetchLatestReleaseFromHtmlRedirect, probeCachedInstaller, readSkippedVersion, writeSkippedVersion } from "./updates/index";
 import { buildSearchContext, runScrapeWeb, runSearchWeb, testSearchService } from "./search/index";
 import { asrRealtimeSessions, defaultAsrProvider, normalizeAsrProviders, sendAsrAudio, startAsrRealtimeSession, stopAsrRealtimeSession, transcribeAudioWithAsrProvider } from "./media/asr";
@@ -18,7 +18,11 @@ import { normalizeS3Config, normalizeWebDavConfig, s3Backup, s3Delete, s3ListBac
 import { error, json, mime, readJson } from "./api/request";
 import { routeStatic } from "./api/static";
 import { addLog, defaultRequestStats, normalizeRequestStats } from "./api/logs";
-import { broadcastConversation, broadcastList, broadcastMemoryUpdate, broadcastNodeUpdate, broadcastSettings, conversationClients, listClients, memoryClients, openSse, scheduleNodeBroadcast, settingsClients, sseFrame } from "./api/sse";
+import { handleFileRoutes } from "./api/handlers/files";
+import { handleMemoryRoutes } from "./api/handlers/memory";
+import { handleSkillRoutes } from "./api/handlers/skills";
+import { handleSystemRoutes } from "./api/handlers/system";
+import { broadcastConversation, broadcastList, broadcastMemoryUpdate, broadcastNodeUpdate, broadcastSettings, conversationClients, listClients, openSse, scheduleNodeBroadcast, settingsClients, sseFrame } from "./api/sse";
 import {
   applyCustomBody,
   applyRequestHeaders,
@@ -50,15 +54,12 @@ import {
 import {
   callMcpTool,
   cancelAllSystemTts,
-  defaultSkillContent,
-  listSkillFiles,
   listSkills,
   openAiLocalTools as openAiLocalToolsCore,
   openAiMcpTools as openAiMcpToolsCore,
   openAiSearchTools as openAiSearchToolsCore,
   openAiSkillTools as openAiSkillToolsCore,
   readSkillBody,
-  readSkillContent,
   runAskUserTool,
   runClipboardTool,
   runEvalJavascriptTool,
@@ -124,8 +125,6 @@ import {
   fetchText,
   fillContextLimit,
   loadModelsDev,
-  lookupContextLimit,
-  modelsDevCache,
   parseSseChunks,
   responseEventToDelta,
   streamClaudeChatWithTools,
@@ -161,7 +160,7 @@ import {
 } from "./assistants";
 
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import process from "node:process";
 import { Database } from "bun:sqlite";
 
@@ -251,7 +250,7 @@ Requirements:
 // 同时严格不改原意、不膨胀简单请求、保留占位符和固定内容。开头明确"不限于某个领域"防止
 // 模型默认偏向任何场景(如 coding)。上下文是可选的——首条消息或无对话时省略,且注入时
 // 明确告诉模型"只在提示词承接对话时才用,否则忽略",防止无关上下文污染独立提示词。
-const DEFAULT_PROMPT_OPTIMIZE_PROMPT = `你是一位资深的提示词优化专家。下面会给你一段用户准备发给 AI 助手的话(提示词草稿),你的任务是把它打磨成清晰、得体、表达专业的版本,让 AI 更容易准确理解、给出更好的回复。这段话可能是提问、写作请求、修改要求、闲聊,或任何日常诉求——不限于某个领域。
+export const DEFAULT_PROMPT_OPTIMIZE_PROMPT = `你是一位资深的提示词优化专家。下面会给你一段用户准备发给 AI 助手的话(提示词草稿),你的任务是把它打磨成清晰、得体、表达专业的版本,让 AI 更容易准确理解、给出更好的回复。这段话可能是提问、写作请求、修改要求、闲聊,或任何日常诉求——不限于某个领域。
 
 ## 优化原则
 
@@ -1073,7 +1072,7 @@ function templateVariables(messageText: string, role: string, assistant: Assista
   );
 }
 
-function computeStats() {
+export function computeStats() {
   const daily = new Map<string, DailyStat>();
   let userMessages = 0;
   let assistantMessages = 0;
@@ -1352,7 +1351,7 @@ async function collectGitHubSkillFiles(info: GitHubSkillInfo, dirPath: string, b
   }
 }
 
-async function importSkillFromGitHub(repoUrl: string) {
+export async function importSkillFromGitHub(repoUrl: string) {
   const info = parseGitHubSkillUrl(repoUrl);
   if (!info) throw new Error("无效的 GitHub 仓库链接。支持 https://github.com/owner/repo 或 /tree/branch/sub/path");
   const files: GitHubSkillFile[] = [];
@@ -1440,7 +1439,7 @@ function isZipBuffer(fileName: string, buf: Buffer): boolean {
 //  - 单个 markdown：解析 frontmatter，原子写入；
 //  - zip：扫所有 SKILL.md，对每个根目录原子写入一组文件，跳过嵌套技能。
 // 返回成功导入的 skill 名称数组。失败抛错。
-function importSkillFromBuffer(fileName: string, buf: Buffer): string[] {
+export function importSkillFromBuffer(fileName: string, buf: Buffer): string[] {
   if (isZipBuffer(fileName, buf)) {
     return importSkillsFromZipBuffer(buf);
   }
@@ -1666,7 +1665,7 @@ async function executeToolCall(
   throw new Error(`Unknown tool: ${name}`);
 }
 
-function safeDataFilePath(relativePath: string) {
+export function safeDataFilePath(relativePath: string) {
   let decoded = "";
   try {
     decoded = decodeURIComponent(relativePath).replace(/\\/g, "/").replace(/^\/+/, "");
@@ -2399,7 +2398,7 @@ function iconForName(name: string) {
   return iconRules.find(([pattern]) => pattern.test(name))?.[1] ?? null;
 }
 
-async function serveAIIcon(name: string) {
+export async function serveAIIcon(name: string) {
   const iconName = iconForName(name);
   if (iconName) {
     const candidates = [
@@ -2419,8 +2418,8 @@ async function serveAIIcon(name: string) {
 }
 
 const FONT_EXTENSIONS = [".woff2", ".woff", ".ttf", ".otf", ".ttc"] as const;
-const FONT_EXTENSIONS_SET = new Set<string>(FONT_EXTENSIONS);
-const FONT_MIME: Record<string, string> = {
+export const FONT_EXTENSIONS_SET = new Set<string>(FONT_EXTENSIONS);
+export const FONT_MIME: Record<string, string> = {
   ".woff2": "font/woff2",
   ".woff": "font/woff",
   ".ttf": "font/ttf",
@@ -2437,7 +2436,7 @@ const FONT_FORMAT: Record<string, string> = {
   ".ttc": "truetype",
 };
 // CJK 单文件可能十几 MB,留 50MB 余量足够;超过几乎一定是误传。
-const MAX_FONT_BYTES = 50 * 1024 * 1024;
+export const MAX_FONT_BYTES = 50 * 1024 * 1024;
 const FONT_DEFAULT_FALLBACK = "system-ui, sans-serif";
 
 // 真枚举失败时的兜底清单(Windows 锁死系统等情况)。
@@ -2453,18 +2452,18 @@ const COMMON_FONTS_FALLBACK: FontEntry[] = [
   weights: [],
 }));
 
-function fontExtension(name: string): string {
+export function fontExtension(name: string): string {
   return name.toLowerCase().match(/\.[a-z0-9]+$/)?.[0] ?? "";
 }
-function isFontFile(name: string): boolean {
+export function isFontFile(name: string): boolean {
   return FONT_EXTENSIONS_SET.has(fontExtension(name));
 }
 // 纯文件名:无路径分隔符、无 NUL。用于拒绝 path traversal(../etc/passwd 之类)。
-function isBareFileName(name: string): boolean {
+export function isBareFileName(name: string): boolean {
   return !!name && !name.includes("/") && !name.includes("\\") && !name.includes("\0");
 }
 // @font-face family 名 = 文件名去扩展名。用全 stem(不去 -Regular 之类后缀)保证不撞名。
-function fontCssName(fileName: string): string {
+export function fontCssName(fileName: string): string {
   return fileName.replace(/\.[^.]+$/, "");
 }
 function fontFormat(fileName: string): string | undefined {
@@ -2514,7 +2513,7 @@ function makeWeightedFamilyEntry(source: "builtin" | "custom", manifestId: strin
   return { id: `${source}:${manifestId}`, label, cssName, family, source, weights };
 }
 
-function makeBundledFontEntry(source: "builtin" | "custom", fileName: string, override?: { label?: string; family?: string }): FontEntry {
+export function makeBundledFontEntry(source: "builtin" | "custom", fileName: string, override?: { label?: string; family?: string }): FontEntry {
   const cssName = override?.family?.trim() ? firstFamilyName(override.family) : fontCssName(fileName);
   const label = override?.label?.trim() || prettifyFontLabel(fileName);
   const family = override?.family?.trim() || `"${fontCssName(fileName)}", ${FONT_DEFAULT_FALLBACK}`;
@@ -2528,7 +2527,7 @@ function makeBundledFontEntry(source: "builtin" | "custom", fileName: string, ov
   };
 }
 
-function listBuiltinFonts(): FontEntry[] {
+export function listBuiltinFonts(): FontEntry[] {
   const manifest = readBuiltinFontManifest();
   // 单文件 override 按文件名小写建索引,方便不区分大小写查找。
   const manifestByLowerFile: Record<string, ManifestEntry> = {};
@@ -2565,7 +2564,7 @@ function listBuiltinFonts(): FontEntry[] {
   return out;
 }
 
-function listCustomFonts(): FontEntry[] {
+export function listCustomFonts(): FontEntry[] {
   try {
     mkdirSync(customFontsDir, { recursive: true });
     return readdirSync(customFontsDir)
@@ -2612,7 +2611,7 @@ function readSystemFontFamilies(): string[] {
 }
 
 // 系统 FontEntry:剔除与 builtin/custom 同名的(用户:自带与系统重合的用自带的,不重复显示)。
-function listSystemFonts(excludeNames: Set<string>): FontEntry[] {
+export function listSystemFonts(excludeNames: Set<string>): FontEntry[] {
   const raw = readSystemFontFamilies();
   if (!raw) return COMMON_FONTS_FALLBACK.filter((entry) => !excludeNames.has(entry.cssName.toLowerCase()));
   return raw
@@ -2628,7 +2627,7 @@ function listSystemFonts(excludeNames: Set<string>): FontEntry[] {
 }
 
 // 服务字体文件:builtin 从 executableDir/fonts 或 rootDir/fonts 找;custom 从 pc-data/fonts 找。
-function resolveFontFile(source: "builtin" | "custom", fileName: string): string | null {
+export function resolveFontFile(source: "builtin" | "custom", fileName: string): string | null {
   if (!isBareFileName(fileName) || !isFontFile(fileName)) return null;
   if (source === "custom") {
     const p = join(customFontsDir, fileName);
@@ -2975,7 +2974,7 @@ function englishLanguageName(locale: string) {
   }
 }
 
-async function fetchAuxiliaryText(modelId: string, prompt: string, kind: string, options: AuxiliaryTextOptions = {}) {
+export async function fetchAuxiliaryText(modelId: string, prompt: string, kind: string, options: AuxiliaryTextOptions = {}) {
   const picked = findModel(modelId || state.settings.chatModelId);
   const providerItem = picked.provider;
   const modelItem = picked.model;
@@ -3605,7 +3604,7 @@ function ensureAssistantGenerationNode(conversation: Conversation, modelId: stri
   conversation.messages.push(assistantNode);
   return assistantNode;
 }
-function updateSettings(next: Settings) {
+export function updateSettings(next: Settings) {
   // 代理配置变化时记一条日志。实际生效由 fetch 拦截器 per-request 现读 resolveEffectiveProxy 保证,
   // 无需手动刷新 env / 探测 —— 配置变化下一次请求自动跟上。
   const prevProxyUrl = resolveEffectiveProxy(state.settings.proxyConfig).url;
@@ -3622,66 +3621,7 @@ function updateSettings(next: Settings) {
 async function routeApi(request: Request, url: URL) {
   const path = url.pathname.replace(/^\/api\/?/, "");
 
-  if (path === "health") return json({ ok: true, version: APP_VERSION, dataDir });
-  if (path === "ai-icon" && request.method === "GET") {
-    const name = url.searchParams.get("name")?.trim();
-    if (!name) return error("Missing name", 400);
-    return serveAIIcon(name);
-  }
-  // 字体目录:三层来源一起返回,前端拼下拉框 + 注入 @font-face。
-  // 系统/自定义字体去重:与 builtin 同名(cssName)的系统字体不返回,避免重复显示。
-  if (path === "fonts/list" && request.method === "GET") {
-    const builtin = listBuiltinFonts();
-    const custom = listCustomFonts();
-    const exclude = new Set<string>();
-    for (const entry of [...builtin, ...custom]) exclude.add(entry.cssName.toLowerCase());
-    const system = listSystemFonts(exclude);
-    return json({ builtin, custom, system });
-  }
-  const fontServe = path.match(/^fonts\/(builtin|custom)\/(.+)$/);
-  if (fontServe && request.method === "GET") {
-    const source = fontServe[1] as "builtin" | "custom";
-    let fileName: string;
-    try { fileName = decodeURIComponent(fontServe[2]); }
-    catch { return error("Invalid font name", 400); }
-    const target = resolveFontFile(source, fileName);
-    if (!target) return error("Font not found", 404);
-    return new Response(Bun.file(target), {
-      headers: {
-        "Content-Type": FONT_MIME[fontExtension(fileName)] ?? "application/octet-stream",
-        "Cache-Control": "public, max-age=86400",
-      },
-    });
-  }
-  if (path === "fonts/upload" && request.method === "POST") {
-    const form = await request.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) return error("Missing file", 400);
-    const ext = fontExtension(file.name);
-    if (!FONT_EXTENSIONS_SET.has(ext)) return error("Unsupported font format (use ttf/otf/woff/woff2)", 400);
-    if (file.size > MAX_FONT_BYTES) return error(`Font too large (max ${MAX_FONT_BYTES / 1024 / 1024}MB)`, 413);
-    // sanitize:只保留文件名部分,去掉任何路径前缀,防 traversal。
-    const rawName = fontCssName(file.name) + ext;
-    const safeName = rawName.replace(/[\\/ ]/g, "_");
-    if (!isBareFileName(safeName) || safeName === "." || safeName === "..") return error("Invalid filename", 400);
-    mkdirSync(customFontsDir, { recursive: true });
-    const target = join(customFontsDir, safeName);
-    await Bun.write(target, file);
-    console.log(`[fonts] uploaded ${safeName} (${(file.size / 1024).toFixed(1)} KB)`);
-    return json({ font: makeBundledFontEntry("custom", safeName) });
-  }
-  const fontDelete = path.match(/^fonts\/custom\/(.+)$/);
-  if (fontDelete && request.method === "DELETE") {
-    let fileName: string;
-    try { fileName = decodeURIComponent(fontDelete[1]); }
-    catch { return error("Invalid font name", 400); }
-    if (!isBareFileName(fileName) || !isFontFile(fileName)) return error("Invalid font name", 400);
-    const target = join(customFontsDir, fileName);
-    if (!existsSync(target)) return error("Font not found", 404);
-    rmSync(target, { force: true });
-    console.log(`[fonts] deleted ${fileName}`);
-    return json({ status: "deleted" });
-  }
+  { const r = await handleSystemRoutes(request, url, path); if (r) return r; }
   if (path === "settings" && request.method === "GET") return json(state.settings);
   if (path === "settings/stream") {
     return openSse(
@@ -3692,133 +3632,7 @@ async function routeApi(request: Request, url: URL) {
       },
     );
   }
-  // ===== memory 路由(1.3.2)=====
-  if (path === "memory/stream") {
-    return openSse(
-      () => [["update", memoryStore.getSnapshot()]],
-      (controller) => {
-        memoryClients.add(controller);
-        return () => memoryClients.delete(controller);
-      },
-    );
-  }
-  if (path === "memory/pending" && request.method === "GET") {
-    return json({ pending: memoryStore.getPending() });
-  }
-  // batch 必须在 :pendingId regex 之前(否则 "batch" 会被当 pendingId 匹配)
-  if (path === "memory/pending/batch" && request.method === "POST") {
-    const body = await readJson<{ items?: Array<{ pendingId: string; action: "global" | "assistant" | "discard"; content?: string }> }>(request);
-    if (!Array.isArray(body?.items)) return error("items array is required", 400);
-    const results = await memoryStore.resolvePendingBatch(body.items);
-    broadcastMemoryUpdate();
-    return json({ status: "ok", results });
-  }
-  {
-    const pendingResolve = path.match(/^memory\/pending\/([^/]+)$/);
-    if (pendingResolve && request.method === "POST") {
-      const body = await readJson<{ action?: string; content?: string }>(request);
-      const pendingId = decodeURIComponent(pendingResolve[1]);
-      const action = String(body.action ?? "");
-      if (action !== "global" && action !== "assistant" && action !== "discard") {
-        return error("action must be one of global/assistant/discard", 400);
-      }
-      const result = await memoryStore.resolvePending(pendingId, action, body.content);
-      if (!result.resolved) return error(`Pending ${pendingId} not found`, 404);
-      broadcastMemoryUpdate();
-      return json({ status: "ok", memory: result.memory });
-    }
-  }
-  if (path === "settings/memory-settings" && request.method === "POST") {
-    const body = await readJson<{ globalEnabled?: boolean; writeStrategy?: string }>(request);
-    const ms = { ...state.settings.memorySettings };
-    if (typeof body.globalEnabled === "boolean") ms.globalEnabled = body.globalEnabled;
-    const ws = String(body.writeStrategy ?? "");
-    if (ws === "ask" || ws === "always_assistant" || ws === "always_global" || ws === "readonly") {
-      ms.writeStrategy = ws;
-    }
-    // M3 矛盾组合防御:globalEnabled=false 时 always_global 无意义 → 降级 ask(前端 UI 也 disable,
-    // 此处服务端兜底防绕过)
-    if (!ms.globalEnabled && ms.writeStrategy === "always_global") {
-      ms.writeStrategy = "ask";
-    }
-    updateSettings({ ...state.settings, memorySettings: ms });
-    saveState();
-    broadcastSettings();
-    broadcastMemoryUpdate();
-    return json({ status: "ok", memorySettings: ms });
-  }
-  // ===== 记忆 CRUD(阶段 4 UI 用)=====
-  // 全局记忆:GET 列表 / POST 新增或编辑{id,content} / DELETE :id
-  if (path === "memory/global" && request.method === "GET") {
-    return json({ memories: memoryStore.getGlobalMemories() });
-  }
-  if (path === "memory/global" && request.method === "POST") {
-    const body = await readJson<{ id?: number; content?: string }>(request);
-    const content = String(body.content ?? "").trim();
-    if (!content) return error("content is required", 400);
-    const memory = Number.isInteger(Number(body.id)) && Number(body.id) > 0
-      ? memoryStore.updateMemory(Number(body.id), content)
-      : memoryStore.addMemory({ scope: "global", content, source: "manual" });
-    broadcastMemoryUpdate();
-    return json({ status: "ok", memory });
-  }
-  {
-    const m = path.match(/^memory\/global\/(\d+)$/);
-    if (m && request.method === "DELETE") {
-      const memoryId = Number(m[1]);
-      if (!memoryStore.deleteMemory(memoryId)) return error(`Memory record #${memoryId} not found`, 404);
-      broadcastMemoryUpdate();
-      return json({ status: "deleted" });
-    }
-  }
-  // 助手记忆:GET :assistantId 列表 / POST :assistantId 新增或编辑 / DELETE :assistantId/:id
-  {
-    const m = path.match(/^memory\/assistant\/([^/]+)$/);
-    if (m && request.method === "GET") {
-      return json({ memories: memoryStore.getAssistantMemories(decodeURIComponent(m[1])) });
-    }
-    if (m && request.method === "POST") {
-      const assistantId = decodeURIComponent(m[1]);
-      const body = await readJson<{ id?: number; content?: string }>(request);
-      const content = String(body.content ?? "").trim();
-      if (!content) return error("content is required", 400);
-      const memory = Number.isInteger(Number(body.id)) && Number(body.id) > 0
-        ? memoryStore.updateMemory(Number(body.id), content)
-        : memoryStore.addMemory({ scope: "assistant", assistantId, content, source: "manual" });
-      broadcastMemoryUpdate();
-      return json({ status: "ok", memory });
-    }
-  }
-  {
-    const m = path.match(/^memory\/assistant\/([^/]+)\/(\d+)$/);
-    if (m && request.method === "DELETE") {
-      const memoryId = Number(m[2]);
-      if (!memoryStore.deleteMemory(memoryId)) return error(`Memory record #${memoryId} not found`, 404);
-      broadcastMemoryUpdate();
-      return json({ status: "deleted" });
-    }
-  }
-  // 批量编辑(整体替换,带 schema 校验 + .bak 备份,§9.3)。校验失败返回 400,不落盘。
-  if (path === "memory/batch/global" && request.method === "POST") {
-    const body = await readJson<{ memories?: unknown }>(request);
-    try {
-      memoryStore.replaceGlobalMemories(body.memories);
-    } catch (err) {
-      return error(String(err instanceof Error ? err.message : String(err)), 400);
-    }
-    broadcastMemoryUpdate();
-    return json({ status: "ok" });
-  }
-  if (path === "memory/batch/assistant" && request.method === "POST") {
-    const body = await readJson<{ assistants?: unknown }>(request);
-    try {
-      memoryStore.replaceAssistantGroups(body.assistants);
-    } catch (err) {
-      return error(String(err instanceof Error ? err.message : String(err)), 400);
-    }
-    broadcastMemoryUpdate();
-    return json({ status: "ok" });
-  }
+  { const r = await handleMemoryRoutes(request, url, path); if (r) return r; }
   if (path === "conversations/stream") {
     return openSse(
       () => [["invalidate", { type: "invalidate", assistantId: state.settings.assistantId, timestamp: Date.now() }]],
@@ -4580,53 +4394,6 @@ async function routeApi(request: Request, url: URL) {
       },
     });
   }
-  if (path === "context-limit" && request.method === "GET") {
-    // 查询某模型的 context window 上限(来自 models.dev)。前端切换当前模型时调用,
-    // 让统计行分母跟随"当前选中模型"而非"生成时模型"。匹配不到返回 null。
-    const mid = url.searchParams.get("modelId");
-    const ptype = url.searchParams.get("providerType") ?? "";
-    if (!mid) return json({ contextLimit: null });
-    // 首次启动时前端可能赶在 models.dev 加载完之前发请求。await 一下:已加载则立即返回
-    // (常态),还在加载则等它完(loadModelsDev 内部有 10s fetch timeout 兜底)。这样 null 的
-    // 语义是确定的"models.dev 里查不到此模型",前端可以安全缓存,不会把启动期的临时空
-    // 缓存永久当真。loadModelsDev 对并发调用做了去重,多个请求共用同一个 in-flight promise。
-    await loadModelsDev();
-    if (!modelsDevCache) return json({ contextLimit: null });
-    return json({ contextLimit: lookupContextLimit(modelsDevCache, ptype, mid) });
-  }
-  if (path === "prompt/optimize" && request.method === "POST") {
-    // 用户在对话输入框点"优化提示词":把原文(+可选的最近几轮对话上下文)+ meta-prompt
-    // 发给"提示词优化模型",返回优化后的文本由前端直接替换输入框内容。
-    // 上下文让优化模型能理解"那个""上次的"等指代——首条消息或无对话时省略。
-    // 未配置模型时返回 400,前端引导去设置页。
-    const body = await readJson<{ text: string; context?: string }>(request);
-    const text = String(body.text ?? "").trim();
-    if (!text) return error("没有可优化的文本", 400);
-    const modelId = state.settings.promptOptimizeModelId;
-    if (!modelId) {
-      return error("未配置提示词优化模型,请在「设置 - 默认模型与提示词」中指定一个模型", 400);
-    }
-    const context = String(body.context ?? "").trim();
-    let prompt = String(state.settings.promptOptimizePrompt ?? "").trim() || DEFAULT_PROMPT_OPTIMIZE_PROMPT;
-    if (context) {
-      // 条件式上下文:明确告诉模型"只在提示词承接对话时才用,否则忽略",防止无关背景
-      // 污染独立提示词。同时禁止把背景内容写进优化结果(防止泄漏/跑题)。
-      prompt += `\n\n## 对话背景(仅供理解,不要优化这部分,也不要把它的内容写进结果)\n\n下面是用户与 AI 之前的几轮对话。只有当待优化的提示词明显是在承接这段对话时(出现"那个""上面说的""再…一下"等指代),你才用它来理解用户指的是什么,从而让优化后的表达更明确。如果提示词本身独立、完整,或和这段对话无关,就忽略这段背景,把它当成全新请求来优化。\n\n<对话背景>\n${context}\n</对话背景>`;
-    }
-    prompt += `\n\n请优化以下提示词,直接输出优化后的版本:\n\n<original_prompt>\n${text}\n</original_prompt>`;
-    try {
-      // temperature 0.5:既要能找到更好的措辞,又不能偏离原意乱发挥。
-      // maxTokens 4096:优化后的提示词可能比原文长(结构化展开),给足余量避免截断。
-      // reasoningLevel 不设(用模型默认,跟上下文压缩一致)——提示词优化是重写润色,不是推理任务。
-      const optimized = await fetchAuxiliaryText(modelId, prompt, "prompt-optimize", {
-        maxTokens: 4096,
-        temperature: 0.5,
-      });
-      return json({ text: optimized });
-    } catch (err) {
-      return error(err instanceof Error ? err.message : String(err), 502);
-    }
-  }
   if (path === "settings/provider/models" && request.method === "POST") {
     const body = await readJson<{ providerId: string; save?: boolean }>(request);
     const providerItem = state.settings.providers.find((item) => item.id === body.providerId);
@@ -5058,164 +4825,8 @@ async function routeApi(request: Request, url: URL) {
     }
   }
 
-  if (path === "files/upload" && request.method === "POST") {
-    const form = await request.formData();
-    const uploaded = await Promise.all(
-      form.getAll("files").filter((item): item is File => item instanceof File).map(async (file) => {
-        const fileId = state.nextFileId++;
-        const target = join(filesDir, `${fileId}${extname(file.name)}`);
-        await Bun.write(target, file);
-        const entry: StoredFile = { id: fileId, path: target, fileName: file.name, mime: file.type || "application/octet-stream", size: file.size };
-        const t0 = Date.now();
-        const extractedText = await extractStoredFileText(entry);
-        if (extractedText) {
-          entry.extractedText = extractedText;
-          entry.extractedAt = Date.now();
-        }
-        console.log(`[upload] ${entry.fileName} (${(file.size / 1024).toFixed(1)} KB) extracted ${extractedText.length} chars in ${Date.now() - t0}ms`);
-        state.files.push(entry);
-        return {
-          id: fileId,
-          url: `/api/files/${fileId}/content`,
-          fileName: entry.fileName,
-          mime: entry.mime,
-          size: entry.size,
-          extractedTextLength: entry.extractedText?.length ?? 0,
-        };
-      }),
-    );
-    saveState();
-    return json({ files: uploaded });
-  }
-  const fileContent = path.match(/^files\/(\d+)\/content$/);
-  if (fileContent) {
-    const entry = state.files.find((item) => item.id === Number(fileContent[1]));
-    if (!entry || !existsSync(entry.path)) return error("File not found", 404);
-    // File IDs are integer primary keys assigned at upload time; content for a given id
-    // never changes (upload is write-once). The `immutable` directive tells the browser
-    // never to revalidate this URL, so switching back to a previously-viewed conversation
-    // hits the in-memory cache instantly instead of round-tripping to localhost.
-    // Without this, the browser used heuristic caching (effectively none for /api/...
-    // paths) and the user saw every image re-load on every conversation switch — even
-    // ones they'd viewed seconds earlier. The ETag is a belt-and-suspenders fallback for
-    // browsers that disregard `immutable`.
-    return new Response(Bun.file(entry.path), {
-      headers: {
-        "Content-Type": entry.mime,
-        "Cache-Control": "public, max-age=31536000, immutable",
-        "ETag": `"${entry.id}"`,
-      },
-    });
-  }
-  const fileByPath = path.match(/^files\/path\/(.+)$/);
-  if (fileByPath) {
-    const target = safeDataFilePath(fileByPath[1]);
-    if (!target) return error("File not found", 404);
-    // Same caching rationale as the by-id endpoint above. Path-based fetches typically
-    // come from Android-imported messages whose URL references survived migration —
-    // those resolved paths point to immutable on-disk files.
-    return new Response(Bun.file(target), {
-      headers: {
-        "Content-Type": mime(target),
-        "Cache-Control": "public, max-age=31536000, immutable",
-        "ETag": `"path:${fileByPath[1]}"`,
-      },
-    });
-  }
-  const fileDelete = path.match(/^files\/(\d+)$/);
-  if (fileDelete && request.method === "DELETE") {
-    state.files = state.files.filter((item) => item.id !== Number(fileDelete[1]));
-    saveState();
-    return json({ status: "deleted" });
-  }
-
-  if (path === "skills" && request.method === "GET") return json(listSkills());
-  const skillFiles = path.match(/^skills\/([^/]+)\/files$/);
-  if (skillFiles && request.method === "GET") {
-    const name = decodeURIComponent(skillFiles[1]);
-    const metadata = skillMetadataFromFile(name);
-    if (!metadata) return error("Skill not found", 404);
-    return json({ files: listSkillFiles(name) });
-  }
-  const skillDetail = path.match(/^skills\/([^/]+)$/);
-  if (skillDetail && request.method === "GET") {
-    const name = decodeURIComponent(skillDetail[1]);
-    const metadata = skillMetadataFromFile(name);
-    const content = readSkillContent(name);
-    if (!metadata || content == null) return error("Skill not found", 404);
-    return json({ ...metadata, content });
-  }
-  if (path === "skills/detail" && request.method === "POST") {
-    const body = await readJson<{ name?: string; content?: string }>(request);
-    const requestedName = String(body.name ?? parseSkillFrontmatter(body.content ?? "").name ?? "new-skill").trim();
-    const dir = safeSkillDir(requestedName);
-    if (!dir) return error("Invalid skill name", 400);
-    mkdirSync(dir, { recursive: true });
-    const content = String(body.content ?? defaultSkillContent(requestedName));
-    writeFileSync(join(dir, "SKILL.md"), content);
-    const metadata = skillMetadataFromFile(requestedName);
-    if (!metadata) return error("Skill frontmatter must include name and description", 400);
-    return json({ status: "ok", skill: { ...metadata, content } });
-  }
-  if (path === "skills/import-github" && request.method === "POST") {
-    const body = await readJson<{ repoUrl?: string }>(request);
-    try {
-      const skill = await importSkillFromGitHub(String(body.repoUrl ?? ""));
-      return json({ status: "ok", skill });
-    } catch (err) {
-      return error(err instanceof Error ? err.message : String(err), 502);
-    }
-  }
-  if (path === "skills/import-file" && request.method === "POST") {
-    // 对齐安卓 commit af9b1f35：支持从本地文件导入单个 Markdown 或 ZIP 技能包。
-    // 前端用 multipart/form-data 把文件 POST 上来；这里取出二进制内容后委派给
-    // importSkillFromBuffer 处理。
-    try {
-      const form = await request.formData();
-      const file = form.get("file");
-      if (!(file instanceof File)) return error("Missing file", 400);
-      const buf = Buffer.from(await file.arrayBuffer());
-      const imported = importSkillFromBuffer(file.name || "", buf);
-      const skills = imported.map((name) => {
-        const metadata = skillMetadataFromFile(name);
-        const content = readSkillContent(name) ?? "";
-        return metadata ? { ...metadata, content } : { name, description: "", content };
-      });
-      return json({ status: "ok", imported, skills });
-    } catch (err) {
-      return error(err instanceof Error ? err.message : String(err), 400);
-    }
-  }
-  if (skillDetail && request.method === "DELETE") {
-    const name = decodeURIComponent(skillDetail[1]);
-    const dir = safeSkillDir(name);
-    if (!dir || !existsSync(dir)) return error("Skill not found", 404);
-    rmSync(dir, { recursive: true, force: true });
-    updateSettings({
-      ...state.settings,
-      assistants: state.settings.assistants.map((assistant) => ({
-        ...assistant,
-        enabledSkills: assistant.enabledSkills.filter((skillName) => skillName !== name),
-      })),
-    });
-    return json({ status: "deleted" });
-  }
-
-  if (path === "logs" && request.method === "GET") return json(state.logs);
-  if (path === "logs" && request.method === "DELETE") {
-    state.logs = [];
-    saveState();
-    return json({ ok: true });
-  }
-  if (path === "stats" && request.method === "GET") return json(computeStats());
-  // ── 赞助者列表(预留接口,待接入数据源)──────────────────────────
-  // 前端 DonateSection 暂未展示该列表;数据源就绪后在此返回即自动渲染。
-  // 方案(零服务器):GitHub Actions 定时调爱发电 query-order API
-  // (user_id + token 的 md5 签名鉴权)分页拉订单 → 按赞助者聚合成下方结构 →
-  // 发布为公开静态 JSON(GitHub Pages / jsDelivr)→ 此处 fetch 并返回(建议加短时缓存)。
-  // token 必须保密(放 Actions Secret,切勿入库)。返回结构须与前端 Sponsor 类型一致:
-  //   { userName: string, avatar: string, amount?: string }
-  if (path === "sponsors" && request.method === "GET") return json([]);
+  { const r = await handleFileRoutes(request, url, path); if (r) return r; }
+  { const r = await handleSkillRoutes(request, url, path); if (r) return r; }
   if (path === "data/webdav/config" && request.method === "POST") {
     const body = await readJson<Partial<WebDavConfig>>(request);
     const webDavConfig = normalizeWebDavConfig(body);

@@ -1,0 +1,84 @@
+// api/handlers/skills.ts — 技能路由（skills 列表/详情/文件/导入）
+// 纪律：纯搬迁自 server.ts routeApi()。
+
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { state } from "../../persistence/json-store";
+import { defaultSkillContent, listSkillFiles, listSkills, parseSkillFrontmatter, readSkillContent, safeSkillDir, skillMetadataFromFile } from "../../tools/skills";
+import { error, json, readJson } from "../request";
+import { importSkillFromBuffer, importSkillFromGitHub, updateSettings } from "../../server";
+
+export async function handleSkillRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
+  if (path === "skills" && request.method === "GET") return json(listSkills());
+  const skillFiles = path.match(/^skills\/([^/]+)\/files$/);
+  if (skillFiles && request.method === "GET") {
+    const name = decodeURIComponent(skillFiles[1]);
+    const metadata = skillMetadataFromFile(name);
+    if (!metadata) return error("Skill not found", 404);
+    return json({ files: listSkillFiles(name) });
+  }
+  const skillDetail = path.match(/^skills\/([^/]+)$/);
+  if (skillDetail && request.method === "GET") {
+    const name = decodeURIComponent(skillDetail[1]);
+    const metadata = skillMetadataFromFile(name);
+    const content = readSkillContent(name);
+    if (!metadata || content == null) return error("Skill not found", 404);
+    return json({ ...metadata, content });
+  }
+  if (path === "skills/detail" && request.method === "POST") {
+    const body = await readJson<{ name?: string; content?: string }>(request);
+    const requestedName = String(body.name ?? parseSkillFrontmatter(body.content ?? "").name ?? "new-skill").trim();
+    const dir = safeSkillDir(requestedName);
+    if (!dir) return error("Invalid skill name", 400);
+    mkdirSync(dir, { recursive: true });
+    const content = String(body.content ?? defaultSkillContent(requestedName));
+    writeFileSync(join(dir, "SKILL.md"), content);
+    const metadata = skillMetadataFromFile(requestedName);
+    if (!metadata) return error("Skill frontmatter must include name and description", 400);
+    return json({ status: "ok", skill: { ...metadata, content } });
+  }
+  if (path === "skills/import-github" && request.method === "POST") {
+    const body = await readJson<{ repoUrl?: string }>(request);
+    try {
+      const skill = await importSkillFromGitHub(String(body.repoUrl ?? ""));
+      return json({ status: "ok", skill });
+    } catch (err) {
+      return error(err instanceof Error ? err.message : String(err), 502);
+    }
+  }
+  if (path === "skills/import-file" && request.method === "POST") {
+    // 对齐安卓 commit af9b1f35：支持从本地文件导入单个 Markdown 或 ZIP 技能包。
+    // 前端用 multipart/form-data 把文件 POST 上来；这里取出二进制内容后委派给
+    // importSkillFromBuffer 处理。
+    try {
+      const form = await request.formData();
+      const file = form.get("file");
+      if (!(file instanceof File)) return error("Missing file", 400);
+      const buf = Buffer.from(await file.arrayBuffer());
+      const imported = importSkillFromBuffer(file.name || "", buf);
+      const skills = imported.map((name) => {
+        const metadata = skillMetadataFromFile(name);
+        const content = readSkillContent(name) ?? "";
+        return metadata ? { ...metadata, content } : { name, description: "", content };
+      });
+      return json({ status: "ok", imported, skills });
+    } catch (err) {
+      return error(err instanceof Error ? err.message : String(err), 400);
+    }
+  }
+  if (skillDetail && request.method === "DELETE") {
+    const name = decodeURIComponent(skillDetail[1]);
+    const dir = safeSkillDir(name);
+    if (!dir || !existsSync(dir)) return error("Skill not found", 404);
+    rmSync(dir, { recursive: true, force: true });
+    updateSettings({
+      ...state.settings,
+      assistants: state.settings.assistants.map((assistant) => ({
+        ...assistant,
+        enabledSkills: assistant.enabledSkills.filter((skillName) => skillName !== name),
+      })),
+    });
+    return json({ status: "deleted" });
+  }
+  return null;
+}
