@@ -468,6 +468,19 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
     assistantNode = ensureAssistantGenerationNode(conversation, picked.model.id);
   }
   const currentMessage = assistantNode.messages[assistantNode.selectIndex];
+  // P1-3:四条出口路径(pending/done/aborted/failed)的共同收尾序列。差异只在 parts 与
+  // finishedAt 处理,由 applyParts 注入。completeConversationGeneration 幂等,finally 兜底。
+  const finalizeOutcome = (applyParts: () => void) => {
+    applyOutputTransforms(currentMessage, assistant);
+    finishReasoningParts(currentMessage);
+    applyParts();
+    ensureUsage(currentMessage, conversation);
+    conversation.updateAt = Date.now();
+    saveState();
+    completeConversationGeneration(conversation.id, controller);
+    broadcastNodeUpdate(conversation, assistantNode);
+    broadcastConversation(conversation);
+  };
   const resumingApprovedTools = hasResumableToolParts(currentMessage);
   currentMessage.finishedAt = null;
   // Allow createdAt to be re-stamped on the first content chunk of this generation pass —
@@ -552,33 +565,26 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
       controller.signal,
     );
     if (controller.signal.aborted) throw new DOMException("Generation stopped", "AbortError");
-    applyOutputTransforms(currentMessage, assistant);
-    finishReasoningParts(currentMessage);
     if (hasPendingToolApproval(currentMessage)) {
-      currentMessage.finishedAt = null;
-      ensureUsage(currentMessage, conversation);
-      conversation.updateAt = Date.now();
-      saveState();
-      completeConversationGeneration(conversation.id, controller);
-      broadcastNodeUpdate(conversation, assistantNode);
-      broadcastConversation(conversation);
+      // 注:hasPendingToolApproval 判定在 applyOutputTransforms 之前与旧实现一致——
+      // 旧实现先 transform 再判定,但 transform 只改 text/reasoning parts,不触碰 tool
+      // parts 的 approvalState,判定结果不受影响;两分支的 transform 都由 finalize 统一做。
+      finalizeOutcome(() => {
+        currentMessage.finishedAt = null;
+      });
       return;
     }
-    if (currentMessage.parts.length === 0) {
-      finishMessage(currentMessage, [{ type: "text", text: content }]);
-    } else {
-      const hasText = textFromParts(currentMessage.parts).trim().length > 0;
-      if (!hasText && content && content !== "(empty response)") {
-        appendTextPart(currentMessage, content);
+    finalizeOutcome(() => {
+      if (currentMessage.parts.length === 0) {
+        finishMessage(currentMessage, [{ type: "text", text: content }]);
+      } else {
+        const hasText = textFromParts(currentMessage.parts).trim().length > 0;
+        if (!hasText && content && content !== "(empty response)") {
+          appendTextPart(currentMessage, content);
+        }
+        currentMessage.finishedAt = new Date().toISOString();
       }
-      currentMessage.finishedAt = new Date().toISOString();
-    }
-    ensureUsage(currentMessage, conversation);
-    conversation.updateAt = Date.now();
-    saveState();
-    completeConversationGeneration(conversation.id, controller);
-    broadcastNodeUpdate(conversation, assistantNode);
-    broadcastConversation(conversation);
+    });
     const snapshot = cloneConversation(conversation);
     void runPostGenerationTasks(conversation.id, snapshot, currentMessage.id);
   } catch (err) {
@@ -587,34 +593,22 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
       return;
     }
     if (err instanceof DOMException && err.name === "AbortError") {
-      applyOutputTransforms(currentMessage, assistant);
-      finishReasoningParts(currentMessage);
-      currentMessage.finishedAt = new Date().toISOString();
-      ensureUsage(currentMessage, conversation);
-      conversation.updateAt = Date.now();
-      saveState();
-      completeConversationGeneration(conversation.id, controller);
-      broadcastNodeUpdate(conversation, assistantNode);
-      broadcastConversation(conversation);
+      finalizeOutcome(() => {
+        currentMessage.finishedAt = new Date().toISOString();
+      });
       return;
     }
     const rawContent = err instanceof Error ? err.message : String(err);
     const proxyHint = classifyProxyError(err, state.settings.proxyConfig);
     const failureText = proxyHint ?? `请求失败：${rawContent}`;
-    applyOutputTransforms(currentMessage, assistant);
-    finishReasoningParts(currentMessage);
-    if (currentMessage.parts.length === 0) {
-      finishMessage(currentMessage, [{ type: "text", text: failureText }]);
-    } else {
-      appendTextPart(currentMessage, `\n\n${failureText}`);
-      currentMessage.finishedAt = new Date().toISOString();
-    }
-    ensureUsage(currentMessage, conversation);
-    conversation.updateAt = Date.now();
-    saveState();
-    completeConversationGeneration(conversation.id, controller);
-    broadcastNodeUpdate(conversation, assistantNode);
-    broadcastConversation(conversation);
+    finalizeOutcome(() => {
+      if (currentMessage.parts.length === 0) {
+        finishMessage(currentMessage, [{ type: "text", text: failureText }]);
+      } else {
+        appendTextPart(currentMessage, `\n\n${failureText}`);
+        currentMessage.finishedAt = new Date().toISOString();
+      }
+    });
   } finally {
     releaseConversation(conversation.id);
     completeConversationGeneration(conversation.id, controller);
