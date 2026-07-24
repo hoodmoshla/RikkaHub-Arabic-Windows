@@ -19,6 +19,39 @@ import { defaultSettings } from "../app-config/defaults";
 import { normalizeState } from "../persistence/state-load";
 import { generating } from "../conversations/generation-state";
 
+// —— N-5 custom_js 导入告警 —————————————————————————————————————————————
+// custom_js 搜索服务的 searchScript/scrapeScript 会在本机进程内执行（search/index.ts 的
+// runCustomJsFunction，AsyncFunction 无沙箱）。脚本本是用户自配，但设置随备份导入导出，
+// 恶意备份 zip/json 是现实的社工攻击路径。策略：导入前对现有脚本做签名快照，导入后只对
+// "新增或脚本内容变化"的服务告警——用户自己配置过且未变的服务不重复提示，避免告警疲劳。
+export function customJsScriptSignatures(settings: unknown): Map<string, string> {
+  const signatures = new Map<string, string>();
+  if (!isRecord(settings) || !Array.isArray(settings.searchServices)) return signatures;
+  for (const service of settings.searchServices) {
+    if (!isRecord(service) || String(service.type ?? "") !== "custom_js") continue;
+    const searchScript = String(service.searchScript ?? "").trim();
+    const scrapeScript = String(service.scrapeScript ?? "").trim();
+    if (!searchScript && !scrapeScript) continue;
+    signatures.set(String(service.id ?? ""), String(Bun.hash(`${searchScript}\u0000${scrapeScript}`)));
+  }
+  return signatures;
+}
+
+export function customJsImportWarning(beforeSignatures: Map<string, string>, settingsAfter: unknown): string | null {
+  const afterSignatures = customJsScriptSignatures(settingsAfter);
+  if (afterSignatures.size === 0 || !isRecord(settingsAfter) || !Array.isArray(settingsAfter.searchServices)) return null;
+  const names: string[] = [];
+  for (const service of settingsAfter.searchServices) {
+    if (!isRecord(service)) continue;
+    const id = String(service.id ?? "");
+    const signature = afterSignatures.get(id);
+    if (!signature || beforeSignatures.get(id) === signature) continue;
+    names.push(String(service.name ?? "custom_js"));
+  }
+  if (names.length === 0) return null;
+  return `安全提醒：本次导入包含 ${names.length} 个自定义 JS 搜索脚本（${names.join("、")}）。这类脚本会在本机执行，请确认备份来源可信；如不确定，请到 设置 → 搜索 中检查或删除对应服务。`;
+}
+
 export function applyBackupPayload(body: { state?: Partial<State>; skills?: unknown; files?: unknown } & Partial<State>) {
   const incoming = body.state ?? body;
   if (!incoming || typeof incoming !== "object" || !incoming.settings) {
@@ -670,6 +703,7 @@ export async function streamResponseToTempAndRestore(response: Response, fileNam
     ? sanitized
     : `${sanitized}.zip`;
   const onDiskPath = join(tmpRoot, onDiskName);
+  const customJsBefore = customJsScriptSignatures(state.settings);
   try {
     const body = response.body;
     if (!body) throw new Error("Empty response body");
@@ -698,6 +732,11 @@ export async function streamResponseToTempAndRestore(response: Response, fileNam
       applyAndroidZipBackupFromPath(onDiskPath);
     } else {
       applyBackupPayload(JSON.parse(readFileSync(onDiskPath, "utf-8")));
+    }
+    const customJsWarning = customJsImportWarning(customJsBefore, state.settings);
+    if (customJsWarning) {
+      console.warn(`[restore] ${customJsWarning}`);
+      onProgress?.(customJsWarning);
     }
   } finally {
     try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best-effort */ }

@@ -10,7 +10,7 @@ import { tempDir } from "../../foundation/platform";
 import { friendlyRequestError } from "../../foundation/net";
 import { state } from "../../persistence/json-store";
 import { createSettingsBackupZipToPath } from "../../backup/export";
-import { applyAndroidZipBackupFromPath, applyBackupPayload } from "../../backup/import";
+import { applyAndroidZipBackupFromPath, applyBackupPayload, customJsImportWarning, customJsScriptSignatures } from "../../backup/import";
 import {
   normalizeS3Config,
   normalizeWebDavConfig,
@@ -332,6 +332,7 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
     // Format detection (zip vs PC json) is done on the on-disk file's first 4 bytes after
     // the upload completes, regardless of which path we took.
     const importStartedAt = Date.now();
+    const customJsBefore = customJsScriptSignatures(state.settings);
     const tmpRoot = join(dataDir, ".import-tmp");
     try {
       rmSync(tmpRoot, { recursive: true, force: true });
@@ -402,7 +403,8 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
           summary.skillsImported ? `已恢复 ${summary.skillsImported} 个 Skill 文件` : "",
           summary.dbReadError ? `对话历史导入失败：${summary.dbReadError}` : "",
         ].filter(Boolean);
-        return json({ status: "imported", source: "android-zip", summary: messages, settings: state.settings });
+        const zipCustomJsWarning = customJsImportWarning(customJsBefore, state.settings);
+        return json({ status: "imported", source: "android-zip", summary: messages, warnings: zipCustomJsWarning ? [zipCustomJsWarning] : [], settings: state.settings });
       }
       // PC JSON path — safe to read fully into memory; JSON backups are KB-MB, not GB.
       const text = readFileSync(onDiskPath, "utf-8");
@@ -410,7 +412,8 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
       applyBackupPayload(body);
       const elapsed = ((Date.now() - importStartedAt) / 1000).toFixed(1);
       console.log(`[import] PC json processed in ${elapsed}s`);
-      return json({ status: "imported", source: "pc-json", settings: state.settings });
+      const jsonCustomJsWarning = customJsImportWarning(customJsBefore, state.settings);
+      return json({ status: "imported", source: "pc-json", warnings: jsonCustomJsWarning ? [jsonCustomJsWarning] : [], settings: state.settings });
     } catch (err) {
       const elapsed = ((Date.now() - importStartedAt) / 1000).toFixed(1);
       console.error(`[import] failed after ${elapsed}s:`, err);

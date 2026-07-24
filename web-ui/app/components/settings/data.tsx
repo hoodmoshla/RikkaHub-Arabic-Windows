@@ -566,6 +566,7 @@ export function DataSection({
         status: string;
         source?: string;
         summary?: string[];
+        warnings?: string[];
         settings: Settings;
       }>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -622,6 +623,10 @@ export function DataSection({
         );
       } else {
         toast.success(t("settings:data.import_done"));
+      }
+      // 安全告警（如导入携带 custom_js 可执行脚本）：停留时间加长，确保用户看到
+      for (const warning of result.warnings ?? []) {
+        toast.warning(warning, { duration: 15000 });
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t("settings:data.import_failed"));
