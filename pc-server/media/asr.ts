@@ -8,7 +8,7 @@ import { id, isRecord } from "../foundation/utils";
 import { resolveEffectiveProxy, shouldBypassProxy } from "../foundation/net";
 import { state } from "../persistence/json-store";
 import { textBody } from "../model-providers";
-import { addLog } from "../server";
+import { addLog } from "../api/logs";
 
 export function defaultAsrProvider(type: AsrProvider["type"] = "openai_realtime"): AsrProvider {
   if (type === "dashscope") {

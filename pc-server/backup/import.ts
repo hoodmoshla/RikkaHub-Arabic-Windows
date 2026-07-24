@@ -14,7 +14,8 @@ import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
 import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, resetConversationsDbTo } from "../conversations";
 import { importSkills } from "../tools";
 import { ANDROID_AVATAR_TYPE_TO_PC, copyDirRecursive, rewriteAvatarsInSettings } from "./export";
-import { broadcastList, broadcastSettings, defaultSettings, generating, normalizeState } from "../server";
+import { broadcastList, broadcastSettings } from "../api/sse";
+import { defaultSettings, generating, normalizeState } from "../server";
 
 export function applyBackupPayload(body: { state?: Partial<State>; skills?: unknown; files?: unknown } & Partial<State>) {
   const incoming = body.state ?? body;

@@ -1,4 +1,4 @@
-import { JsonValue, Model, Provider, WebDavConfig, S3Config, ProxyMode, ProxyConfig, Assistant, AsrProvider, TtsProvider, Message, MessageNode, WriteStrategy, Conversation, RequestLog, RequestStats, DailyStat, StoredFile, State, SearchService, GithubRelease, GlobalMemoryFile, AssistantMemoryFile, GitHubSkillInfo, GitHubSkillFile, ApiMessage, FontWeightFile, FontEntry, ManifestEntry, BuiltinManifest, StreamHooks, AuxiliaryTextOptions } from "./foundation/types";
+import { JsonValue, Model, Provider, WebDavConfig, S3Config, ProxyMode, ProxyConfig, Assistant, AsrProvider, TtsProvider, Message, MessageNode, WriteStrategy, Conversation, DailyStat, StoredFile, State, SearchService, GithubRelease, GlobalMemoryFile, AssistantMemoryFile, GitHubSkillInfo, GitHubSkillFile, ApiMessage, FontWeightFile, FontEntry, ManifestEntry, BuiltinManifest, StreamHooks, AuxiliaryTextOptions } from "./foundation/types";
 import type { Settings } from "./foundation/types/settings";
 import { compareSemver, id, uniqueStrings, cloneJson, textFromParts, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, getStringArray, isRecord, mergeById, extensionFromMime, message, reasoningFromParts } from "./foundation/utils";
 import { executableDir, rootDir, dataDir, filesDir, skillsDir, customFontsDir, statePath, updatesCacheDir, globalMemoryPath, assistantMemoryPath, pendingMemoryPath, deviceIdPath } from "./foundation/paths";
@@ -17,6 +17,8 @@ import { applyAndroidZipBackupFromPath, applyBackupPayload } from "./backup/impo
 import { normalizeS3Config, normalizeWebDavConfig, s3Backup, s3Delete, s3ListBackups, s3Restore, s3TestConnection, webDavBackup, webDavDelete, webDavEnsureCollection, webDavListBackups, webDavRestore } from "./backup/storage";
 import { error, json, mime, readJson } from "./api/request";
 import { routeStatic } from "./api/static";
+import { addLog, defaultRequestStats, normalizeRequestStats } from "./api/logs";
+import { broadcastConversation, broadcastList, broadcastMemoryUpdate, broadcastNodeUpdate, broadcastSettings, conversationClients, listClients, memoryClients, openSse, scheduleNodeBroadcast, settingsClients, sseFrame } from "./api/sse";
 import {
   applyCustomBody,
   applyRequestHeaders,
@@ -832,51 +834,6 @@ function migrateMemoryFilesIfNeeded(stateObj: State): void {
 // writes inside `touchStream` to ~5/s while still broadcasting every chunk to SSE clients in real
 // time. A final saveState() at end-of-generation makes the persisted state authoritative.
 
-// Streaming clients receive a node_update per chunk. Since each update carries the full growing
-// MessageNode (cumulative text), naive per-chunk broadcasts turn into O(N^2) bytes over SSE and
-// browsers fall behind — the user sees "stuck then dump" instead of smooth streaming, and the stop
-// button feels laggy because old events keep flushing. We coalesce broadcasts to ~30 fps while
-// always flushing the final state at end-of-generation.
-const STREAM_BROADCAST_INTERVAL_MS = 33;
-const pendingBroadcasts = new Map<string, { conversation: Conversation; node: MessageNode; timer: ReturnType<typeof setTimeout> | null; lastFlush: number }>();
-function flushNodeBroadcast(key: string) {
-  const entry = pendingBroadcasts.get(key);
-  if (!entry) return;
-  if (entry.timer) {
-    clearTimeout(entry.timer);
-    entry.timer = null;
-  }
-  entry.lastFlush = Date.now();
-  broadcastNodeUpdateNow(entry.conversation, entry.node);
-}
-function scheduleNodeBroadcast(conversation: Conversation, node: MessageNode) {
-  const key = `${conversation.id}::${node.id}`;
-  const now = Date.now();
-  const existing = pendingBroadcasts.get(key);
-  if (!existing) {
-    pendingBroadcasts.set(key, { conversation, node, timer: null, lastFlush: now });
-    broadcastNodeUpdateNow(conversation, node);
-    return;
-  }
-  // Always keep the freshest references — the node object identity can stay but the parts mutate.
-  existing.conversation = conversation;
-  existing.node = node;
-  const elapsed = now - existing.lastFlush;
-  if (elapsed >= STREAM_BROADCAST_INTERVAL_MS) {
-    flushNodeBroadcast(key);
-    return;
-  }
-  if (existing.timer) return;
-  existing.timer = setTimeout(() => flushNodeBroadcast(key), STREAM_BROADCAST_INTERVAL_MS - elapsed);
-}
-function clearNodeBroadcast(conversation: Conversation, node: MessageNode) {
-  const key = `${conversation.id}::${node.id}`;
-  const entry = pendingBroadcasts.get(key);
-  if (!entry) return;
-  if (entry.timer) clearTimeout(entry.timer);
-  pendingBroadcasts.delete(key);
-}
-
 setState(loadState());
 state.launchCount += 1;
 
@@ -900,178 +857,6 @@ applyEffectiveProxy(state.settings.proxyConfig);
 
 // 顶层启动写盘：必须放在 activeSaveStatePromise / coalescedSaveRequested 这些 let
 // 声明之后调用，否则会撞 TDZ 触发模块加载时的 ReferenceError，导致服务直接起不来。
-
-function classifyRequestGroup(kind: string, toolName: string): string {
-  if (kind.startsWith("mcp:")) return "MCP 请求";
-  if (kind.startsWith("search:") || kind.startsWith("tool:search") || kind.startsWith("tool:scrape") || toolName === "search_web" || toolName === "scrape_web") return "搜索引擎请求";
-  return "模型请求";
-}
-
-function defaultRequestStats(): RequestStats {
-  return { totalRequests: 0, failedRequests: 0, byProvider: {}, byGroup: {} };
-}
-
-// 把一条请求日志的计数累加进 stats(既用于实时累加,也用于老用户一次性迁移)。
-function bumpStatsCounters(stats: RequestStats, log: { ok: boolean; providerName: string; kind?: string; toolName?: string }): void {
-  stats.totalRequests += 1;
-  if (!log.ok) stats.failedRequests += 1;
-  const prov = stats.byProvider[log.providerName] ?? { ok: 0, failed: 0 };
-  if (log.ok) prov.ok += 1; else prov.failed += 1;
-  stats.byProvider[log.providerName] = prov;
-  const group = classifyRequestGroup(String(log.kind ?? ""), String(log.toolName ?? ""));
-  const grp = stats.byGroup[group] ?? { ok: 0, failed: 0 };
-  if (log.ok) grp.ok += 1; else grp.failed += 1;
-  stats.byGroup[group] = grp;
-}
-
-// 老用户的 state.json 没有 stats 字段(统计以前藏在持久化 logs 里)。加载时把旧 logs
-// 的统计一次性累加进 stats —— 之后 logs 改内存态会丢弃,但累计统计得以保留,老用户重启
-// 后统计页不会归零。新版本已有 stats 字段时直接沿用,不重复迁移(避免双算)。
-function normalizeRequestStats(raw: unknown, legacyLogs: RequestLog[]): RequestStats {
-  if (isRecord(raw) && (typeof raw.totalRequests === "number" || isRecord(raw.byProvider) || isRecord(raw.byGroup))) {
-    const base = defaultRequestStats();
-    base.totalRequests = typeof raw.totalRequests === "number" ? raw.totalRequests : 0;
-    base.failedRequests = typeof raw.failedRequests === "number" ? raw.failedRequests : 0;
-    if (isRecord(raw.byProvider)) {
-      for (const [k, v] of Object.entries(raw.byProvider)) {
-        if (isRecord(v) && typeof v.ok === "number" && typeof v.failed === "number") base.byProvider[k] = { ok: v.ok, failed: v.failed };
-      }
-    }
-    if (isRecord(raw.byGroup)) {
-      for (const [k, v] of Object.entries(raw.byGroup)) {
-        if (isRecord(v) && typeof v.ok === "number" && typeof v.failed === "number") base.byGroup[k] = { ok: v.ok, failed: v.failed };
-      }
-    }
-    return base;
-  }
-  const migrated = defaultRequestStats();
-  for (const log of legacyLogs) bumpStatsCounters(migrated, log);
-  return migrated;
-}
-
-export function addLog(input: Omit<RequestLog, "id" | "at">) {
-  bumpStatsCounters(state.stats, input);
-  state.logs.unshift({ id: id(), at: Date.now(), ...input });
-  state.logs = state.logs.slice(0, 100);
-  saveState();
-}
-
-const settingsClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-const listClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-const conversationClients = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
-const encoder = new TextEncoder();
-
-function sseFrame(event: string, data: JsonValue | object) {
-  return encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-}
-
-function openSse(
-  initial: () => Array<[string, JsonValue | object]>,
-  register: (controller: ReadableStreamDefaultController<Uint8Array>) => () => void,
-) {
-  let cleanup = () => {};
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      cleanup = register(controller);
-      for (const [event, payload] of initial()) {
-        controller.enqueue(sseFrame(event, payload));
-      }
-      const heartbeat = setInterval(() => {
-        try {
-          controller.enqueue(encoder.encode(": heartbeat\n\n"));
-        } catch {
-          clearInterval(heartbeat);
-        }
-      }, 15000);
-      cleanup = ((old) => () => {
-        clearInterval(heartbeat);
-        old();
-      })(cleanup);
-    },
-    cancel() {
-      cleanup();
-    },
-  });
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  });
-}
-
-export function broadcastSettings() {
-  for (const client of settingsClients) client.enqueue(sseFrame("update", state.settings));
-}
-
-// memory SSE 通道(1.3.2):推送 MemorySnapshot 给前端记忆管理 UI + 待确认徽章。独立于
-// settings SSE——记忆运行时数据(pending 队列)不属于配置,混在一起会让每次记忆变化触发
-// 全量 settings 重渲染(§10.3)。触发时机:任何记忆增删改 / pending 入队/解决。
-const memoryClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-
-function broadcastMemoryUpdate() {
-  const snapshot = memoryStore.getSnapshot();
-  for (const client of memoryClients) {
-    try { client.enqueue(sseFrame("update", snapshot)); } catch { /* client gone */ }
-  }
-}
-
-export function broadcastList() {
-  const payload = { type: "invalidate", assistantId: state.settings.assistantId, timestamp: Date.now() };
-  for (const client of listClients) client.enqueue(sseFrame("invalidate", payload));
-}
-
-function broadcastConversation(conversation: Conversation, event = "snapshot") {
-  const payload = {
-    type: "snapshot",
-    seq: Date.now(),
-    conversation: toConversationDto(conversation, generating.has(conversation.id)),
-    serverTime: Date.now(),
-  };
-  for (const client of conversationClients.get(conversation.id) ?? []) {
-    client.enqueue(sseFrame(event, payload));
-  }
-  broadcastList();
-}
-
-function broadcastNodeUpdateNow(conversation: Conversation, node: MessageNode) {
-  const payload = {
-    type: "node_update",
-    seq: Date.now(),
-    serverTime: Date.now(),
-    conversationId: conversation.id,
-    nodeId: node.id,
-    nodeIndex: conversation.messages.findIndex((item) => item.id === node.id),
-    node,
-    updateAt: conversation.updateAt,
-    isGenerating: generating.has(conversation.id),
-  };
-  for (const client of conversationClients.get(conversation.id) ?? []) {
-    client.enqueue(sseFrame("node_update", payload));
-  }
-  // NOTE: deliberately NOT calling broadcastList() here. This used to fire on every chunk
-  // during streaming (~30 times/sec via scheduleNodeBroadcast), which made the conversation
-  // list SSE issue an `invalidate` event 30x/sec, which made the frontend re-fetch
-  // `/api/conversations/p?offset=0&limit=30` 30x/sec. With Chrome's 6-connection-per-host
-  // limit, that storm was rapidly exhausting the frontend's HTTP connection pool, queuing
-  // any other request (including the conversation-detail GET) past ky's 30s timeout. That
-  // matches the user-reported "even fresh conversations stall" + "list also times out"
-  // pattern that the saveState-blocking fix alone couldn't explain.
-  //
-  // The conversation list only needs to refresh when the metadata it actually displays
-  // changes (title, isPinned, isGenerating-state-transition, last-message-preview). Per-
-  // chunk content updates don't change any of those. We now call broadcastList() at
-  // generation start (server.ts:10358), generation end (server.ts:9601), and on explicit
-  // mutations (rename, pin, delete) — not on every streamed chunk.
-}
-
-// Non-streaming call sites (final flush, tool approval, etc.) flush immediately so callers see
-// the authoritative state without delay. Streaming hot paths go through scheduleNodeBroadcast.
-function broadcastNodeUpdate(conversation: Conversation, node: MessageNode) {
-  clearNodeBroadcast(conversation, node);
-  broadcastNodeUpdateNow(conversation, node);
-}
 
 function abortConversationGeneration(conversationId: string) {
   const wasGenerating = generating.has(conversationId);

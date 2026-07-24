@@ -7,7 +7,7 @@ import { id, isRecord, mergeById } from "../foundation/utils";
 import { state } from "../persistence/json-store";
 import { jsonBody, textBody } from "../model-providers";
 import { synthesizeSystemTtsToWav } from "../tools";
-import { addLog } from "../server";
+import { addLog } from "../api/logs";
 
 export const DEFAULT_SYSTEM_TTS_ID = "026a01a2-c3a0-4fd5-8075-80e03bdef200";
 

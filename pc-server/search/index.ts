@@ -6,7 +6,7 @@ import type { JsonValue, SearchService } from "../foundation/types";
 import { domainOfUrl, faviconForUrl, isRecord, stripHtml } from "../foundation/utils";
 import { state } from "../persistence/json-store";
 import { jsonBody, textBody } from "../model-providers";
-import { addLog } from "../server";
+import { addLog } from "../api/logs";
 
 export function buildSearchContext() {
   if (!state.settings.enableWebSearch) return "";

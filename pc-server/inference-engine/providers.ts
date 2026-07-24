@@ -19,8 +19,8 @@ import {
   jsonBody,
   textBody,
 } from "../model-providers";
+import { addLog } from "../api/logs";
 import {
-  addLog,
   MAX_TOOL_STEPS,
   touchStream,
 } from "../server";

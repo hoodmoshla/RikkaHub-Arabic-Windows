@@ -17,7 +17,7 @@ import {
   providerHeaders,
   textBody,
 } from "../model-providers";
-import { addLog } from "../server";
+import { addLog } from "../api/logs";
 
 function imageSize(aspectRatio: string) {
   switch (aspectRatio) {
