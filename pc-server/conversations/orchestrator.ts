@@ -55,6 +55,7 @@ import { executeToolCall, realizeToolResult, toolResultToParts } from "../tools/
 import { applyOutputTransforms } from "../assistants";
 import { TITLE_CHARACTER_LIMIT } from "../app-config/prompts";
 import { flushConvDirtyNow, getConversation, getConversationsDb, markMessageNodeDirty, persistConversation, scheduleThrottledConvFlush } from "./index";
+import { checkoutConversation, releaseConversation } from "./working-set";
 import { conversationExistsInDb } from "./read-queries";
 import { generating } from "./generation-state";
 import {
@@ -450,6 +451,10 @@ async function runGeneration(
 export async function generateAnswer(conversation: Conversation, regenerateAtNodeId?: string) {
   const controller = new AbortController();
   generating.set(conversation.id, controller);
+  // DB-first:整个生成期持有引用(与 finally 的 release 恰好配对一次;
+  // completeConversationGeneration 有多处幂等调用,release 不能放那里)。
+  // generating 条件本身也挡 sweep,refs 是纵深防御(abort 后 generating 先被清的窗口)。
+  checkoutConversation(conversation.id);
   const assistant = findAssistant(conversation.assistantId);
   const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
   // 重新生成 ASSISTANT:调用方已在该 node 追加空占位 message 并把 selectIndex 指向它,
@@ -611,6 +616,7 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
     broadcastNodeUpdate(conversation, assistantNode);
     broadcastConversation(conversation);
   } finally {
+    releaseConversation(conversation.id);
     completeConversationGeneration(conversation.id, controller);
     if (!conversationStillExists(conversation.id)) return;
     broadcastNodeUpdate(conversation, assistantNode);

@@ -16,7 +16,8 @@ import {
   writeSlimStateJsonSync,
   writeSlimStateJsonSyncForMemory,
 } from "./json-store";
-import { getConversationsDb, loadAllConversationsFromDb, loadConversationMetasFromDb, markConversationsLoaded, migrateConversationsIntoDb, openConversationsDb } from "../conversations";
+import { getConversationsDb, loadAllConversationsFromDb, migrateConversationsIntoDb, openConversationsDb, resetConversationsDbTo } from "../conversations";
+import { countConversations } from "../conversations/read-queries";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory";
 import { NA_API_PRESET_MODELS, NA_API_PROVIDER_ID, SUNSET_PROVIDER_IDS, TENCENT_PROVIDER_ID, builtinProviderRank, enrichModel, inferModelAbilities, model } from "../model-providers";
 import { normalizeTtsProviders } from "../media/tts";
@@ -273,18 +274,22 @@ export function loadState(): State {
     }
   }
 
-  // 迁移 + 瘦身(首次升级)。返回 true=从活库读;false=迁移失败,本次用 parsed.conversations。
+  // 迁移 + 瘦身(首次升级)。返回 true=迁移完成(活库即权威);false=迁移失败。
   const migrated = migrateConversationsIfNeeded(parsed);
 
-  // P1-1 懒加载:迁移完成的正常路径只装元数据(不 parse 节点 JSON),消息树打开时按需读;
-  // 未迁移/活库回退路径拿到的是完整树,标记 loaded 防按需加载用活库旧数据反向覆盖。
-  const { conversations, nodesLoaded } = migrated
-    ? loadConversationsFromDbWithFallback()
-    : { conversations: Array.isArray(parsed.conversations) ? parsed.conversations : [], nodesLoaded: true };
+  // DB-first:会话运行时权威 = 活库 + working set,启动不装载会话(元数据也不装)。
+  // 活库健康探测:迁移完成但活库读失败(打开成功而 SELECT 失败的窄场景,如页损坏)
+  // → 尽力从 pre-sqlite.bak 重灌(对应旧回退路径,恢复目标从内存改为活库本身)。
+  if (migrated) probeConversationsDbOrRecover();
 
   const state = normalizeState(parsed);
-  state.conversations = conversations;
-  if (nodesLoaded) markConversationsLoaded(conversations.map((conv) => conv.id));
+  if (migrated) {
+    // 已迁移:state 不持有会话(State.conversations 注释有此字段的完整角色说明)
+    delete state.conversations;
+  }
+  // 迁移失败:保留 normalizeState 解析出的 parsed.conversations 作写盘重试源——
+  // performStateSave 按标记把它继续写回 state.json,下次启动重试迁移。运行时读路径
+  // 已 DB 化,本次启动会话表现为空,但数据仍在 state.json,不丢。
   migrateMemoryFilesIfNeeded(state);
   return state;
 }
@@ -448,11 +453,21 @@ function recoverConversationsFromBak(): Conversation[] {
   }
 }
 
-function loadConversationsFromDbWithFallback(): { conversations: Conversation[]; nodesLoaded: boolean } {
+function probeConversationsDbOrRecover(): void {
+  const db = getConversationsDb();
+  if (!db) return;
   try {
-    return { conversations: loadConversationMetasFromDb(getConversationsDb()!), nodesLoaded: false };
+    countConversations(db);
   } catch (err) {
-    console.error("[conv-db] 活库读取失败,从 state.json.pre-sqlite.bak 恢复", err);
-    return { conversations: recoverConversationsFromBak(), nodesLoaded: true };
+    console.error("[conv-db] 活库读取失败,尝试从 state.json.pre-sqlite.bak 重灌", err);
+    const fromBak = recoverConversationsFromBak();
+    if (fromBak.length === 0) return;
+    try {
+      resetConversationsDbTo(fromBak);
+      console.error(`[conv-db] 已从 pre-sqlite.bak 重灌 ${fromBak.length} 个会话`);
+    } catch (err2) {
+      // 读写都失败:库彻底不可用,本次会话为空;bak 原样保留,人工可救
+      console.error("[conv-db] pre-sqlite.bak 重灌失败,本次会话为空(数据在 bak 未丢)", err2);
+    }
   }
 }

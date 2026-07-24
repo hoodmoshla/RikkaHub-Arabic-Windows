@@ -11,7 +11,8 @@ import {
   toListDto,
   truncateConversationForRegenerate,
 } from "../../conversations";
-import { getConversationsDb, markConversationsLoaded } from "../../conversations";
+import { getConversationsDb } from "../../conversations";
+import { checkoutConversation, registerConversation, releaseConversation } from "../../conversations/working-set";
 import { searchMessageFts } from "../../conversations/fts";
 import { listConversationMetas } from "../../conversations/read-queries";
 import { applyInputRegexTransformParts } from "../../assistants/index";
@@ -119,6 +120,10 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       ? ensureConversation(conversationId)
       : getConversation(conversationId);
     if (!conversation) return error("Conversation not found", 404);
+    // DB-first:整个子路由块持有引用——translate/OCR 等长 await 期间实例不得被 sweep
+    // 清出(否则另一请求 checkout 会装出第二实例,并发修改互相丢失)。try/finally 配对。
+    checkoutConversation(conversation.id);
+    try { // 块内 300+ 行保持原缩进(纯搬迁最小 diff),与结尾 } finally 配对
 
     if (!sub && request.method === "GET") return json(toConversationDto(conversation, generating.has(conversation.id)));
     if (sub === "messages" && request.method === "POST") {
@@ -420,8 +425,7 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
         createAt: Date.now(),
         updateAt: Date.now(),
       };
-      state.conversations.unshift(fork);
-      markConversationsLoaded([fork.id]); // fork 树复制自内存源会话,内存即权威
+      registerConversation(fork); // fork 树复制自内存源会话,内存即权威
       persistConversation(fork);
       saveState();
       broadcastList();
@@ -457,6 +461,9 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
         return json({ status: "accepted" }, { status: 202 });
       }
       return json({ status: "updated" });
+    }
+    } finally {
+      releaseConversation(conversation.id);
     }
   }
   return null;

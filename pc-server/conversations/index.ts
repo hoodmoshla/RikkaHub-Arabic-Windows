@@ -5,6 +5,9 @@
 import { existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { conversationsDbPath, dataDir } from "../foundation/paths";
+import { checkoutConversation, clearWorkingSet, configureWorkingSet, peekConversation, releaseConversation, removeConversations, startWorkingSetSweep } from "./working-set";
+import { getConversationMeta } from "./read-queries";
+import { generating } from "./generation-state";
 import type { Conversation, Message, MessageNode, PcConversationRow, PcMessageNodeRow } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { clearAllFts, deleteConversationFts, ensureMessageFtsTable, ftsRowCount, rebuildFtsFromNodeTable, replaceNodeFts } from "./fts";
@@ -145,53 +148,56 @@ export function loadAllConversationsFromDb(db: InstanceType<typeof Database>): C
   return conversations;
 }
 
-// ----- P1-1 懒加载:消息树按需加载状态 -----
+// ----- DB-first:会话运行时权威 = 活库 + working set -----
 //
-// 数据角色终局(三轨收敛):SQLite 活库 = 会话持久权威;内存 state.conversations = 元数据
-// 全量 + 已打开会话的消息树缓存(写经缓存,脏标记节流 flush / persistConversation 落库);
-// state.json 不再涉会话。
-//
-// loadedConversationIds 记录"内存中消息树可信"的会话:启动元数据装载后为空;
-// getConversation 按需从活库同步读树(bun:sqlite 同步 API,调用方无需 async 化);
-// 新建/fork/导入的会话内存即权威,直接标记,防 ensure 从活库读旧/空树反向覆盖。
-// 未加载的会话不可能有脏标记(写路径必经 getConversation),ensure 读库前无需 flush。
-// 不做换出(LRU):驻留上限 = 本次进程实际打开的会话数,换出会引入半卸载竞态面。
-const loadedConversationIds = new Set<string>();
+// 数据角色终局:SQLite 活库 = 唯一持久权威,读路径直查(WAL 下亚毫秒,页缓存即热缓存);
+// 内存只保留"正在被使用"的会话实例,由 working-set.ts 单一权威实例注册表管理
+// (checkout/release 引用计数 + sweep 四条件清扫);state.json 不再涉会话。
+// 写路径不变:脏标记 200ms 节流 flush + persistConversation 全量落库。
 
-export function markConversationsLoaded(ids: Iterable<string>): void {
-  for (const idValue of ids) loadedConversationIds.add(idValue);
-}
-export function unmarkConversationsLoaded(ids: Iterable<string>): void {
-  for (const idValue of ids) loadedConversationIds.delete(idValue);
-}
-
-/** 确保会话消息树已在内存。已标记则零成本;活库不可用时容错标记(空树起步,与损坏隔离策略一致)。 */
-export function ensureConversationNodesLoaded(conv: Conversation): void {
-  if (loadedConversationIds.has(conv.id)) return;
-  if (conversationsDb) {
-    try {
-      conv.messages = loadConversationNodesFromDb(conversationsDb, conv.id);
-    } catch (err) {
-      console.warn("[conv-db] 按需加载消息树失败,以空树起步", conv.id, err);
-    }
+/** working set 的加载器:活库读元数据行 + 消息树,组装完整 Conversation。 */
+function loadConversationForWorkingSet(convId: string): Conversation | undefined {
+  if (!conversationsDb) return undefined;
+  try {
+    const meta = getConversationMeta(conversationsDb, convId);
+    if (!meta) return undefined;
+    meta.messages = loadConversationNodesFromDb(conversationsDb, convId);
+    return meta;
+  } catch (err) {
+    console.warn("[conv-db] working set 加载会话失败", convId, err);
+    return undefined;
   }
-  loadedConversationIds.add(conv.id);
 }
 
-/** 全量加载(导入合并/需要完整树的重操作前调用)。增量:已加载的跳过。 */
-export function ensureAllConversationsLoaded(): void {
-  for (const conv of state.conversations) ensureConversationNodesLoaded(conv);
+/** 该会话是否有未落库的脏标记(sweep 判据之一;脏集合毫秒级清空,遍历成本可忽略)。 */
+function hasConvDirtyState(convId: string): boolean {
+  if (dirtyConversationIds.has(convId)) return true;
+  const prefix = convId + "::";
+  for (const key of dirtyNodeKeys) if (key.startsWith(prefix)) return true;
+  return false;
 }
 
-/** 内存中该会话的消息树是否可信。stats/export 等全量遍历场景用它决定读内存还是瞬时读活库。 */
-export function isConversationLoaded(convId: string): boolean {
-  return loadedConversationIds.has(convId);
+// 默认 guards(单测/工具脚本直接 import 本模块时即可用);api/sse.ts 加载时经
+// initWorkingSetSseGuard 注入真实的 SSE 客户端判据(避免 index→sse→index 循环导入)。
+let hasSseClientsGuard: (convId: string) => boolean = () => false;
+
+export function initWorkingSetSseGuard(hasSseClients: (convId: string) => boolean): void {
+  hasSseClientsGuard = hasSseClients;
 }
 
-/** 标题兜底专用:取第一个节点的第一条消息 parts。未加载时只读单行,不触发整树加载、不驻留。 */
+configureWorkingSet({
+  loadConversation: loadConversationForWorkingSet,
+  isGenerating: (convId) => generating.has(convId),
+  hasSseClients: (convId) => hasSseClientsGuard(convId),
+  hasDirty: hasConvDirtyState,
+});
+startWorkingSetSweep();
+
+/** 标题兜底专用:取第一个节点的第一条消息 parts。working set 命中读实例(含未 flush
+ *  的最新数据),否则只读活库单行,不触发整树加载、不驻留。 */
 export function peekFirstMessageParts(convId: string): Message["parts"] {
-  const conv = state.conversations.find((item) => item.id === convId);
-  if (conv && loadedConversationIds.has(convId)) return conv.messages[0]?.messages[0]?.parts ?? [];
+  const held = peekConversation(convId);
+  if (held) return held.messages[0]?.messages[0]?.parts ?? [];
   if (!conversationsDb) return [];
   try {
     const row = conversationsDb.prepare(
@@ -331,7 +337,8 @@ export function flushConvDirty(): void {
   const nodeKeys = Array.from(dirtyNodeKeys);
   dirtyNodeKeys.clear();
   for (const convId of convIds) {
-    const conv = state.conversations.find((c) => c.id === convId);
+    // 脏标记只可能来自 checkout 过的会话,working set 必命中;未命中 = 会话已被删除
+    const conv = peekConversation(convId);
     if (!conv) continue;
     try {
       upsertConversationRow(conv);
@@ -344,8 +351,8 @@ export function flushConvDirty(): void {
     if (sep < 0) continue;
     const convId = key.slice(0, sep);
     const nodeId = key.slice(sep + 2);
-    const conv = state.conversations.find((c) => c.id === convId);
-    if (!conv) continue; // 删除正在流的会话竞态:会话已不在内存,不重建行
+    const conv = peekConversation(convId);
+    if (!conv) continue; // 删除正在流的会话竞态:会话已不在 working set,不重建行
     const idx = conv.messages.findIndex((n) => n.id === nodeId);
     if (idx < 0) continue; // 节点已被删除/替换
     try {
@@ -448,10 +455,13 @@ export function checkpointConversationsDb(): void {
   conversationsDb?.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 }
 
-/** 按 id 查找会话;命中时确保消息树已加载(P1-1 懒加载,对调用方透明)。 */
+/** 按 id 取会话的权威实例(working set 命中或从活库装入)。
+ *  checkout+立即 release:实例进注册表并刷新 lastAccess,60s 闲置宽限保证同步段安全;
+ *  跨 await 修改会话的路径必须显式 checkout/release 持有引用(handlers 子路由块、
+ *  generateAnswer),防 sweep 清出后另一处 checkout 装出第二实例并发互覆。 */
 export function getConversation(idValue: string): Conversation | undefined {
-  const conversation = state.conversations.find((item) => item.id === idValue);
-  if (conversation) ensureConversationNodesLoaded(conversation);
+  const conversation = checkoutConversation(idValue);
+  if (conversation) releaseConversation(idValue);
   return conversation;
 }
 

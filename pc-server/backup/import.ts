@@ -11,7 +11,8 @@ import { dataDir, filesDir, skillsDir } from "../foundation/paths";
 import { tempDir } from "../foundation/platform";
 import { MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
-import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, ensureAllConversationsLoaded, markConversationsLoaded, resetConversationsDbTo } from "../conversations";
+import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, getConversationsDb, loadAllConversationsFromDb, resetConversationsDbTo } from "../conversations";
+import { clearWorkingSet } from "../conversations/working-set";
 import { importSkills } from "../tools";
 import { ANDROID_AVATAR_TYPE_TO_PC, copyDirRecursive, rewriteAvatarsInSettings } from "./export";
 import { broadcastList, broadcastSettings } from "../api/sse";
@@ -413,6 +414,10 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
       } as unknown as State["settings"];
       const adjusted = rewriteAvatarsInSettings(merged, ANDROID_AVATAR_TYPE_TO_PC, "to-pc");
       setState(normalizeState({ ...state, settings: adjusted as State["settings"] }));
+      // Android 导入是合并语义,settings 步骤不触碰会话:normalizeState 会把 undefined
+      // 归一化成 [],若留着它,后续 importAndroidConversations 会误把空数组当合并基底、
+      // settings-only zip 的 finalize 会用 [] 清空用户全部会话(P0)。删掉恢复"无暂存"态。
+      delete state.conversations;
       settingsImported = true;
     } catch (err) {
       console.warn("[import] failed to parse Android settings.json", err);
@@ -530,11 +535,15 @@ function importAndroidConversations(extractDir: string, dbPath: string, androidF
     const nodeStmt = db.query("SELECT * FROM message_node WHERE conversation_id = ? ORDER BY node_index ASC");
 
     let imported = 0;
-    // P1-1 懒加载:合并会保留未被导入覆盖的现有会话,收尾 resetConversationsDbTo 会用
-    // state.conversations 重灌活库——数组里若有未加载壳(messages 空)会清空该会话的消息。
-    // 导入是低频重操作,全量加载的峰值内存可接受。
-    ensureAllConversationsLoaded();
-    const existingById = new Map(state.conversations.map((conv) => [conv.id, conv]));
+    // DB-first:合并基底二选一——导入流程已建立暂存(PC zip 恢复路径:setState 把备份内
+    // 会话放进 state.conversations,基底=备份内容,保持替换语义)用暂存;无暂存(Android
+    // zip 合并路径)从活库全量瞬时读现有会话,保持合并语义。结果暂存 state.conversations,
+    // finalize 统一灌库后 delete。导入是低频重操作,全量读的峰值内存可接受。
+    const mergeDb = getConversationsDb();
+    const baseConversations = Array.isArray(state.conversations)
+      ? state.conversations
+      : (mergeDb ? loadAllConversationsFromDb(mergeDb) : []);
+    const existingById = new Map(baseConversations.map((conv) => [conv.id, conv]));
 
     for (const row of convRows) {
       const convId = String(row.id ?? "");
@@ -681,10 +690,10 @@ function normalizeAndroidMessage(raw: unknown): Message | null {
   };
 }
 
-/** 导入备份收尾:中止所有流 + 清脏 + 重灌活库为当前 state.conversations。
- *  state.conversations 在导入流程里被整体替换/合并,活库必须同步重灌,否则重启后
- *  loadAllConversationsFromDb 读到旧活库、导入的会话丢失。中止所有流 + 清脏防竞态
- *  (流式中导入备份:否则流式循环会继续 upsert 旧节点进刚重灌的活库)。 */
+/** 导入备份收尾:中止所有流 + 清脏 + 重灌活库为暂存的 state.conversations,然后清空
+ *  暂存与 working set。中止所有流 + 清脏防竞态(流式中导入备份:否则流式循环会继续
+ *  upsert 旧节点进刚重灌的活库);清空 working set 防陈旧实例(导入前 checkout 的实例
+ *  数据已作废,读到旧数据比读到空更危险)。 */
 function finalizeConversationImport(): void {
   // 中止所有流(手动,不走 abortConversationGeneration 以免它 persist——马上要全量重灌)
   for (const conversationId of Array.from(generating.keys())) {
@@ -692,8 +701,13 @@ function finalizeConversationImport(): void {
   }
   generating.clear();
   clearConvDirtyState();
-  markConversationsLoaded(state.conversations.map((conv) => conv.id)); // 导入后数组全为完整树
-  resetConversationsDbTo(state.conversations);
+  // 有暂存才重灌:PC 备份恢复(替换语义,含"备份无会话→清空")与 Android 库合并都会建立
+  // 暂存;settings-only Android zip 无暂存,不触碰活库现有会话。
+  if (Array.isArray(state.conversations)) {
+    resetConversationsDbTo(state.conversations);
+    delete state.conversations; // 中转字段用完即清(State 类型注释有角色说明)
+  }
+  clearWorkingSet();
 }
 
 /** Stream an HTTP response body to a temp file (no in-JS-memory buffering) and route the

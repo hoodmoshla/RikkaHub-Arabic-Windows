@@ -280,7 +280,10 @@ export interface GeneratedImage {
 
 export interface State {
   settings: Settings;
-  conversations: Conversation[];
+  // DB-first:会话运行时权威 = SQLite 活库 + working set,state 不持有会话。此字段仅两种
+  // 场景存在:①迁移失败时保留 state.json 原数据作重试源(performStateSave 按标记决定写盘
+  // 保留,删了它 saveState 会把重试源抹掉);②备份导入流程的暂存中转(finalize 灌库后 delete)。
+  conversations?: Conversation[];
   files: StoredFile[];
   generatedImages: GeneratedImage[];
   logs: RequestLog[];

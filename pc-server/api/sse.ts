@@ -3,7 +3,7 @@
 // 临时耦合：generating Map 仍从 ../server 导入（生成控制归属待 api/handlers 拆分时收敛）。
 
 import type { StreamHooksWithSink } from "../inference-engine/events";
-import { markConversationRowDirty, markMessageNodeDirty, scheduleThrottledConvFlush } from "../conversations";
+import { initWorkingSetSseGuard, markConversationRowDirty, markMessageNodeDirty, scheduleThrottledConvFlush } from "../conversations";
 import type { Conversation, JsonValue, MessageNode } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { toConversationDto } from "../conversations";
@@ -58,6 +58,9 @@ function clearNodeBroadcast(conversation: Conversation, node: MessageNode) {
 export const settingsClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 export const listClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 export const conversationClients = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
+// working set 的 SSE 驻留判据:某会话有打开的 SSE 流(用户界面正开着)时不清扫。
+// 在此注入而非 conversations/index 直接 import,避免 index→sse→index 循环导入。
+initWorkingSetSseGuard((convId) => (conversationClients.get(convId)?.size ?? 0) > 0);
 const encoder = new TextEncoder();
 
 export function sseFrame(event: string, data: JsonValue | object) {
