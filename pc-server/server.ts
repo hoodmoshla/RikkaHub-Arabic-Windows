@@ -3661,6 +3661,32 @@ function resolveBindHostname(): string {
 }
 
 const bindHostname = resolveBindHostname();
+
+// Origin 白名单：拦截恶意网页对本机服务的跨站请求（浏览器会自动带上 Origin，
+// 而 localhost 服务默认不受同源策略保护——任意网页都能 fetch http://127.0.0.1:8080）。
+// 规则：
+// - 无 Origin 头 → 放行（同源导航/EventSource、curl、Tauri 原生请求都不带 Origin）
+// - localhost / 127.0.0.1 / ::1 / tauri.localhost / tauri: 协议 → 放行（本机 UI、Vite dev、Tauri WebView）
+// - Origin 与请求 Host 完全一致 → 放行（--host 放开局域网后用 IP 访问的同源请求）
+// - 其余 → 403。只保护 /api（含 WebSocket 升级），静态资源无状态不拦。
+function isAllowedOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  // 沙箱 iframe / file:// 页面发 "null"，一律拒绝
+  if (origin === "null") return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === "tauri:") return true;
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "tauri.localhost") return true;
+  const requestHost = request.headers.get("host");
+  if (requestHost && parsed.host.toLowerCase() === requestHost.trim().toLowerCase()) return true;
+  return false;
+}
 const preferredPort = resolvePreferredPort();
 // Try the preferred port first; on EADDRINUSE walk upward. Containers don't walk — a port
 // collision inside a container is unexpected, and silently hopping would hide a real problem.
@@ -3685,6 +3711,9 @@ const { server, port } = (() => {
             server.timeout(request, 0);
             const url = new URL(request.url);
             try {
+              if (url.pathname.startsWith("/api/") && !isAllowedOrigin(request)) {
+                return error("Forbidden: cross-origin request blocked", 403);
+              }
               if (url.pathname === "/api/asr/realtime" && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
                 const upgraded = server.upgrade(request, { data: { kind: "asr" } as any });
                 return upgraded ? undefined : error("WebSocket upgrade failed", 400);
