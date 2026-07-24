@@ -750,108 +750,53 @@ export async function streamGoogleChatWithTools(
   signal: AbortSignal | undefined,
   hooks: StreamHooksWithSink,
 ) {
+  // P1-5:循环骨架统一到 runStreamingToolLoop,本函数只保留 Google 特定的 Round Adapter。
   const streamUrl = `${baseUrl.replace(/\/+$/, "")}/models/${modelId}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
   let contents = Array.isArray(body.contents) ? [...body.contents] : [];
-  let currentBody = { ...body, contents };
-  let allContent = "";
-  for (let round = 0; round < MAX_TOOL_STEPS; round += 1) {
-    if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
-    const roundStarted = Date.now();
-    const response = await fetch(streamUrl, {
+  const initialBody: Record<string, unknown> = { ...body, contents };
+
+  const adapter: ProviderRoundAdapter = {
+    providerItem,
+    logUrl: streamUrl,
+    logHeaders: headers,
+    fetchRound: (requestBody) => fetch(streamUrl, {
       method: "POST",
       headers: { ...headers, Accept: "text/event-stream" },
-      body: JSON.stringify(currentBody),
+      body: JSON.stringify(requestBody),
       signal,
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      addLog({
-        providerId: providerItem.id,
-        providerName: providerItem.name,
-        url: streamUrl,
-        ok: false,
-        status: response.status,
-        kind: round === 0 ? "provider:chat:stream" : "provider:chat:tool_result:stream",
-        durationMs: Date.now() - roundStarted,
-        method: "POST",
-        requestHeaders: headers,
-        responseHeaders: Object.fromEntries(response.headers.entries()),
-        requestBody: jsonBody(currentBody),
-        responseBody: textBody(text),
-        error: textBody(text),
-      });
-      throw new Error(`${providerItem.name} ${response.status}: ${text.slice(0, 500)}`);
-    }
-    const round_ = await readGoogleStreamingRound(response, hooks, assistant, signal);
-    if (hooks.message && round_.usage) {
-      if (hooks.sink) hooks.sink({ kind: "usage", usage: round_.usage });
-      else hooks.message.usage = round_.usage;
-    }
-    addLog({
-      providerId: providerItem.id,
-      providerName: providerItem.name,
-      url: streamUrl,
-      ok: true,
-      status: response.status,
-      kind: round === 0 ? "provider:chat:stream" : "provider:chat:tool_result:stream",
-      durationMs: Date.now() - roundStarted,
-      method: "POST",
-      requestHeaders: headers,
-      responseHeaders: Object.fromEntries(response.headers.entries()),
-      requestBody: jsonBody(currentBody),
-      responseBody: textBody(round_.raw),
-    });
-    if (round_.textOut) {
-      allContent += `${allContent ? "\n" : ""}${round_.textOut}`;
-    }
-    if (round_.functionCalls.length === 0) {
-      finishReasoningParts(hooks.message!);
-      return allContent.trim() || "(empty response)";
-    }
-    // 任何工具需要审批就暂停本轮，等用户决定（与 Claude/OpenAI 路径一致）。
-    const hasPendingInBatch = round_.functionCalls.some((fc) => toolNeedsApproval(fc.name, assistant));
-    if (hasPendingInBatch) {
-      return allContent.trim() || "";
-    }
-    const responseParts: Record<string, JsonValue>[] = [];
-    const dispatchCtx = toolCallContext(hooks);
-    for (const fc of round_.functionCalls) {
-      const toolCall = {
+    }),
+    async readRound(response, sig) {
+      const round = await readGoogleStreamingRound(response, hooks, assistant, sig);
+      const toolCalls: NormalizedToolCall[] = round.functionCalls.map((fc) => ({
         id: fc.id,
-        type: "function" as const,
-        function: { name: fc.name, arguments: JSON.stringify(fc.args ?? {}) },
-      };
-      let toolResult: ToolResult;
-      try {
-        toolResult = await dispatchCtx!.executeTool!(toolCall, dispatchCtx);
-      } catch (err) {
-        toolResult = { output: [toolExecutionErrorPayload(err)] };
-      }
-      const outputParts = toolResult.output;
-      if (hooks.message) {
-        if (hooks.sink) {
-          hooks.sink({ kind: "tool_result", toolCallId: fc.id, output: outputParts });
-        } else {
-          hooks.message.parts = hooks.message.parts.map((part) => {
-            if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== fc.id) return part;
-            return { ...part, input: toolCall.function.arguments, output: outputParts };
-          });
-          touchStream(hooks);
-        }
-      }
-      responseParts.push({
-        functionResponse: { name: fc.name, response: { result: apiContentText(partsToToolResultText(outputParts)) } },
-      });
-    }
-    // Gemini 要求把模型这轮的 parts（含 functionCall）原样回放，再追加 user 的 functionResponse。
-    contents = [
-      ...contents,
-      { role: "model", parts: round_.modelParts.length ? round_.modelParts : [{ text: round_.textOut }] },
-      { role: "user", parts: responseParts },
-    ];
-    currentBody = { ...body, contents };
-  }
-  throw new Error("Too many consecutive Gemini tool calls without final assistant content");
+        name: fc.name,
+        arguments: JSON.stringify(fc.args ?? {}),
+      }));
+      return { text: round.textOut, usage: round.usage, toolCalls, replay: round };
+    },
+    encodeNextTurn(result, toolResults) {
+      const round = result.replay as GoogleStreamRoundResult;
+      const responseParts = toolResults.map(({ call, output }) => ({
+        functionResponse: { name: call.name, response: { result: apiContentText(partsToToolResultText(output)) } },
+      }));
+      // Gemini 要求把模型这轮的 parts（含 functionCall）原样回放，再追加 user 的 functionResponse。
+      contents = [
+        ...contents,
+        { role: "model", parts: round.modelParts.length ? round.modelParts : [{ text: round.textOut }] },
+        { role: "user", parts: responseParts },
+      ];
+      return { ...body, contents };
+    },
+    logResponseBody(result) {
+      return textBody((result.replay as GoogleStreamRoundResult).raw);
+    },
+    joinTextWithNewline: true,
+    toolCardsCreatedInStream: true,
+    finishReasoningOnFinal: true,
+    exhaustedError: "Too many consecutive Gemini tool calls without final assistant content",
+    abortCheckAfterRead: false,
+  };
+  return runStreamingToolLoop(adapter, initialBody, assistant, signal, hooks);
 }
 
 // functionResponse 的 result 文本：把工具输出 parts 拼成纯文本，对齐安卓
