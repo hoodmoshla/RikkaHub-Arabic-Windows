@@ -698,7 +698,7 @@ async function collectConversationEvents(id: string, stop: (events: AnyRecord[])
         new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) =>
           setTimeout(() => reject(new Error("conversation stream idle timeout")), 1000),
         ),
-      ]).catch((err) => {
+      ]).catch((err: unknown): null => {
         if (Date.now() - started > timeoutMs) throw err;
         return null;
       });
@@ -720,7 +720,7 @@ async function collectConversationEvents(id: string, stop: (events: AnyRecord[])
       if (stop(events)) return events;
     }
   } finally {
-    await reader.cancel().catch(() => undefined);
+    await reader.cancel().catch((): undefined => undefined);
   }
   return events;
 }
@@ -746,7 +746,7 @@ async function configure(useResponseApi: boolean) {
     inputModalities: ["TEXT"],
     outputModalities: ["TEXT"],
     abilities: ["TOOL", "REASONING"],
-    tools: [],
+    tools: [] as unknown[],
   };
   await api("/api/settings/provider", {
     method: "POST",
@@ -902,7 +902,7 @@ async function runConversation(useResponseApi: boolean) {
   await api(`/api/conversations/${conversationId}/system-prompt`, {
     method: "POST",
     body: JSON.stringify({ systemPrompt: "Conversation scoped smoke prompt" }),
-  }).catch(() => undefined);
+  }).catch((): undefined => undefined);
   const streamEventsPromise = collectConversationEvents(
     conversationId,
     (events) => events.some((event) => {
@@ -2133,7 +2133,7 @@ async function main() {
     }, null, 2));
   } finally {
     pc.kill();
-    await pc.exited.catch(() => undefined);
+    await pc.exited.catch((): undefined => undefined);
     mockServer.stop(true);
     mcpServer.stop(true);
     webDavServer.stop(true);

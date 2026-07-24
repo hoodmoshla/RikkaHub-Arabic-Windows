@@ -38,7 +38,7 @@ const COMMON_FONTS_FALLBACK: FontEntry[] = [
   cssName: name,
   family: `"${name}", ${FONT_DEFAULT_FALLBACK}`,
   source: "system" as const,
-  weights: [],
+  weights: [] as FontWeightFile[],
 }));
 
 export function fontExtension(name: string): string {
@@ -211,7 +211,7 @@ export function listSystemFonts(excludeNames: Set<string>): FontEntry[] {
       cssName: name,
       family: `"${name}", ${FONT_DEFAULT_FALLBACK}`,
       source: "system" as const,
-      weights: [],
+      weights: [] as FontWeightFile[],
     }));
 }
 

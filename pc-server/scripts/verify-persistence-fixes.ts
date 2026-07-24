@@ -11,7 +11,7 @@ const convs = [
 const baseSettings = { providers: [{ id: "p1", name: "Test", apiKey: "k", type: "openai", enabled: true, models: [{ id: "m1", name: "M", modelId: "m1" }] }], assistants: [{ id: "a1", name: "A" }], assistantId: "a1", chatModelId: "m1" };
 
 function mkState(extra: Record<string, unknown> = {}) {
-  return { settings: baseSettings, files: [], generatedImages: [], memories: [], nextFileId: 1, nextMemoryId: 1, nextGeneratedImageId: 1, launchCount: 5, ...extra };
+  return { settings: baseSettings, files: [] as unknown[], generatedImages: [] as unknown[], memories: [] as unknown[], nextFileId: 1, nextMemoryId: 1, nextGeneratedImageId: 1, launchCount: 5, ...extra };
 }
 
 let pass = 0, fail = 0;

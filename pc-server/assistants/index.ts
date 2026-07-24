@@ -156,8 +156,8 @@ export function applyRegexOutputTransform(msg: Message, assistant: Assistant) {
   if (activeRegexes.length === 0) return;
   msg.parts = msg.parts.map((part) => {
     if (!isRecord(part) || (part.type !== "text" && part.type !== "reasoning")) return part;
-    const key = part.type === "reasoning" ? "reasoning" : "text";
-    return { ...part, [key]: applyRegexesToText(String(part[key] ?? ""), activeRegexes) };
+    if (part.type === "reasoning") return { ...part, reasoning: applyRegexesToText(String(part.reasoning ?? ""), activeRegexes) };
+    return { ...part, text: applyRegexesToText(String(part.text ?? ""), activeRegexes) };
   });
 }
 

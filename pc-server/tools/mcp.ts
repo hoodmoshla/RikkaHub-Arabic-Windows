@@ -284,7 +284,7 @@ export async function mcpJsonRpc(
 
 export async function fetchMcpTools(server: Record<string, JsonValue>, log?: McpLogCallback) {
   const result = await mcpJsonRpc(server, "tools/list", undefined, log);
-  const tools = Array.isArray(result.tools) ? result.tools : [];
+  const tools: JsonValue[] = Array.isArray(result.tools) ? result.tools : [];
   return tools.map((tool: any) => ({
     enable: true,
     name: String(tool.name ?? ""),

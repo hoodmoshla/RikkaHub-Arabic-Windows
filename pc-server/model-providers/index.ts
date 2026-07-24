@@ -398,9 +398,9 @@ export function applyModelCustomBody<T extends Record<string, any>>(body: T, mod
 }
 
 export function customBodyEntriesForForm(modelItem?: Model) {
-  return (Array.isArray((modelItem as any)?.customBodies) ? (modelItem as any).customBodies : [])
+  return ((Array.isArray((modelItem as any)?.customBodies) ? (modelItem as any).customBodies : []) as JsonValue[])
     .filter(isRecord)
-    .map((entry) => ({
+    .map((entry: Record<string, JsonValue>) => ({
       key: String(entry.key ?? entry.name ?? "").trim(),
       value: decodeCustomBodyValue(entry.value),
     }))

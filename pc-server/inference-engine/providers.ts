@@ -603,13 +603,13 @@ export async function fetchClaudeTextWithTools(
     });
     if (!response.ok) throw new Error(`${providerItem.name} ${response.status}: ${rawText.slice(0, 500)}`);
 
-    const content = Array.isArray(raw.content) ? raw.content : [];
+    const content: JsonValue[] = Array.isArray(raw.content) ? raw.content : [];
     const text = claudeTextFromContent(content);
     if (text) {
       allContent += `${allContent ? "\n" : ""}${text}`;
       hooks.sink?.({ kind: "text_delta", text });
     }
-    const toolUses = content.filter((item) => isRecord(item) && item.type === "tool_use");
+    const toolUses = content.filter((item: JsonValue): item is Record<string, JsonValue> => isRecord(item) && item.type === "tool_use");
     if (toolUses.length === 0) return allContent.trim() || "(empty response)";
 
     const toolResultBlocks = [];
@@ -1813,7 +1813,7 @@ export async function fetchOpenAiTextStreaming(
       // from non-function output items (e.g. arguments.delta events that arrived for an
       // output_index that turned out to be a web_search_call).
       if (!toolCall.function?.name) continue;
-      const toolPart = {
+      const toolPart: ToolPart = {
         type: "tool",
         toolCallId: String(toolCall.id ?? id()),
         toolName: String(toolCall.function?.name ?? ""),

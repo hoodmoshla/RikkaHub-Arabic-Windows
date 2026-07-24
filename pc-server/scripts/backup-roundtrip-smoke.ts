@@ -314,8 +314,8 @@ async function main() {
   let pc = spawnPcServer();
   let stdout = "";
   let stderr = "";
-  pc.stdout.pipeTo(new WritableStream({ write: (chunk) => { stdout += new TextDecoder().decode(chunk); } })).catch(() => undefined);
-  pc.stderr.pipeTo(new WritableStream({ write: (chunk) => { stderr += new TextDecoder().decode(chunk); } })).catch(() => undefined);
+  pc.stdout.pipeTo(new WritableStream({ write: (chunk) => { stdout += new TextDecoder().decode(chunk); } })).catch((): undefined => undefined);
+  pc.stderr.pipeTo(new WritableStream({ write: (chunk) => { stderr += new TextDecoder().decode(chunk); } })).catch((): undefined => undefined);
 
   try {
     await waitForHealth();
@@ -340,13 +340,13 @@ async function main() {
 
     // 3. PC → zip → PC：清空数据后重新导入同一 zip
     pc.kill();
-    await pc.exited.catch(() => undefined);
+    await pc.exited.catch((): undefined => undefined);
     rmSync(tempDir, { recursive: true, force: true });
     mkdirSync(tempDir, { recursive: true });
 
     pc = spawnPcServer();
-    pc.stdout.pipeTo(new WritableStream({ write: (chunk) => { stdout += new TextDecoder().decode(chunk); } })).catch(() => undefined);
-    pc.stderr.pipeTo(new WritableStream({ write: (chunk) => { stderr += new TextDecoder().decode(chunk); } })).catch(() => undefined);
+    pc.stdout.pipeTo(new WritableStream({ write: (chunk) => { stdout += new TextDecoder().decode(chunk); } })).catch((): undefined => undefined);
+    pc.stderr.pipeTo(new WritableStream({ write: (chunk) => { stderr += new TextDecoder().decode(chunk); } })).catch((): undefined => undefined);
     await waitForHealth();
 
     const pcImportResult = await importZip(savedZipPath);
@@ -357,7 +357,7 @@ async function main() {
 
     // 4. PC → Android DB → PC：用 settings.json + rikka_hub.db 重新打包成 Android zip 再导入
     pc.kill();
-    await pc.exited.catch(() => undefined);
+    await pc.exited.catch((): undefined => undefined);
     rmSync(tempDir, { recursive: true, force: true });
     mkdirSync(tempDir, { recursive: true });
 
@@ -367,8 +367,8 @@ async function main() {
     console.log("[backup-smoke] 已重新打包 Android zip");
 
     pc = spawnPcServer();
-    pc.stdout.pipeTo(new WritableStream({ write: (chunk) => { stdout += new TextDecoder().decode(chunk); } })).catch(() => undefined);
-    pc.stderr.pipeTo(new WritableStream({ write: (chunk) => { stderr += new TextDecoder().decode(chunk); } })).catch(() => undefined);
+    pc.stdout.pipeTo(new WritableStream({ write: (chunk) => { stdout += new TextDecoder().decode(chunk); } })).catch((): undefined => undefined);
+    pc.stderr.pipeTo(new WritableStream({ write: (chunk) => { stderr += new TextDecoder().decode(chunk); } })).catch((): undefined => undefined);
     await waitForHealth();
 
     const androidImportResult = await importZip(androidZipPath);
@@ -386,7 +386,7 @@ async function main() {
     throw err;
   } finally {
     pc.kill();
-    await pc.exited.catch(() => undefined);
+    await pc.exited.catch((): undefined => undefined);
     mock.stop(true);
   }
 }

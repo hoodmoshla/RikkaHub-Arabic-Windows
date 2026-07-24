@@ -84,9 +84,9 @@ const activeSystemTtsProcs = new Set<ReturnType<typeof Bun.spawn>>();
 export async function speakSystemText(text: string, speechRate = 1) {
   const prev = systemTtsChain;
   let release: () => void = () => {};
-  systemTtsChain = new Promise<void>((resolve) => { release = resolve; });
+  systemTtsChain = new Promise<void>((resolve): void => { release = resolve; });
   try {
-    await prev.catch(() => undefined);
+    await prev.catch((): undefined => undefined);
     if (process.platform === "win32") {
       const rate = Math.max(-10, Math.min(10, Math.round((speechRate - 1) * 5)));
       const script = [
@@ -141,10 +141,10 @@ export async function speakSystemText(text: string, speechRate = 1) {
 export async function synthesizeSystemTtsToWav(text: string, speechRate = 1): Promise<Buffer> {
   const prev = systemTtsChain;
   let release: () => void = () => {};
-  systemTtsChain = new Promise<void>((resolve) => { release = resolve; });
+  systemTtsChain = new Promise<void>((resolve): void => { release = resolve; });
   const tmpWav = join(tempDir(), `tts-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.wav`);
   try {
-    await prev.catch(() => undefined);
+    await prev.catch((): undefined => undefined);
     if (process.platform === "win32") {
       const rate = Math.max(-10, Math.min(10, Math.round((speechRate - 1) * 5)));
       const script = [

@@ -244,9 +244,9 @@ export function deleteById(items: JsonValue[], idValue: string) {
 }
 
 export function reorderByIds<T extends JsonValue>(items: T[], ids: string[]) {
-  const byId = new Map(items.filter(isRecord).map((item) => [String(item["id"]), item as T]));
+  const byId = new Map(items.filter(isRecord).map((item) => [String((item as Record<string, JsonValue>)["id"]), item as T]));
   const ordered = ids.map((itemId) => byId.get(itemId)).filter(Boolean) as T[];
-  const rest = items.filter((item) => !isRecord(item) || !ids.includes(String(item["id"])));
+  const rest = items.filter((item) => !isRecord(item) || !ids.includes(String((item as Record<string, JsonValue>)["id"])));
   return [...ordered, ...rest];
 }
 

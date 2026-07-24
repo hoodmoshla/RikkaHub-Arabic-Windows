@@ -179,7 +179,7 @@ export const memoryStore = {
       if (assistantId === GLOBAL_MEMORY_ID) {
         this.globalMemories.push(entry);
       } else {
-        let group = this.assistantGroups.find((g) => g.assistantId === assistantId);
+        let group = this.assistantGroups.find((g: AssistantMemoryGroup) => g.assistantId === assistantId);
         if (!group) {
           group = { assistantId, assistantName: nameById.get(assistantId) ?? "未知助手", memories: [] };
           this.assistantGroups.push(group);
@@ -200,7 +200,7 @@ export const memoryStore = {
   getGlobalMemories(): MemoryEntry[] { return this.globalMemories; },
 
   getAssistantMemories(assistantId: string): MemoryEntry[] {
-    const group = this.assistantGroups.find((g) => g.assistantId === assistantId);
+    const group = this.assistantGroups.find((g: AssistantMemoryGroup) => g.assistantId === assistantId);
     return group ? group.memories : [];
   },
 
@@ -246,7 +246,7 @@ export const memoryStore = {
     } else {
       const assistantId = String(input.assistantId ?? "");
       if (!assistantId) throw new Error("assistantId is required for assistant-scope memory");
-      let group = this.assistantGroups.find((g) => g.assistantId === assistantId);
+      let group = this.assistantGroups.find((g: AssistantMemoryGroup) => g.assistantId === assistantId);
       if (!group) {
         group = {
           assistantId,
@@ -278,14 +278,14 @@ export const memoryStore = {
   /** 全局唯一 id 定位 + 删除。返回是否命中。 */
   deleteMemory(memoryId: number): boolean {
     const gbefore = this.globalMemories.length;
-    this.globalMemories = this.globalMemories.filter((m) => m.id !== memoryId);
+    this.globalMemories = this.globalMemories.filter((m: MemoryEntry) => m.id !== memoryId);
     if (this.globalMemories.length < gbefore) {
       void this.persistAll();
       return true;
     }
     for (const group of this.assistantGroups) {
       const before = group.memories.length;
-      group.memories = group.memories.filter((m) => m.id !== memoryId);
+      group.memories = group.memories.filter((m: MemoryEntry) => m.id !== memoryId);
       if (group.memories.length < before) {
         void this.persistAll();
         return true;
@@ -296,7 +296,7 @@ export const memoryStore = {
 
   /** 删除某助手的所有记忆（删除助手时调用）。返回删除条数。 */
   deleteMemoriesByAssistant(assistantId: string): number {
-    const idx = this.assistantGroups.findIndex((g) => g.assistantId === assistantId);
+    const idx = this.assistantGroups.findIndex((g: AssistantMemoryGroup) => g.assistantId === assistantId);
     if (idx < 0) return 0;
     const count = this.assistantGroups[idx].memories.length;
     this.assistantGroups.splice(idx, 1);
@@ -327,7 +327,7 @@ export const memoryStore = {
   importFlatMemories(flat: AssistantMemory[], mode: "replace" | "merge") {
     if (mode === "replace") this.clearAll();
     const seen = mode === "merge"
-      ? new Set(this.exportFlat().map((m) => `${m.assistantId} ${m.content}`))
+      ? new Set(this.exportFlat().map((m: AssistantMemory) => `${m.assistantId} ${m.content}`))
       : new Set<string>();
     const now = Date.now();
     for (const item of flat) {
@@ -350,7 +350,7 @@ export const memoryStore = {
       if (assistantId === GLOBAL_MEMORY_ID) {
         this.globalMemories.push(entry);
       } else {
-        let group = this.assistantGroups.find((g) => g.assistantId === assistantId);
+        let group = this.assistantGroups.find((g: AssistantMemoryGroup) => g.assistantId === assistantId);
         if (!group) {
           group = {
             assistantId,
@@ -374,7 +374,7 @@ export const memoryStore = {
   async enqueuePending(entry: { conversationId: string; conversationTitle?: string; assistantId: string; assistantName: string; content: string; messageNodeId?: string }): Promise<PendingEntry | "overflow" | null> {
     const content = String(entry.content ?? "").trim();
     if (!content) throw new Error("content is required");
-    if (this.pending.some((p) => p.content.trim() === content)) return null;       // M7 去重
+    if (this.pending.some((p: PendingEntry) => p.content.trim() === content)) return null;       // M7 去重
     if (this.pending.length >= PENDING_MAX) return "overflow";                      // M7 容量
     const pendingEntry: PendingEntry = {
       pendingId: `p-${crypto.randomUUID()}`,
@@ -395,7 +395,7 @@ export const memoryStore = {
    *  无论何种 action，处理完立即从 pending 移除（保证干净）。source 规则（§4.1）：用户编辑过→manual，
    *  否则 ai（原样确认）。pendingId 不存在返回 { resolved: false }。 */
   async resolvePending(pendingId: string, action: "global" | "assistant" | "discard", contentOverride?: string): Promise<{ resolved: boolean; memory?: MemoryEntry }> {
-    const idx = this.pending.findIndex((p) => p.pendingId === pendingId);
+    const idx = this.pending.findIndex((p: PendingEntry) => p.pendingId === pendingId);
     if (idx < 0) return { resolved: false };
     const entry = this.pending[idx];
     const content = String(contentOverride ?? entry.content).trim();

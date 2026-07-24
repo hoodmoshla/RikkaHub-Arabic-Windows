@@ -272,7 +272,7 @@ export function claudeMessagesFromApiMessages(messages: ApiMessage[], providerIt
     entry.role === "user" &&
     Array.isArray(entry.content) &&
     entry.content.length > 0 &&
-    entry.content.every((block) => isRecord(block) && block.type === "tool_result");
+    entry.content.every((block: JsonValue) => isRecord(block) && block.type === "tool_result");
   const mergedItems: typeof items = [];
   for (const item of items) {
     const prevIdx = mergedItems.length - 1;
@@ -289,7 +289,7 @@ export function claudeMessagesFromApiMessages(messages: ApiMessage[], providerIt
   const realUserIndices = mergedItems
     .map((item, index) => {
       const content = Array.isArray(item.content) ? item.content : [];
-      const hasOnlyToolResults = content.length > 0 && content.every((block) => isRecord(block) && block.type === "tool_result");
+      const hasOnlyToolResults = content.length > 0 && content.every((block: JsonValue) => isRecord(block) && block.type === "tool_result");
       return item.role === "user" && !hasOnlyToolResults ? index : -1;
     })
     .filter((index) => index >= 0);

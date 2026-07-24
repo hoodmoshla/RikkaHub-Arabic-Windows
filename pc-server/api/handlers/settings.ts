@@ -449,7 +449,7 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
     const item = {
       enabled: true,
       description: "",
-      entries: [],
+      entries: [] as JsonValue[],
       ...body,
       id: String(body.id ?? id()),
       name: String(body.name ?? "Lorebook"),
