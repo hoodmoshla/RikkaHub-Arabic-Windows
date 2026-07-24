@@ -33,18 +33,15 @@ import {
   DEFAULT_TRANSLATION_PROMPT,
   defaultSettings,
   deleteById,
-  endpointFor,
-  fetchProviderBalance,
-  fetchProviderModels,
   markProviderTestResult,
   normalizePreferredPort,
   normalizeProxyConfig,
   reorderByIds,
-  runProviderCheck,
   updateSettings,
   upsertById,
   validateKnownJsonIds,
 } from "../../server";
+import { endpointFor, fetchProviderBalance, fetchProviderModels, runProviderCheck } from "../../model-providers/checks";
 
 export async function handleSettingsRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   if (path === "settings" && request.method === "GET") return json(state.settings);
