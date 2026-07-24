@@ -34,9 +34,10 @@ export function useSettingsSubscription() {
         onMessage: ({ data }) => {
           setSettings(data);
         },
+        // 重连由 sse() 内建，且后端每次连接都推完整 settings 快照，无需在
+        // onError 里补拉（自动重连下那会对宕机的后端反复发注定失败的 GET）。
         onError: (error) => {
           console.error("Settings SSE error:", error);
-          refreshSettings();
         },
       },
       { signal: abortControllerRef.current.signal },
