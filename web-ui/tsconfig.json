@@ -30,6 +30,9 @@
     "paths": {
       "~/*": [
         "./app/*"
+      ],
+      "@server/*": [
+        "../pc-server/*"
       ]
     },
     "esModuleInterop": true,

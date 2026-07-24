@@ -1,76 +1,21 @@
-/**
- * Tool approval state
- * @see ai/src/main/java/me/rerere/ai/ui/Message.kt - ToolApprovalState
- */
-export type ToolApprovalState =
-  | { type: "auto" }
-  | { type: "pending" }
-  | { type: "approved" }
-  | { type: "denied"; reason: string }
-  | { type: "answered"; answer: string };
+// FE-P1-2:线上契约单源——本文件只做 type-only re-export,权威声明在
+// pc-server/foundation/types/parts.ts(前后端契约必须一致,字段增删属冻结契约变更)。
+// UIMessagePart 是前端历史别名(上游对齐安卓 UIMessagePart 命名),底层即后端 MessagePart。
+export type {
+  ToolApprovalState,
+  TextPart,
+  ImagePart,
+  VideoPart,
+  AudioPart,
+  DocumentPart,
+  ReasoningPart,
+  ToolPart,
+  LoadingPart,
+  ToolErrorOutput,
+  ToolPendingOutput,
+  ToolOutputEntry,
+  MessagePart,
+} from "@server/foundation/types/parts";
+import type { MessagePart as ServerMessagePart } from "@server/foundation/types/parts";
 
-interface BaseMessagePart {
-  metadata?: Record<string, unknown> | null;
-}
-
-export interface TextPart extends BaseMessagePart {
-  type: "text";
-  text: string;
-}
-
-export interface ImagePart extends BaseMessagePart {
-  type: "image";
-  url: string;
-}
-
-export interface VideoPart extends BaseMessagePart {
-  type: "video";
-  url: string;
-}
-
-export interface AudioPart extends BaseMessagePart {
-  type: "audio";
-  url: string;
-}
-
-export interface DocumentPart extends BaseMessagePart {
-  type: "document";
-  url: string;
-  fileName: string;
-  mime: string;
-}
-
-export interface ReasoningPart extends BaseMessagePart {
-  type: "reasoning";
-  reasoning: string;
-  createdAt?: string;
-  finishedAt?: string | null;
-}
-
-export interface ToolPart extends BaseMessagePart {
-  type: "tool";
-  toolCallId: string;
-  toolName: string;
-  input: string;
-  output: UIMessagePart[];
-  approvalState: ToolApprovalState;
-}
-
-export interface LoadingPart extends BaseMessagePart {
-  type: "loading";
-  label?: string;
-}
-
-/**
- * Union type for all message parts
- * @see ai/src/main/java/me/rerere/ai/ui/Message.kt - UIMessagePart
- */
-export type UIMessagePart =
-  | TextPart
-  | ImagePart
-  | VideoPart
-  | AudioPart
-  | DocumentPart
-  | ReasoningPart
-  | ToolPart
-  | LoadingPart;
+export type UIMessagePart = ServerMessagePart;
