@@ -8,7 +8,7 @@ import { conversationsDbPath, dataDir } from "../foundation/paths";
 import { checkoutConversation, clearWorkingSet, configureWorkingSet, peekConversation, releaseConversation, removeConversations, startWorkingSetSweep } from "./working-set";
 import { getConversationMeta } from "./read-queries";
 import { generating } from "./generation-state";
-import type { Conversation, Message, MessageNode, PcConversationRow, PcMessageNodeRow } from "../foundation/types";
+import type { Conversation, ConversationDto, ConversationListDto, Message, MessageNode, MessageNodeDto, PcConversationRow, PcMessageNodeRow } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { clearAllFts, deleteConversationFts, ensureMessageFtsTable, ftsRowCount, rebuildFtsFromNodeTable, replaceNodeFts } from "./fts";
 
@@ -464,13 +464,20 @@ export function getConversation(idValue: string): Conversation | undefined {
   return conversation;
 }
 
+/** 领域 MessageNode → 线上 DTO。运行时同物零拷贝;领域 annotations/usage 在类型硬化
+ *  收官前仍是 JsonValue,线上契约(foundation/types/dto.ts)已收窄为真实产出形状,
+ *  这里是全工程唯一的显式窄化点。 */
+export function toMessageNodeDtos(nodes: MessageNode[]): MessageNodeDto[] {
+  return nodes as unknown as MessageNodeDto[];
+}
+
 /** 把 Conversation 转成含生成状态快照的 DTO。 */
-export function toConversationDto(conversation: Conversation, isGenerating: boolean) {
-  return { ...conversation, isGenerating };
+export function toConversationDto(conversation: Conversation, isGenerating: boolean): ConversationDto {
+  return { ...conversation, messages: toMessageNodeDtos(conversation.messages), isGenerating };
 }
 
 /** 把 Conversation 转成列表项 DTO。 */
-export function toListDto(conversation: Conversation, isGenerating: boolean) {
+export function toListDto(conversation: Conversation, isGenerating: boolean): ConversationListDto {
   return {
     id: conversation.id,
     assistantId: conversation.assistantId,

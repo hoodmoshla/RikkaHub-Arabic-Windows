@@ -4,9 +4,9 @@
 
 import type { StreamHooksWithSink } from "../inference-engine/events";
 import { initWorkingSetSseGuard, markConversationRowDirty, markMessageNodeDirty, scheduleThrottledConvFlush } from "../conversations";
-import type { Conversation, JsonValue, MessageNode } from "../foundation/types";
+import type { Conversation, ConversationListInvalidateEventDto, ConversationNodeUpdateEventDto, ConversationSnapshotEventDto, JsonValue, MessageNode } from "../foundation/types";
 import { state } from "../persistence/json-store";
-import { toConversationDto } from "../conversations";
+import { toConversationDto, toMessageNodeDtos } from "../conversations";
 import { memoryStore } from "../memory/index";
 import { generating } from "../conversations/generation-state";
 
@@ -120,12 +120,12 @@ export function broadcastMemoryUpdate() {
 }
 
 export function broadcastList() {
-  const payload = { type: "invalidate", assistantId: state.settings.assistantId, timestamp: Date.now() };
+  const payload: ConversationListInvalidateEventDto = { type: "invalidate", assistantId: state.settings.assistantId, timestamp: Date.now() };
   for (const client of listClients) client.enqueue(sseFrame("invalidate", payload));
 }
 
 export function broadcastConversation(conversation: Conversation, event = "snapshot") {
-  const payload = {
+  const payload: ConversationSnapshotEventDto = {
     type: "snapshot",
     seq: Date.now(),
     conversation: toConversationDto(conversation, generating.has(conversation.id)),
@@ -138,14 +138,14 @@ export function broadcastConversation(conversation: Conversation, event = "snaps
 }
 
 function broadcastNodeUpdateNow(conversation: Conversation, node: MessageNode) {
-  const payload = {
+  const payload: ConversationNodeUpdateEventDto = {
     type: "node_update",
     seq: Date.now(),
     serverTime: Date.now(),
     conversationId: conversation.id,
     nodeId: node.id,
     nodeIndex: conversation.messages.findIndex((item) => item.id === node.id),
-    node,
+    node: toMessageNodeDtos([node])[0]!,
     updateAt: conversation.updateAt,
     isGenerating: generating.has(conversation.id),
   };

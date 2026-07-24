@@ -1,11 +1,3 @@
-export interface UrlCitationAnnotation {
-  type: "url_citation";
-  title: string;
-  url: string;
-}
-
-/**
- * Union type for message annotations
- * @see ai/src/main/java/me/rerere/ai/ui/Message.kt - UIMessageAnnotation
- */
-export type UIMessageAnnotation = UrlCitationAnnotation;
+// FE-P1-2:注释类型属线上契约,单源在后端 foundation/types/dto.ts(type-only re-export)。
+// @see ai/src/main/java/me/rerere/ai/ui/Message.kt - UIMessageAnnotation
+export type { UIMessageAnnotation, UrlCitationAnnotation } from "@server/foundation/types/dto";

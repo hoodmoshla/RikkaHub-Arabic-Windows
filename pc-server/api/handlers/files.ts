@@ -1,6 +1,7 @@
 // api/handlers/files.ts — 文件路由（files/upload、content、path、delete）
 // 纪律：纯搬迁自 server.ts routeApi()。
 
+import type { UploadFilesResponseDto, UploadedFileDto } from "../../foundation/types";
 import { existsSync } from "node:fs";
 import { safeDataFilePath } from "../../files";
 import { extname, join } from "node:path";
@@ -13,7 +14,7 @@ import { error, json, mime } from "../request";
 export async function handleFileRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
   if (path === "files/upload" && request.method === "POST") {
     const form = await request.formData();
-    const uploaded = await Promise.all(
+    const uploaded: UploadedFileDto[] = await Promise.all(
       form.getAll("files").filter((item): item is File => item instanceof File).map(async (file) => {
         const fileId = state.nextFileId++;
         const target = join(filesDir, `${fileId}${extname(file.name)}`);
@@ -38,7 +39,8 @@ export async function handleFileRoutes(request: Request, _url: URL, path: string
       }),
     );
     saveState();
-    return json({ files: uploaded });
+    const response: UploadFilesResponseDto = { files: uploaded };
+    return json(response);
   }
   const fileContent = path.match(/^files\/(\d+)\/content$/);
   if (fileContent) {

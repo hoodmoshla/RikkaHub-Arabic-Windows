@@ -2,6 +2,7 @@
 // 纪律：纯搬迁自 server.ts routeApi()；生成编排（generateAnswer 等）仍在 server.ts，经导入使用。
 
 import type { Conversation, JsonValue, MessagePart } from "../../foundation/types";
+import type { ConversationListDto, MessageSearchResultDto, PagedResult } from "../../foundation/types";
 import { applyPlaceholders, id, message, textFromParts } from "../../foundation/utils";
 import { saveState, state } from "../../persistence/json-store";
 import {
@@ -70,7 +71,8 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       .filter((item) => !query || item.title.toLowerCase().includes(query))
       .sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || b.updateAt - a.updateAt);
     const page = items.slice(offset, offset + limit);
-    return json({ items: page.map((item) => toListDto(item, generating.has(item.id))), nextOffset: offset + limit < items.length ? offset + limit : null, hasMore: offset + limit < items.length });
+    const paged: PagedResult<ConversationListDto> = { items: page.map((item) => toListDto(item, generating.has(item.id))), nextOffset: offset + limit < items.length ? offset + limit : null, hasMore: offset + limit < items.length };
+    return json(paged);
   }
   if (path === "conversations/search" && request.method === "GET") {
     // P1-2：FTS5 trigram 索引查询（旧实现为全会话×全消息内存线性扫描，见 conversations/fts.ts）。
@@ -82,7 +84,7 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     // DB-first 批1:title/updateAt join 改用活库元数据(原为 state.conversations 内存 map)
     const byId = new Map(listConversationMetas(db, state.settings.assistantId).map((meta) => [meta.id, meta]));
     const results = searchMessageFts(db, queryText)
-      .flatMap((hit) => {
+      .flatMap((hit): MessageSearchResultDto[] => {
         const conversation = byId.get(hit.conversationId);
         // 当前助手过滤（响应契约不变）；已删会话的残留命中防御性跳过
         if (!conversation || conversation.assistantId !== state.settings.assistantId) return [];

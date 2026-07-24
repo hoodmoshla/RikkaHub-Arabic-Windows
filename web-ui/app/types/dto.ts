@@ -1,106 +1,17 @@
-import type { TokenUsage } from "./core";
-import type { UIMessageAnnotation } from "./annotations";
-import type { UIMessagePart } from "./parts";
-
-export interface ConversationListDto {
-  id: string;
-  assistantId: string;
-  title: string;
-  isPinned: boolean;
-  createAt: number;
-  updateAt: number;
-  isGenerating: boolean;
-}
-
-export interface PagedResult<T> {
-  items: T[];
-  nextOffset?: number | null;
-  hasMore: boolean;
-}
-
-export interface UploadedFileDto {
-  id: number;
-  url: string;
-  fileName: string;
-  mime: string;
-  size: number;
-}
-
-export interface UploadFilesResponseDto {
-  files: UploadedFileDto[];
-}
-
-export interface ConversationListInvalidateEventDto {
-  type: "invalidate";
-  assistantId: string;
-  timestamp: number;
-}
-
-/**
- * Message DTO returned by the conversation API. Mirrors the backend wire shape (parts plus
- * role, timestamps, usage, token counts) and is also what the SSE node_update events carry.
- */
-export interface MessageDto {
-  id: string;
-  role: string;
-  parts: UIMessagePart[];
-  annotations?: UIMessageAnnotation[];
-  createdAt: string;
-  finishedAt?: string | null;
-  modelId?: string | null;
-  usage?: TokenUsage | null;
-  translation?: string | null;
-}
-
-export interface MessageNodeDto {
-  id: string;
-  messages: MessageDto[];
-  selectIndex: number;
-}
-
-export interface ConversationDto {
-  id: string;
-  assistantId: string;
-  systemPrompt?: string | null;
-  title: string;
-  messages: MessageNodeDto[];
-  truncateIndex: number;
-  chatSuggestions: string[];
-  isPinned: boolean;
-  createAt: number;
-  updateAt: number;
-  isGenerating: boolean;
-}
-
-export interface ConversationSnapshotEventDto {
-  type: "snapshot";
-  seq: number;
-  conversation: ConversationDto;
-  serverTime: number;
-}
-
-export interface ConversationNodeUpdateEventDto {
-  type: "node_update";
-  seq: number;
-  conversationId: string;
-  nodeId: string;
-  nodeIndex: number;
-  node: MessageNodeDto;
-  updateAt: number;
-  isGenerating: boolean;
-  serverTime: number;
-}
-
-export interface ConversationErrorEventDto {
-  type: "error";
-  message: string;
-}
-
-export interface MessageSearchResultDto {
-  nodeId: string;
-  messageId: string;
-  conversationId: string;
-  title: string;
-  updateAt: number;
-  snippet: string;
-}
+// FE-P1-2:线上契约 DTO 单源——本文件只做 type-only re-export,权威声明在
+// pc-server/foundation/types/dto.ts(后端 DTO 生成函数已标注返回类型做编译期契约校验)。
+// 字段增删属冻结契约变更,必须两端同评审。
+export type {
+  ConversationDto,
+  ConversationErrorEventDto,
+  ConversationListDto,
+  ConversationListInvalidateEventDto,
+  ConversationNodeUpdateEventDto,
+  ConversationSnapshotEventDto,
+  MessageDto,
+  MessageNodeDto,
+  MessageSearchResultDto,
+  PagedResult,
+  UploadedFileDto,
+  UploadFilesResponseDto,
+} from "@server/foundation/types/dto";

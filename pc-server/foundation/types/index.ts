@@ -7,6 +7,7 @@ import type { MessagePart } from "./parts";
 export type MupdfModule = typeof import("mupdf");
 
 export * from "./parts";
+export * from "./dto";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue | undefined };
 
