@@ -217,3 +217,42 @@ export function message(role: Message["role"], parts: JsonValue[], modelId: stri
     translation: null,
   };
 }
+
+function hasJsonItemId(items: unknown, idValue: string) {
+  return Array.isArray(items) && items.some((item) => isRecord(item) && String(item.id ?? "") === idValue);
+}
+
+export function validateKnownJsonIds(items: unknown, ids: unknown, fieldName: string) {
+  const requested = getStringArray(ids);
+  const unknownId = requested.find((itemId) => !hasJsonItemId(items, itemId));
+  if (unknownId) throw new Error(`${fieldName} contains unknown id: ${unknownId}`);
+  return requested;
+}
+
+export function upsertById(items: JsonValue[], item: Record<string, JsonValue>) {
+  const itemId = String(item.id ?? id());
+  const nextItem = { ...item, id: itemId };
+  const exists = items.some((entry) => isRecord(entry) && String(entry.id) === itemId);
+  return {
+    item: nextItem,
+    items: exists ? items.map((entry) => (isRecord(entry) && String(entry.id) === itemId ? nextItem : entry)) : [...items, nextItem],
+  };
+}
+
+export function deleteById(items: JsonValue[], idValue: string) {
+  return items.filter((entry) => !(isRecord(entry) && String(entry["id"]) === idValue));
+}
+
+export function reorderByIds<T extends JsonValue>(items: T[], ids: string[]) {
+  const byId = new Map(items.filter(isRecord).map((item) => [String(item["id"]), item as T]));
+  const ordered = ids.map((itemId) => byId.get(itemId)).filter(Boolean) as T[];
+  const rest = items.filter((item) => !isRecord(item) || !ids.includes(String(item["id"])));
+  return [...ordered, ...rest];
+}
+
+
+/**
+ * 首次升级到 SQLite 版:① 备份 .bak → ② 灌库 → ③ 写瘦 state.json。
+ * @returns true=已迁移/迁移成功(从活库读);false=灌库失败(本次用 parsed.conversations 兜底,
+ *          state.json 保持原样,下次启动重试)。
+ */

@@ -15,7 +15,8 @@ import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, resetConversationsDbTo } fro
 import { importSkills } from "../tools";
 import { ANDROID_AVATAR_TYPE_TO_PC, copyDirRecursive, rewriteAvatarsInSettings } from "./export";
 import { broadcastList, broadcastSettings } from "../api/sse";
-import { defaultSettings, normalizeState } from "../server";
+import { defaultSettings } from "../app-config/defaults";
+import { normalizeState } from "../persistence/state-load";
 import { generating } from "../conversations/generation-state";
 
 export function applyBackupPayload(body: { state?: Partial<State>; skills?: unknown; files?: unknown } & Partial<State>) {

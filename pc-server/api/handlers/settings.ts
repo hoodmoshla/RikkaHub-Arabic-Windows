@@ -24,15 +24,9 @@ import { memoryStore } from "../../memory/index";
 import { addLog } from "../logs";
 import { error, json, readJson } from "../request";
 import { broadcastMemoryUpdate, openSse, settingsClients, sseFrame } from "../sse";
-import {
-  defaultSettings,
-  deleteById,
-  normalizePreferredPort,
-  normalizeProxyConfig,
-  reorderByIds,
-  upsertById,
-  validateKnownJsonIds,
-} from "../../server";
+import { deleteById, reorderByIds, upsertById, validateKnownJsonIds } from "../../foundation/utils";
+import { normalizePreferredPort, normalizeProxyConfig } from "../../foundation/net";
+import { defaultSettings } from "../../app-config/defaults";
 import { DEFAULT_COMPRESS_PROMPT, DEFAULT_OCR_PROMPT, DEFAULT_PROMPT_OPTIMIZE_PROMPT, DEFAULT_SUGGESTION_PROMPT, DEFAULT_TITLE_PROMPT, DEFAULT_TRANSLATION_PROMPT } from "../../app-config/prompts";
 import { updateSettings } from "../../app-config";
 import { markProviderTestResult } from "../../model-providers/checks";

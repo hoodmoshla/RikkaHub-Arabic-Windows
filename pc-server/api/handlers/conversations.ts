@@ -22,9 +22,7 @@ import {
   listClients,
   openSse,
 } from "../sse";
-import {
-  bumpAnalyticsMsgCount,
-} from "../../server";
+import { bumpAnalyticsMsgCount } from "../../app-config/analytics";
 import { DEFAULT_TRANSLATION_PROMPT } from "../../app-config/prompts";
 import { attachOcrToImageParts, compressConversation, englishLanguageName, fetchAuxiliaryText, generateTitleForConversation, isQwenMtModel, markOcrPendingParts } from "../../conversations/auxiliary";
 import { generateAnswer } from "../../conversations/orchestrator";

@@ -1,8 +1,9 @@
 // foundation/net.ts — 代理与网络工具
 // 纪律：纯函数，不直接读取 state；调用方通过参数传入 ProxyConfig。
 
+import { isRecord } from "./utils";
 import { RUNNING_IN_CONTAINER, RUNTIME_PLATFORM } from "./platform";
-import type { ProxyConfig } from "./types";
+import type { ProxyConfig , ProxyMode } from "./types";
 
 export let lastDetectedSystemProxy: string | undefined;
 // 实际监听端口（Bun.serve 绑定后赋值）。端口顺延后可能与 preferredPort 不同，
@@ -312,4 +313,34 @@ export function proxyStatusPayload(cfg: ProxyConfig) {
     // 实际运行端口（顺延后可能与 preferredPort 不同），前端口 Card 显示
     runningPort: actualServingPort ?? null,
   };
+}
+
+export function normalizeProxyConfig(value: unknown): ProxyConfig {
+  const raw = isRecord(value) ? value : {};
+  const url = String(raw.url ?? "").trim();
+  const username = String(raw.username ?? "");
+  const password = String(raw.password ?? "");
+  const bypassRules = String(raw.bypassRules ?? "").trim();
+  const rawMode = raw.mode;
+  let mode: ProxyMode;
+  if (rawMode === "auto" || rawMode === "manual" || rawMode === "direct" || rawMode === "env") {
+    mode = rawMode;
+  } else {
+    // 旧 settings 无 mode 字段(或值非法)→ 按平台推断, 保证旧行为兼容:
+    //   有 url → manual; 无 url + 容器 → env(docker 默认); 无 url + 桌面 → auto(跟随系统)
+    if (url) mode = "manual";
+    else if (RUNNING_IN_CONTAINER) mode = "env";
+    else mode = "auto";
+  }
+  return { mode, url, username, password, bypassRules };
+}
+
+// Port setting: integer in [1, 65535] or null (auto). Anything out of range / wrong type
+// normalizes back to null so a corrupt state.json can never wedge the server on an invalid port.
+export function normalizePreferredPort(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const n = Math.trunc(value);
+    if (n >= 1 && n <= 65535) return n;
+  }
+  return null;
 }
