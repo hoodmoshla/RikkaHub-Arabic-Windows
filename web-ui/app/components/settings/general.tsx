@@ -1,0 +1,294 @@
+// components/settings/general.tsx — 通用设置分区（纯搬迁自 routes/settings.tsx）
+
+import * as React from "react";
+import { useTranslation } from "react-i18next";
+import { UserRound } from "lucide-react";
+import { toast } from "sonner";
+import { AvatarCropper } from "~/components/avatar-cropper";
+import { FontPickerPair } from "~/components/font-picker";
+import { KeybindingSettings } from "~/components/keybinding-settings";
+import { Button } from "~/components/ui/button";
+import { Input } from "~/components/ui/input";
+import { Separator } from "~/components/ui/separator";
+import { Slider } from "~/components/ui/slider";
+import { Switch } from "~/components/ui/switch";
+import api from "~/services/api";
+import type { AssistantAvatar, Settings } from "~/types";
+import { SectionHeader, textValue } from "~/components/settings/shared";
+
+export function GeneralSection({
+  settings,
+  onSettings,
+}: {
+  settings: Settings;
+  onSettings: (settings: Settings) => void;
+}) {
+  const { t } = useTranslation();
+  const display = settings.displaySetting;
+  const [name, setName] = React.useState(textValue(display.userNickname));
+  const [avatar, setAvatar] = React.useState<AssistantAvatar>(
+    display.userAvatar ?? { type: "dummy" },
+  );
+  const [saving, setSaving] = React.useState(false);
+  const profileDirtyRef = React.useRef(false);
+
+  // --- 窗口行为(最小化到托盘 / 退出)—— 仅 Tauri 桌面端渲染 ---
+  // 该设置存在 Rust 侧的 user-config.json(跟数据目录同处),不走后端 API/SSE,
+  // 因为窗口关闭的瞬间需要 Rust 直接读到它,而不是等前端回传。
+  const [tauriReady, setTauriReady] = React.useState(false);
+  const [minimizeToTray, setMinimizeToTray] = React.useState(true);
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+      setTauriReady(true);
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const v = await invoke<boolean>("get_minimize_to_tray");
+        if (!cancelled) setMinimizeToTray(v);
+      } catch (err) {
+        console.warn("[tray] get_minimize_to_tray failed", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 界面字号滑块的本地镜像值。受控 Slider 的 value 若等 POST→SSE 往返才更新,松手时 thumb 会
+  // 被旧 value 弹回(用户体验为"拖过去又弹回来")。改用:onValueChange 只动本地(立即跟随),
+  // onValueCommit(松手)才提交后端。display 变化时(重置按钮 / SSE 推送)同步回本地。
+  const uiFontSizeValue = display.uiFontSize ?? 1;
+  const [uiFontSlider, setUiFontSlider] = React.useState(uiFontSizeValue);
+  React.useEffect(() => {
+    setUiFontSlider(uiFontSizeValue);
+  }, [uiFontSizeValue]);
+
+  React.useEffect(() => {
+    setName(textValue(display.userNickname));
+    setAvatar(display.userAvatar ?? { type: "dummy" });
+    profileDirtyRef.current = false;
+  }, [display.userNickname, display.userAvatar]);
+
+  const patchDisplay = async (patch: Record<string, unknown>) => {
+    const nextDisplay = { ...settings.displaySetting, ...patch };
+    await api.post("settings/display", nextDisplay);
+    onSettings({ ...settings, displaySetting: nextDisplay });
+  };
+
+  const save = async (announce = false) => {
+    if (!announce && !profileDirtyRef.current) return;
+    setSaving(true);
+    try {
+      await patchDisplay({ userNickname: name.trim(), userAvatar: avatar });
+      profileDirtyRef.current = false;
+      if (announce) toast.success(t("settings:general.profile_saved"));
+    } catch (error) {
+      if (announce)
+        toast.error(error instanceof Error ? error.message : t("settings:common.save_failed"));
+      else console.warn("Profile auto-save failed", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  React.useEffect(() => {
+    if (!profileDirtyRef.current) return;
+    const timer = window.setTimeout(() => {
+      void save(false);
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [name, avatar]);
+
+  return (
+    <>
+      <SectionHeader
+        icon={UserRound}
+        title={t("settings:general.title")}
+        subtitle={t("settings:general.subtitle")}
+      />
+      <div className="grid gap-6">
+        <div className="space-y-4 rounded-lg border bg-card p-5">
+          <AvatarCropper
+            value={avatar}
+            fallbackName={name || "User"}
+            onChange={async (nextAvatar) => {
+              setAvatar(nextAvatar);
+              const nextDisplay = {
+                ...settings.displaySetting,
+                userNickname: name.trim(),
+                userAvatar: nextAvatar,
+              };
+              await api.post("settings/display", nextDisplay);
+              onSettings({ ...settings, displaySetting: nextDisplay });
+            }}
+          />
+          <Separator />
+          <label className="block space-y-2">
+            <span className="text-sm font-medium">{t("settings:general.nickname")}</span>
+            <Input
+              value={name}
+              onChange={(event) => {
+                profileDirtyRef.current = true;
+                setName(event.target.value);
+              }}
+            />
+          </label>
+          <div className="grid gap-3 md:grid-cols-2">
+            <FontPickerPair
+              label={t("settings:general.ui_font")}
+              enValue={textValue(display.uiFontFamily)}
+              cjkValue={textValue(display.uiFontFamilyCjk)}
+              fallbackFamily={
+                '"Noto Sans SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif'
+              }
+              onChangeEn={(value, family) =>
+                void patchDisplay({ uiFontFamily: value, uiFontFamilyCss: family })
+              }
+              onChangeCjk={(value, family) =>
+                void patchDisplay({ uiFontFamilyCjk: value, uiFontFamilyCjkCss: family })
+              }
+            />
+            <FontPickerPair
+              label={t("settings:general.chat_font")}
+              enValue={textValue(display.chatFontFamily)}
+              cjkValue={textValue(display.chatFontFamilyCjk)}
+              fallbackFamily={
+                textValue(display.uiFontFamilyCss) ||
+                '"Noto Sans SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif'
+              }
+              onChangeEn={(value, family) =>
+                void patchDisplay({ chatFontFamily: value, chatFontFamilyCss: family })
+              }
+              onChangeCjk={(value, family) =>
+                void patchDisplay({ chatFontFamilyCjk: value, chatFontFamilyCjkCss: family })
+              }
+            />
+          </div>
+          <div className="block space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">{t("settings:general.ui_font_size")}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-muted-foreground text-xs tabular-nums">
+                  {Math.round(uiFontSlider * 100)}%
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  disabled={(display.uiFontSize ?? null) === null}
+                  onClick={() => void patchDisplay({ uiFontSize: null })}
+                >
+                  {t("settings:general.reset")}
+                </Button>
+              </div>
+            </div>
+            <Slider
+              value={[uiFontSlider]}
+              min={0.85}
+              max={1.2}
+              step={0.01}
+              aria-label={t("settings:general.ui_font_size")}
+              onValueChange={(value) => setUiFontSlider(value[0])}
+              onValueCommit={(value) => {
+                const next = value[0];
+                // 1.00 视为"默认",存 null 以保持根字号完全等同于浏览器默认,
+                // 避免任何浮点误差引入的默认态视觉偏差。
+                const normalized = Math.abs(next - 1) < 0.001 ? null : Number(next.toFixed(2));
+                void patchDisplay({ uiFontSize: normalized });
+              }}
+            />
+            <p className="text-muted-foreground text-xs">
+              {t("settings:general.ui_font_size_hint")}
+            </p>
+          </div>
+          <div className="rounded-md border px-3 py-3">
+            <KeybindingSettings />
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {[
+              ["showUserAvatar", "settings:general.opt.show_user_avatar"],
+              ["showAssistantBubble", "settings:general.opt.show_assistant_bubble"],
+              ["showModelIcon", "settings:general.opt.show_model_icon"],
+              ["showModelName", "settings:general.opt.show_model_name"],
+              ["showTokenUsage", "settings:general.opt.show_token_usage"],
+              ["showThinkingContent", "settings:general.opt.show_thinking"],
+              ["sendOnEnter", "settings:general.opt.send_on_enter"],
+              ["enableAutoScroll", "settings:general.opt.auto_scroll"],
+            ].map(([key, labelKey]) => (
+              <label
+                key={key}
+                className="flex items-center justify-between rounded-md border px-3 py-2"
+              >
+                <span className="text-sm">{t(labelKey)}</span>
+                <Switch
+                  checked={display[key] !== false}
+                  onCheckedChange={(checked) => void patchDisplay({ [key]: checked })}
+                />
+              </label>
+            ))}
+          </div>
+          <div className="flex justify-end text-xs text-muted-foreground">
+            {saving ? t("settings:common.autosaving") : t("settings:common.autosaved")}
+          </div>
+        </div>
+        {tauriReady && (
+          <div className="space-y-4 rounded-lg border bg-card p-5">
+            <div>
+              <h2 className="text-base font-medium">{t("settings:general.tray_title")}</h2>
+              <p className="mt-1 text-sm text-muted-foreground">{t("settings:general.tray_desc")}</p>
+            </div>
+            <label className="flex items-start justify-between gap-4 rounded-md border px-3 py-3">
+              <div className="min-w-0">
+                <div className="text-sm">{t("settings:general.minimize_to_tray")}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {t("settings:general.minimize_to_tray_hint")}
+                </div>
+              </div>
+              <Switch
+                checked={minimizeToTray}
+                onCheckedChange={async (checked) => {
+                  // 乐观更新:先改 UI,失败回滚。invoke 走 Tauri command 写 user-config.json。
+                  const prev = minimizeToTray;
+                  setMinimizeToTray(checked);
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    await invoke("set_minimize_to_tray", { enabled: checked });
+                  } catch (err) {
+                    setMinimizeToTray(prev);
+                    toast.error(t("settings:common.save_failed"));
+                    console.warn("[tray] set_minimize_to_tray failed", err);
+                  }
+                }}
+              />
+            </label>
+            <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-3">
+              <div className="min-w-0">
+                <div className="text-sm">{t("settings:general.quit_app")}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {t("settings:general.quit_app_hint")}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  try {
+                    const { exit } = await import("@tauri-apps/plugin-process");
+                    await exit(0);
+                  } catch (err) {
+                    toast.error(t("settings:general.quit_failed"));
+                    console.warn("[tray] exit failed", err);
+                  }
+                }}
+              >
+                {t("settings:general.quit_app_button")}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
