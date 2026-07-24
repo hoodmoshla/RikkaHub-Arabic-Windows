@@ -1,0 +1,245 @@
+// inference-engine/conversation-encoding.ts — 会话 → 三家 Provider 请求体的编码层
+// （模板变量、提示词注入、OpenAI messages / Responses API input / Google contents 构建）
+// 纪律：纯搬迁自 server.ts（阶段 5.3d），行为不变。
+
+import type { ApiMessage, Assistant, Conversation, JsonValue, Message, Model } from "../foundation/types";
+import { applyPlaceholders, cloneJson, getStringArray, isRecord, message, renderTemplate, textFromParts } from "../foundation/utils";
+import { state } from "../persistence/json-store";
+import {
+  activePromptInjections as activePromptInjectionsCore,
+  applyMessageTemplateToParts,
+  applyPromptInjectionsToMessages,
+  templateVariables as templateVariablesCore,
+} from "../assistants";
+import { buildMemoryPrompt, buildRecentChatsPrompt } from "../memory";
+import { buildSearchContext } from "../search";
+import { findModel } from "../model-providers";
+import { listSkills } from "../tools/skills";
+import { openAiLocalTools, openAiMcpTools, openAiSearchTools, openAiSkillTools } from "../tools/bound";
+import {
+  GOOGLE_SAFETY_SETTINGS,
+  apiContentFromParts,
+  apiContentText,
+  appendAssistantApiMessages,
+  googleContentsFromApiMessages,
+  googleFunctionDeclarations,
+  googleGenerationConfig,
+  hasBuiltInTool,
+  responseApiMessagesFromUiMessages,
+  supportsAbility,
+  supportsOutputModality,
+} from "./message-builder";
+import { isEmptyAssistantPlaceholder } from "./parts";
+
+export function templateVariables(messageText: string, role: string, assistant: Assistant, modelItem: Model) {
+  return templateVariablesCore(
+    messageText,
+    role,
+    assistant,
+    modelItem,
+    String(state.settings.displaySetting.userNickname ?? "").trim() || "User",
+  );
+}
+
+function activePromptInjections(assistant: Assistant, messages: Message[]) {
+  return activePromptInjectionsCore(assistant, messages, state.settings.lorebooks, state.settings.modeInjections);
+}
+
+function timeReminderContent(current: Message, previous?: Message) {
+  const currentTime = new Date(current.createdAt);
+  const weekday = new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(currentTime);
+  const timeText = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(currentTime);
+  if (!previous) return `<time_reminder>Current time: ${weekday}, ${timeText}</time_reminder>`;
+  const gapSeconds = Math.floor((Date.parse(current.createdAt) - Date.parse(previous.createdAt)) / 1000);
+  if (gapSeconds <= 3600) return "";
+  const gapText = gapSeconds < 3600
+    ? `${Math.floor(gapSeconds / 60)} min`
+    : gapSeconds < 86400
+      ? `${Math.floor(gapSeconds / 3600)} h`
+      : `${Math.floor(gapSeconds / 86400)} d`;
+  return `<time_reminder>Current time: ${weekday}, ${timeText} (${gapText} since last message)</time_reminder>`;
+}
+
+function buildSkillsContext(assistant: Assistant) {
+  const enabled = new Set(getStringArray(assistant.enabledSkills));
+  const available = listSkills().filter((skill) => enabled.has(skill.name));
+  if (available.length === 0) return "";
+  const body = available
+    .map((skill) => `  <skill>\n    <name>${skill.name}</name>\n    <description>${skill.description}</description>\n  </skill>`)
+    .join("\n");
+  return `**Skills**
+You have access to the following skills. Use the \`use_skill\` tool to load a skill's instructions when the user's request matches.
+<available_skills>
+${body}
+</available_skills>`;
+}
+
+export function buildGoogleRequestBody(messagesForApi: ApiMessage[], modelItem: Model, assistant: Assistant) {
+  const systemContent = messagesForApi.find((item) => item.role === "system")?.content;
+  const hasImageOutput = supportsOutputModality(modelItem, "IMAGE");
+  const functionTools = supportsAbility(modelItem, "TOOL")
+    ? [...openAiSearchTools(), ...openAiLocalTools(assistant), ...openAiSkillTools(assistant), ...openAiMcpTools(assistant)]
+    : [];
+  const functionDeclarations = googleFunctionDeclarations(functionTools);
+  // 内置工具（googleSearch/urlContext）目前与函数工具互斥，优先内置工具，镜像安卓
+  // buildCompletionRequestBody:446-468（model.tools 覆盖 functionDeclarations）。
+  const builtInTools: Record<string, JsonValue>[] = [];
+  if (hasBuiltInTool(modelItem, "search")) builtInTools.push({ googleSearch: {} });
+  if (hasBuiltInTool(modelItem, "url_context") || hasBuiltInTool(modelItem, "urlContext")) {
+    builtInTools.push({ urlContext: {} });
+  }
+  const tools = builtInTools.length
+    ? builtInTools
+    : functionDeclarations.length
+      ? [{ functionDeclarations }]
+      : undefined;
+  const body: Record<string, JsonValue> = {
+    // system 在图片输出模型上不发送，对齐安卓 buildCompletionRequestBody:352。
+    ...(systemContent && !hasImageOutput
+      ? { systemInstruction: { parts: [{ text: apiContentText(systemContent) }] } }
+      : {}),
+    generationConfig: googleGenerationConfig(modelItem, assistant),
+    contents: googleContentsFromApiMessages(messagesForApi),
+    ...(tools ? { tools } : {}),
+    safetySettings: GOOGLE_SAFETY_SETTINGS,
+  };
+  return body;
+}
+
+// 按工具边界把 ASSISTANT 消息的 parts 分组。镜像安卓
+// ai/src/main/java/me/rerere/ai/provider/providers/ProviderMessageUtils.kt 的
+// groupPartsByToolBoundary：连续的"已执行 tool" parts 合为一组，与它们之前的
+// content（含 reasoning）共同组成一条 assistant 消息，避免把同一个 reasoning
+// 在多次 tool flush 中提前清空——这是 DeepSeek V4 thinking 模式要求每条带
+// tool_calls 的 assistant 消息都必须携带 reasoning_content 的核心修复点。
+function conversationTransformedMessages(conversation: Conversation, assistant: Assistant) {
+  const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
+  // 剔除尾部"正在生成"的空 ASSISTANT 占位后再按 contextMessageSize 切片,见
+  // isEmptyAssistantPlaceholder 的说明(issue #16 + 工具恢复兼容)。
+  const contextNodes = conversation.messages.filter((node, index) => {
+    if (index !== conversation.messages.length - 1) return true;
+    const selected = node.messages[node.selectIndex] ?? node.messages[0];
+    return !isEmptyAssistantPlaceholder(selected);
+  });
+  const rawMessages = contextNodes.slice(assistant.contextMessageSize > 0 ? -assistant.contextMessageSize : undefined);
+  const selectedMessages = rawMessages
+    .map((node) => node.messages[node.selectIndex] ?? node.messages[0])
+    .filter(Boolean);
+  const conversationSystemPrompt = assistant.allowConversationSystemPrompt
+    ? String(conversation.systemPrompt ?? "").trim()
+    : "";
+  const effectiveSystemPrompt = conversationSystemPrompt || assistant.systemPrompt.trim();
+  const systemParts = [
+    effectiveSystemPrompt
+      ? renderTemplate(effectiveSystemPrompt, templateVariables("", "system", assistant, picked.model))
+      : "",
+    buildMemoryPrompt(assistant),
+    buildRecentChatsPrompt(assistant, conversation.id),
+    buildSkillsContext(assistant),
+    buildSearchContext(),
+  ].filter(Boolean);
+
+  const internalMessages: Message[] = [];
+  if (systemParts.length) {
+    internalMessages.push(message("SYSTEM", [{ type: "text", text: systemParts.join("\n\n") }]));
+  }
+  internalMessages.push(...selectedMessages.map((msg) => cloneJson(msg)));
+
+  const messagesAfterTimeReminder: Message[] = [];
+  let firstUserReminderInjected = false;
+  for (let index = 0; index < internalMessages.length; index += 1) {
+    const selected = internalMessages[index];
+    if (assistant.enableTimeReminder && selected.role === "USER") {
+      const previous = firstUserReminderInjected && index > 0 ? internalMessages[index - 1] : undefined;
+      const reminder = timeReminderContent(
+        selected,
+        previous,
+      );
+      if (reminder) messagesAfterTimeReminder.push(message("USER", [{ type: "text", text: reminder }]));
+      firstUserReminderInjected = true;
+    }
+    messagesAfterTimeReminder.push(selected);
+  }
+
+  const injections = activePromptInjections(assistant, messagesAfterTimeReminder);
+  return { messages: applyPromptInjectionsToMessages(messagesAfterTimeReminder, injections), picked };
+}
+
+export function conversationMessagesForApi(
+  conversation: Conversation,
+  assistant: Assistant,
+  // 对齐安卓 commit e63d017：OpenAI providerSetting.includeHistoryReasoning
+  // 控制是否把历史 assistant 消息的 reasoning_content 回传给上游。默认 true，
+  // 与安卓 ChatCompletionsAPI.buildMessages 的默认值一致。
+  includeHistoryReasoning: boolean = true,
+) {
+  const template = assistant.messageTemplate?.trim() || "{{ message }}";
+  const { messages: transformedMessages, picked } = conversationTransformedMessages(conversation, assistant);
+
+  const items: ApiMessage[] = [];
+  for (const selected of transformedMessages) {
+    if (selected.role === "ASSISTANT") {
+      appendAssistantApiMessages(
+        items,
+        {
+          ...selected,
+          parts: applyMessageTemplateToParts(selected.parts, "assistant", template),
+        },
+        includeHistoryReasoning,
+      );
+      continue;
+    }
+    const rawContent = textFromParts(selected.parts);
+    const role = selected.role === "SYSTEM" ? "system" : selected.role === "TOOL" ? "tool" : "user";
+    const placeholderParts = selected.parts.map((part) =>
+      isRecord(part) && part.type === "text"
+        ? { ...part, text: applyPlaceholders(String(part.text ?? ""), templateVariables(rawContent, role, assistant, picked.model)) }
+        : part,
+    );
+    const templatedParts = applyMessageTemplateToParts(placeholderParts, role, template);
+    const content = apiContentFromParts(templatedParts, rawContent, picked.model);
+    if (!content) continue;
+    items.push({ role, content });
+  }
+  return items;
+}
+
+export function conversationResponseApiInput(conversation: Conversation, assistant: Assistant) {
+  const template = assistant.messageTemplate?.trim() || "{{ message }}";
+  const { messages: transformedMessages, picked } = conversationTransformedMessages(conversation, assistant);
+  const converted = transformedMessages
+    .map((selected) => {
+      if (selected.role === "ASSISTANT") {
+        return {
+          ...selected,
+          parts: applyMessageTemplateToParts(selected.parts, "assistant", template),
+        };
+      }
+      const rawContent = textFromParts(selected.parts);
+      const role = selected.role === "SYSTEM" ? "system" : selected.role === "TOOL" ? "tool" : "user";
+      const placeholderParts = selected.parts.map((part) =>
+        isRecord(part) && part.type === "text"
+          ? { ...part, text: applyPlaceholders(String(part.text ?? ""), templateVariables(rawContent, role, assistant, picked.model)) }
+          : part,
+      );
+      return {
+        ...selected,
+        parts: applyMessageTemplateToParts(placeholderParts, role, template),
+      };
+    });
+  return responseApiMessagesFromUiMessages(converted, picked.model);
+}
+
+export function conversationResponseApiInstructions(conversation: Conversation, assistant: Assistant) {
+  const { messages: transformedMessages, picked } = conversationTransformedMessages(conversation, assistant);
+  return transformedMessages
+    .filter((item) => item.role === "SYSTEM")
+    .map((item) =>
+      applyPlaceholders(
+        textFromParts(item.parts),
+        templateVariables(textFromParts(item.parts), "system", assistant, picked.model),
+      )
+    )
+    .filter(Boolean)
+    .join("\n");
+}

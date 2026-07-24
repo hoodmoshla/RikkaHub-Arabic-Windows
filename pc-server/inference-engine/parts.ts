@@ -139,3 +139,15 @@ export function addStreamText(hooks: { message?: Message; sink?: (event: any) =>
     hooks.message.parts.push({ type: "text", text });
   }
 }
+
+export function isEmptyAssistantPlaceholder(msg: Message | undefined): boolean {
+  if (!msg || msg.role !== "ASSISTANT") return false;
+  return !msg.parts.some((part) => {
+    if (!isRecord(part)) return false;
+    const t = part.type;
+    if (t === "tool" || t === "image" || t === "document" || t === "audio" || t === "video") return true;
+    if (t === "text") return String(part.text ?? "").trim().length > 0;
+    if (t === "reasoning") return String(part.reasoning ?? "").trim().length > 0;
+    return false;
+  });
+}
