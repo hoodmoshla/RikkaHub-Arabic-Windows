@@ -1,4 +1,4 @@
-// P1-1 懒加载数据层单测：元数据装载 / 单会话节点读取 / 全量组合。
+// 活库读取原语单测：元数据装载 / 单会话节点读取 / 全量组合(迁移与导入合并路径的基础)。
 // ensure/mark 状态机依赖 state 与 conversationsDb 单例，由 request-chain smoke 与真机端到端覆盖。
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";

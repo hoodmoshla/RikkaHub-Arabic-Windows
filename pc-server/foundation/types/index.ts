@@ -385,15 +385,16 @@ export interface MemorySnapshot {
 //
 // 会话从 state.json 搬进 rikka_hub.db,采用 Android APP 节点级 schema 的 PC 超集
 // (pc_conversation / pc_message_node,含 system_prompt / truncate_index——Android 备份库
-// 没有这两列)。内存模型 state.conversations 不变,启动时从这里整批读入;运行时:
+// 没有这两列)。DB-first:活库是唯一运行时权威,读路径直查,内存只驻留正在使用的实例
+// (conversations/working-set.ts 单一权威实例注册表);运行时写路径:
 //   - 流式热路径:只 upsert 当前在长的那个 pc_message_node 行(脏标记 + 200ms 节流),
 //     SQLite 只把脏页追加进 WAL,开销与总会话数/总数据量无关——这是根除"每 200ms 全量
 //     重写 state.json"的关键。
 //   - 非流式变更(改名/编辑/分叉/导入/流结束):persistConversation 全量 reconcile。
 //
-// 与下方 insertConversationsIntoDb(写 Android 的 ConversationEntity/message_node)是不同
+// 与 insertConversationsIntoDb(写 Android 的 ConversationEntity/message_node)是不同
 // 文件、不同表名、不同 schema:备份库须 Android 兼容(有损、无 PC 超集列),活库须 PC 完整。
-// 备份始终从内存 state.conversations 现场生成,代码不动。详见设计文档。
+// 备份从活库现场生成(flush 对齐脏数据后逐会话瞬时读)。详见设计文档。
 // ============================================================================
 
 // 活库行类型(SELECT 结果)。is_pinned 存 0/1;system_prompt 空 string 对应 null。

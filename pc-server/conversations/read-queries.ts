@@ -49,8 +49,8 @@ const META_COLUMNS = "id, assistant_id, title, system_prompt, truncate_index, su
 
 /**
  * 某助手的全部会话元数据，ORDER BY create_at DESC, id DESC——
- * 与旧 state.conversations 数组顺序的等价还原（数组只在新建/fork 时 unshift，
- * 顺序严格等于 createAt 倒序，见 index.ts loadConversationMetasFromDb 上方注释）。
+ * 与旧内存数组顺序的等价还原（数组只在新建/fork 时 unshift，顺序严格等于
+ * createAt 倒序，见 index.ts loadConversationMetasFromDb 上方注释）。
  */
 export function listConversationMetas(db: Database, assistantId: string): ConversationMeta[] {
   const rows = db.prepare(

@@ -106,11 +106,10 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
   }
 }
 
-// 会话列表顺序 = state.conversations 数组顺序(GET /api/conversations 不排序,直接返回
-// 数组顺序)。而会话只在 unshift 时入数组(新建会话 / fork 会话时),且 unshift 时刻
-// createAt = Date.now(),从不 sort/reorder/push。因此数组顺序严格等价于 createAt 倒序——
-// 这里用 ORDER BY create_at DESC, id DESC 还原,无需 sort_order 列、无需改内存模型。
-/** 读取全部会话元数据(不 parse 节点 JSON,messages 置空)。P1-1 懒加载:启动只装元数据。 */
+// 会话列表顺序 = createAt 倒序:旧架构数组只在新建/fork 时 unshift(unshift 时刻
+// createAt = Date.now(),从不 sort/reorder/push),数组顺序严格等价于 createAt 倒序。
+// DB-first 用 ORDER BY create_at DESC, id DESC 保持该顺序(read-queries.ts 同)。
+/** 读取全部会话元数据(不 parse 节点 JSON,messages 置空)。迁移/合并路径用。 */
 export function loadConversationMetasFromDb(db: InstanceType<typeof Database>): Conversation[] {
   const convRows = db.prepare(
     "SELECT id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at FROM pc_conversation ORDER BY create_at DESC, id DESC",
@@ -438,7 +437,7 @@ export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, co
 }
 
 /** 重灌活库为给定会话集:删除所有会话行(CASCADE 带走节点)+ 单事务灌入。
- *  导入备份用——state.conversations 整体被替换/合并,活库必须同步。 */
+ *  导入备份/bak 恢复用——导入流程把替换/合并结果统一灌回活库(权威)。 */
 export function resetConversationsDbTo(conversations: Conversation[]): void {
   if (!conversationsDb) throw new Error("conversationsDb not open");
   const db = conversationsDb;

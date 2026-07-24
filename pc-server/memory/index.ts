@@ -537,7 +537,7 @@ export function buildRecentChatsPrompt(assistant: Assistant, currentConversation
   const recentDb = getConversationsDb();
   const recent = (recentDb ? recentConversationMetas(recentDb, assistant.id, currentConversationId, 10) : [])
     .map((conversation) => ({
-      // P1-1 懒加载:标题兜底经 peekFirstMessageParts(未加载会话只读活库单行,不触发整树加载)
+      // 标题兜底经 peekFirstMessageParts(working set 命中读实例,否则只读活库单行,不驻留)
       title: conversation.title || textFromParts(peekFirstMessageParts(conversation.id)).slice(0, 40) || "New Conversation",
       last_chat: dateKey(conversation.updateAt),
     }));
