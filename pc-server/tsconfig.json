@@ -4,11 +4,10 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "strict": false,
-    // 5.4c 类型硬化第一档：全仓无隐式 any；本轮第二档：strictNullChecks（空安全）。
-    // 后续档：strictFunctionTypes / strictPropertyInitialization → 最终 strict: true。
-    "noImplicitAny": true,
-    "strictNullChecks": true,
+    // 类型硬化收官(2026-07-24):noImplicitAny(5.4c) → strictNullChecks → strict 全开。
+    // strict 蕴含 strictFunctionTypes/strictPropertyInitialization/useUnknownInCatchVariables 等,
+    // 开启当日全仓零错误(前两档已消化绝大部分),此后不允许回退。
+    "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "types": ["bun"],
