@@ -7,6 +7,7 @@ import { Database } from "bun:sqlite";
 import { conversationsDbPath, dataDir } from "../foundation/paths";
 import type { Conversation, Message, MessageNode, PcConversationRow, PcMessageNodeRow } from "../foundation/types";
 import { state } from "../persistence/json-store";
+import { clearAllFts, deleteConversationFts, ensureMessageFtsTable, ftsRowCount, rebuildFtsFromNodeTable, replaceNodeFts } from "./fts";
 
 export const DEFAULT_ASSISTANT_ID = "0950e2dc-9bd5-4801-afa3-aa887aa36b4e";
 
@@ -83,6 +84,18 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
       );
       CREATE INDEX IF NOT EXISTS idx_pc_msg_node_conv ON pc_message_node(conversation_id);
     `);
+    ensureMessageFtsTable(db);
+    // FTS 自愈重建：老库首次升级（表刚建、空）或索引意外丢失时，从节点表全量重建。
+    // 幂等：行数>0 时零成本跳过。
+    try {
+      const nodeCount = (db.prepare("SELECT COUNT(*) AS n FROM pc_message_node").get() as { n: number }).n;
+      if (nodeCount > 0 && ftsRowCount(db) === 0) {
+        const rebuilt = rebuildFtsFromNodeTable(db);
+        console.log(`[conv-db] 消息全文索引重建完成：${rebuilt} 个节点`);
+      }
+    } catch (ftsErr) {
+      console.warn("[conv-db] FTS 重建失败（搜索降级为空结果，不影响会话读写）:", ftsErr);
+    }
     return db;
   } catch (err) {
     try { db.close(); } catch { /* best-effort:句柄随 GC 释放 */ }
@@ -172,6 +185,8 @@ export function upsertMessageNode(convId: string, node: MessageNode, nodeIndex: 
     JSON.stringify(node.messages ?? []),
     node.selectIndex ?? 0,
   );
+  try { replaceNodeFts(conversationsDb, convId, node); }
+  catch (err) { console.warn("[conv-db] FTS 节点同步失败", node.id, err); }
 }
 
 /**
@@ -189,10 +204,12 @@ export function persistConversation(conv: Conversation): void {
   const txn = db.transaction(() => {
     upsertConversationRow(conv);
     deleteNodes.run(conv.id);
+    deleteConversationFts(db, [conv.id]);
     for (let i = 0; i < (conv.messages ?? []).length; i += 1) {
       const node = conv.messages[i];
       if (!node?.id) continue;
       insertNode.run(node.id, conv.id, i, JSON.stringify(node.messages ?? []), node.selectIndex ?? 0);
+      replaceNodeFts(db, conv.id, node);
     }
   });
   txn();
@@ -202,8 +219,10 @@ export function persistConversation(conv: Conversation): void {
 export function deletePcConversations(ids: string[]): void {
   if (!conversationsDb || ids.length === 0) return;
   const stmt = conversationsDb.prepare("DELETE FROM pc_conversation WHERE id = ?");
-  const txn = conversationsDb.transaction(() => {
+  const db = conversationsDb;
+  const txn = db.transaction(() => {
     for (const idValue of ids) stmt.run(idValue);
+    deleteConversationFts(db, ids);
   });
   txn();
 }
@@ -333,10 +352,12 @@ export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, co
         conv.createAt || Date.now(),
         conv.updateAt || Date.now(),
       );
+      deleteConversationFts(db, [conv.id]);
       for (let i = 0; i < (conv.messages ?? []).length; i += 1) {
         const node = conv.messages[i];
         if (!node?.id) continue;
         insertNode.run(node.id, conv.id, i, JSON.stringify(node.messages ?? []), node.selectIndex ?? 0);
+        replaceNodeFts(db, conv.id, node);
       }
     }
   });
@@ -350,6 +371,7 @@ export function resetConversationsDbTo(conversations: Conversation[]): void {
   const db = conversationsDb;
   const txn = db.transaction(() => {
     db.exec("DELETE FROM pc_conversation");
+    clearAllFts(db);
     migrateConversationsIntoDb(db, conversations);
   });
   txn();

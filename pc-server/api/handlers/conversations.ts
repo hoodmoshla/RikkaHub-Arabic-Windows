@@ -11,6 +11,8 @@ import {
   toListDto,
   truncateConversationForRegenerate,
 } from "../../conversations";
+import { getConversationsDb } from "../../conversations";
+import { searchMessageFts } from "../../conversations/fts";
 import { applyInputRegexTransformParts } from "../../assistants/index";
 import { findModel } from "../../model-providers/index";
 import { error, json, readJson } from "../request";
@@ -63,21 +65,21 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     return json({ items: page.map((item) => toListDto(item, generating.has(item.id))), nextOffset: offset + limit < items.length ? offset + limit : null, hasMore: offset + limit < items.length });
   }
   if (path === "conversations/search" && request.method === "GET") {
-    const queryText = (url.searchParams.get("query") ?? "").toLowerCase();
-    const results = queryText
-      ? state.conversations
-          .filter((conversation) => conversation.assistantId === state.settings.assistantId)
-          .flatMap((conversation) =>
-            conversation.messages.flatMap((node) =>
-            node.messages.flatMap((msg) => {
-              const snippet = textFromParts(msg.parts);
-              return snippet.toLowerCase().includes(queryText)
-                ? [{ nodeId: node.id, messageId: msg.id, conversationId: conversation.id, title: conversation.title, updateAt: conversation.updateAt, snippet }]
-                : [];
-            }),
-          ),
-        )
-      : [];
+    // P1-2：FTS5 trigram 索引查询（旧实现为全会话×全消息内存线性扫描，见 conversations/fts.ts）。
+    // 流式期间内存领先活库最多 200ms（脏节点节流 flush），搜索"正在生成中的最后一句"可能
+    // 晚 200ms 命中——可接受（搜索场景极少针对正在生成的内容）。
+    const queryText = (url.searchParams.get("query") ?? "").trim();
+    const db = getConversationsDb();
+    if (!queryText || !db) return json([]);
+    const byId = new Map(state.conversations.map((conversation) => [conversation.id, conversation]));
+    const results = searchMessageFts(db, queryText)
+      .flatMap((hit) => {
+        const conversation = byId.get(hit.conversationId);
+        // 当前助手过滤（响应契约不变）；已删会话的残留命中防御性跳过
+        if (!conversation || conversation.assistantId !== state.settings.assistantId) return [];
+        return [{ nodeId: hit.nodeId, messageId: hit.messageId, conversationId: hit.conversationId, title: conversation.title, updateAt: conversation.updateAt, snippet: hit.snippet }];
+      })
+      .sort((a, b) => b.updateAt - a.updateAt);
     return json(results);
   }
 
