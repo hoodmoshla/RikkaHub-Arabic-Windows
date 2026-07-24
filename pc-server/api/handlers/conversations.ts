@@ -11,7 +11,7 @@ import {
   toListDto,
   truncateConversationForRegenerate,
 } from "../../conversations";
-import { getConversationsDb } from "../../conversations";
+import { getConversationsDb, markConversationsLoaded } from "../../conversations";
 import { searchMessageFts } from "../../conversations/fts";
 import { applyInputRegexTransformParts } from "../../assistants/index";
 import { findModel } from "../../model-providers/index";
@@ -413,6 +413,7 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
         updateAt: Date.now(),
       };
       state.conversations.unshift(fork);
+      markConversationsLoaded([fork.id]); // fork 树复制自内存源会话,内存即权威
       persistConversation(fork);
       saveState();
       broadcastList();

@@ -4,6 +4,7 @@
 import type { DailyStat } from "../foundation/types";
 import { dateKey, textFromParts } from "../foundation/utils";
 import { state } from "../persistence/json-store";
+import { getConversationsDb, isConversationLoaded, loadConversationNodesFromDb } from "./index";
 
 export function computeStats() {
   const daily = new Map<string, DailyStat>();
@@ -25,13 +26,19 @@ export function computeStats() {
     }
   }
 
+  // P1-1 懒加载:已加载会话读内存(含未 flush 的最新消息,与旧全内存版等价);
+  // 未加载会话从活库瞬时读(parse-统计-释放,不驻留内存)。
+  const statsDb = getConversationsDb();
   for (const conversation of state.conversations) {
     const conversationDate = dateKey(conversation.createAt);
     const row = daily.get(conversationDate) ?? { date: conversationDate, messages: 0, conversations: 0, characters: 0 };
     row.conversations += 1;
     daily.set(conversationDate, row);
 
-    for (const node of conversation.messages) {
+    const nodes = isConversationLoaded(conversation.id) || !statsDb
+      ? conversation.messages
+      : loadConversationNodesFromDb(statsDb, conversation.id);
+    for (const node of nodes) {
       for (const msg of node.messages) {
         const msgDate = dateKey(msg.createdAt);
         const item = daily.get(msgDate) ?? { date: msgDate, messages: 0, conversations: 0, characters: 0 };

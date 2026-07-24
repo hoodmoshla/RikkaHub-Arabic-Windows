@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import * as fsPromises from "node:fs/promises";
 import { dateKey, isRecord, textFromParts } from "../foundation/utils";
 import { globalMemoryPath, assistantMemoryPath, memoryDir, pendingMemoryPath } from "../foundation/paths";
+import { peekFirstMessageParts } from "../conversations/index";
 import { state } from "../persistence/json-store";
 import type {
   AddMemoryInput,
@@ -535,7 +536,8 @@ export function buildRecentChatsPrompt(assistant: Assistant, currentConversation
     .sort((left, right) => right.updateAt - left.updateAt)
     .slice(0, 10)
     .map((conversation) => ({
-      title: conversation.title || textFromParts(conversation.messages[0]?.messages[0]?.parts ?? []).slice(0, 40) || "New Conversation",
+      // P1-1 懒加载:标题兜底经 peekFirstMessageParts(未加载会话只读活库单行,不触发整树加载)
+      title: conversation.title || textFromParts(peekFirstMessageParts(conversation.id)).slice(0, 40) || "New Conversation",
       last_chat: dateKey(conversation.updateAt),
     }));
   if (recent.length === 0) return "";

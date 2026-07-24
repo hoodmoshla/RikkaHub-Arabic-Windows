@@ -12,7 +12,7 @@ import { dataDir, filesDir, skillsDir } from "../foundation/paths";
 import { tempDir } from "../foundation/platform";
 import { state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
-import { DEFAULT_ASSISTANT_ID } from "../conversations";
+import { DEFAULT_ASSISTANT_ID, getConversationsDb, isConversationLoaded, loadConversationNodesFromDb } from "../conversations";
 import { exportSkills } from "../tools";
 
 export function copyDirRecursive(src: string, dest: string): number {
@@ -280,12 +280,15 @@ function insertMemoriesIntoDb(db: InstanceType<typeof Database>) {
 function insertConversationsIntoDb(db: InstanceType<typeof Database>) {
   const insertConv = db.prepare("INSERT OR REPLACE INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, suggestions, is_pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
   const insertNode = db.prepare("INSERT OR REPLACE INTO message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)");
+  // P1-1 懒加载:未加载会话从活库瞬时读,峰值内存从全库降为单会话(10GB 用户净改善)。
+  const liveDb = getConversationsDb();
   const txn = db.transaction(() => {
     for (const conv of state.conversations) {
       try {
         insertConv.run(conv.id, conv.assistantId || DEFAULT_ASSISTANT_ID, conv.title || "", "[]", conv.createAt || Date.now(), conv.updateAt || Date.now(), JSON.stringify(conv.chatSuggestions || []), conv.isPinned ? 1 : 0);
-        for (let i = 0; i < (conv.messages || []).length; i++) {
-          const node = conv.messages[i];
+        const convNodes = isConversationLoaded(conv.id) || !liveDb ? (conv.messages || []) : loadConversationNodesFromDb(liveDb, conv.id);
+        for (let i = 0; i < convNodes.length; i++) {
+          const node = convNodes[i];
           if (!node?.id) continue;
           const toLocalDt = (v: any) => typeof v === "string" ? v.replace(/Z$/, "").replace(/[+-]\d{2}:\d{2}$/, "") : v;
           const toInstant = (v: any) => typeof v === "string" && v && !v.endsWith("Z") && !/[+-]\d{2}:\d{2}$/.test(v) ? v + "Z" : v;

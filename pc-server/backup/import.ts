@@ -11,7 +11,7 @@ import { dataDir, filesDir, skillsDir } from "../foundation/paths";
 import { tempDir } from "../foundation/platform";
 import { MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
-import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, resetConversationsDbTo } from "../conversations";
+import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, ensureAllConversationsLoaded, markConversationsLoaded, resetConversationsDbTo } from "../conversations";
 import { importSkills } from "../tools";
 import { ANDROID_AVATAR_TYPE_TO_PC, copyDirRecursive, rewriteAvatarsInSettings } from "./export";
 import { broadcastList, broadcastSettings } from "../api/sse";
@@ -530,6 +530,10 @@ function importAndroidConversations(extractDir: string, dbPath: string, androidF
     const nodeStmt = db.query("SELECT * FROM message_node WHERE conversation_id = ? ORDER BY node_index ASC");
 
     let imported = 0;
+    // P1-1 懒加载:合并会保留未被导入覆盖的现有会话,收尾 resetConversationsDbTo 会用
+    // state.conversations 重灌活库——数组里若有未加载壳(messages 空)会清空该会话的消息。
+    // 导入是低频重操作,全量加载的峰值内存可接受。
+    ensureAllConversationsLoaded();
     const existingById = new Map(state.conversations.map((conv) => [conv.id, conv]));
 
     for (const row of convRows) {
@@ -688,6 +692,7 @@ function finalizeConversationImport(): void {
   }
   generating.clear();
   clearConvDirtyState();
+  markConversationsLoaded(state.conversations.map((conv) => conv.id)); // 导入后数组全为完整树
   resetConversationsDbTo(state.conversations);
 }
 

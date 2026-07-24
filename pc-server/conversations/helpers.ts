@@ -5,7 +5,7 @@ import type { Assistant, Conversation, JsonValue, Message, MessageNode, MessageP
 import { estimateTokens, id, isRecord, message, reasoningFromParts, textFromParts } from "../foundation/utils";
 import { saveState, state } from "../persistence/json-store";
 import { broadcastList, conversationClients } from "../api/sse";
-import { deletePcConversations, flushConvDirtyNow, getConversation, persistConversation, selectedConversationMessages } from "./index";
+import { deletePcConversations, flushConvDirtyNow, getConversation, markConversationsLoaded, persistConversation, selectedConversationMessages, unmarkConversationsLoaded } from "./index";
 import { generating } from "./generation-state";
 import { findAssistant as findAssistantCore } from "../assistants";
 import { fillContextLimit } from "../inference-engine/providers";
@@ -36,6 +36,7 @@ export function deleteConversationsById(ids: Set<string>) {
   // 先删内存,再删活库——避免删活库后残余脏标记 flush 又把节点 upsert 回来
   // (flushConvDirty 检查 state.conversations 存在性,内存没了就跳过)。
   state.conversations = state.conversations.filter((item) => !ids.has(item.id));
+  unmarkConversationsLoaded(ids);
   deletePcConversations(Array.from(ids));
   saveState();
   broadcastList();
@@ -63,6 +64,7 @@ export function ensureConversation(idValue: string) {
       updateAt: now,
     };
     state.conversations.unshift(conversation);
+    markConversationsLoaded([conversation.id]); // 新建:内存即权威,防按需加载反向覆盖
     // 1.2.6:新建会话 persist 进活库(建会话行),否则后续流式 upsert 该会话的节点时
     // FK 失败(pc_message_node.conversation_id 引用 pc_conversation.id),且流式中崩溃
     // 会丢会话行。

@@ -16,7 +16,7 @@ import {
   writeSlimStateJsonSync,
   writeSlimStateJsonSyncForMemory,
 } from "./json-store";
-import { getConversationsDb, loadAllConversationsFromDb, migrateConversationsIntoDb, openConversationsDb } from "../conversations";
+import { getConversationsDb, loadAllConversationsFromDb, loadConversationMetasFromDb, markConversationsLoaded, migrateConversationsIntoDb, openConversationsDb } from "../conversations";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory";
 import { NA_API_PRESET_MODELS, NA_API_PROVIDER_ID, SUNSET_PROVIDER_IDS, TENCENT_PROVIDER_ID, builtinProviderRank, enrichModel, inferModelAbilities, model } from "../model-providers";
 import { normalizeTtsProviders } from "../media/tts";
@@ -276,12 +276,15 @@ export function loadState(): State {
   // 迁移 + 瘦身(首次升级)。返回 true=从活库读;false=迁移失败,本次用 parsed.conversations。
   const migrated = migrateConversationsIfNeeded(parsed);
 
-  const conversations = migrated
+  // P1-1 懒加载:迁移完成的正常路径只装元数据(不 parse 节点 JSON),消息树打开时按需读;
+  // 未迁移/活库回退路径拿到的是完整树,标记 loaded 防按需加载用活库旧数据反向覆盖。
+  const { conversations, nodesLoaded } = migrated
     ? loadConversationsFromDbWithFallback()
-    : (Array.isArray(parsed.conversations) ? parsed.conversations : []);
+    : { conversations: Array.isArray(parsed.conversations) ? parsed.conversations : [], nodesLoaded: true };
 
   const state = normalizeState(parsed);
   state.conversations = conversations;
+  if (nodesLoaded) markConversationsLoaded(conversations.map((conv) => conv.id));
   migrateMemoryFilesIfNeeded(state);
   return state;
 }
@@ -445,11 +448,11 @@ function recoverConversationsFromBak(): Conversation[] {
   }
 }
 
-function loadConversationsFromDbWithFallback(): Conversation[] {
+function loadConversationsFromDbWithFallback(): { conversations: Conversation[]; nodesLoaded: boolean } {
   try {
-    return loadAllConversationsFromDb(getConversationsDb()!);
+    return { conversations: loadConversationMetasFromDb(getConversationsDb()!), nodesLoaded: false };
   } catch (err) {
     console.error("[conv-db] 活库读取失败,从 state.json.pre-sqlite.bak 恢复", err);
-    return recoverConversationsFromBak();
+    return { conversations: recoverConversationsFromBak(), nodesLoaded: true };
   }
 }

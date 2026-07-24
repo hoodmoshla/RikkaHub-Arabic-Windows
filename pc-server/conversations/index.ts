@@ -107,35 +107,101 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
 // 数组顺序)。而会话只在 unshift 时入数组(新建会话 / fork 会话时),且 unshift 时刻
 // createAt = Date.now(),从不 sort/reorder/push。因此数组顺序严格等价于 createAt 倒序——
 // 这里用 ORDER BY create_at DESC, id DESC 还原,无需 sort_order 列、无需改内存模型。
-/** 读取全部会话(会话行 + 各自节点),组装成内存 Conversation[]。 */
-export function loadAllConversationsFromDb(db: InstanceType<typeof Database>): Conversation[] {
+/** 读取全部会话元数据(不 parse 节点 JSON,messages 置空)。P1-1 懒加载:启动只装元数据。 */
+export function loadConversationMetasFromDb(db: InstanceType<typeof Database>): Conversation[] {
   const convRows = db.prepare(
     "SELECT id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at FROM pc_conversation ORDER BY create_at DESC, id DESC",
   ).all() as PcConversationRow[];
-  const nodeStmt = db.prepare(
+  return convRows.map((row) => ({
+    id: row.id,
+    assistantId: row.assistant_id,
+    systemPrompt: row.system_prompt || null,
+    title: row.title ?? "",
+    messages: [],
+    truncateIndex: typeof row.truncate_index === "number" ? row.truncate_index : -1,
+    chatSuggestions: safeParseStringArray(row.suggestions),
+    isPinned: row.is_pinned === 1,
+    createAt: row.create_at,
+    updateAt: row.update_at,
+  }));
+}
+
+/** 读取单个会话的消息树(按 node_index 组装)。懒加载的按需读取原语。 */
+export function loadConversationNodesFromDb(db: InstanceType<typeof Database>, conversationId: string): MessageNode[] {
+  const nodeRows = db.prepare(
     "SELECT id, node_index, messages, select_index FROM pc_message_node WHERE conversation_id = ? ORDER BY node_index ASC",
-  );
-  const conversations: Conversation[] = [];
-  for (const row of convRows) {
-    const nodeRows = nodeStmt.all(row.id) as PcMessageNodeRow[];
-    conversations.push({
-      id: row.id,
-      assistantId: row.assistant_id,
-      systemPrompt: row.system_prompt || null,
-      title: row.title ?? "",
-      messages: nodeRows.map((nr) => ({
-        id: nr.id,
-        messages: safeParseMessageArray(nr.messages),
-        selectIndex: nr.select_index ?? 0,
-      })),
-      truncateIndex: typeof row.truncate_index === "number" ? row.truncate_index : -1,
-      chatSuggestions: safeParseStringArray(row.suggestions),
-      isPinned: row.is_pinned === 1,
-      createAt: row.create_at,
-      updateAt: row.update_at,
-    });
-  }
+  ).all(conversationId) as PcMessageNodeRow[];
+  return nodeRows.map((nr) => ({
+    id: nr.id,
+    messages: safeParseMessageArray(nr.messages),
+    selectIndex: nr.select_index ?? 0,
+  }));
+}
+
+/** 读取全部会话(会话行 + 各自节点),组装成内存 Conversation[]。迁移校验/回退路径用。 */
+export function loadAllConversationsFromDb(db: InstanceType<typeof Database>): Conversation[] {
+  const conversations = loadConversationMetasFromDb(db);
+  for (const conv of conversations) conv.messages = loadConversationNodesFromDb(db, conv.id);
   return conversations;
+}
+
+// ----- P1-1 懒加载:消息树按需加载状态 -----
+//
+// 数据角色终局(三轨收敛):SQLite 活库 = 会话持久权威;内存 state.conversations = 元数据
+// 全量 + 已打开会话的消息树缓存(写经缓存,脏标记节流 flush / persistConversation 落库);
+// state.json 不再涉会话。
+//
+// loadedConversationIds 记录"内存中消息树可信"的会话:启动元数据装载后为空;
+// getConversation 按需从活库同步读树(bun:sqlite 同步 API,调用方无需 async 化);
+// 新建/fork/导入的会话内存即权威,直接标记,防 ensure 从活库读旧/空树反向覆盖。
+// 未加载的会话不可能有脏标记(写路径必经 getConversation),ensure 读库前无需 flush。
+// 不做换出(LRU):驻留上限 = 本次进程实际打开的会话数,换出会引入半卸载竞态面。
+const loadedConversationIds = new Set<string>();
+
+export function markConversationsLoaded(ids: Iterable<string>): void {
+  for (const idValue of ids) loadedConversationIds.add(idValue);
+}
+export function unmarkConversationsLoaded(ids: Iterable<string>): void {
+  for (const idValue of ids) loadedConversationIds.delete(idValue);
+}
+
+/** 确保会话消息树已在内存。已标记则零成本;活库不可用时容错标记(空树起步,与损坏隔离策略一致)。 */
+export function ensureConversationNodesLoaded(conv: Conversation): void {
+  if (loadedConversationIds.has(conv.id)) return;
+  if (conversationsDb) {
+    try {
+      conv.messages = loadConversationNodesFromDb(conversationsDb, conv.id);
+    } catch (err) {
+      console.warn("[conv-db] 按需加载消息树失败,以空树起步", conv.id, err);
+    }
+  }
+  loadedConversationIds.add(conv.id);
+}
+
+/** 全量加载(导入合并/需要完整树的重操作前调用)。增量:已加载的跳过。 */
+export function ensureAllConversationsLoaded(): void {
+  for (const conv of state.conversations) ensureConversationNodesLoaded(conv);
+}
+
+/** 内存中该会话的消息树是否可信。stats/export 等全量遍历场景用它决定读内存还是瞬时读活库。 */
+export function isConversationLoaded(convId: string): boolean {
+  return loadedConversationIds.has(convId);
+}
+
+/** 标题兜底专用:取第一个节点的第一条消息 parts。未加载时只读单行,不触发整树加载、不驻留。 */
+export function peekFirstMessageParts(convId: string): Message["parts"] {
+  const conv = state.conversations.find((item) => item.id === convId);
+  if (conv && loadedConversationIds.has(convId)) return conv.messages[0]?.messages[0]?.parts ?? [];
+  if (!conversationsDb) return [];
+  try {
+    const row = conversationsDb.prepare(
+      "SELECT messages FROM pc_message_node WHERE conversation_id = ? AND node_index = 0",
+    ).get(convId) as { messages: string } | null;
+    if (!row) return [];
+    return safeParseMessageArray(row.messages)[0]?.parts ?? [];
+  } catch {
+    return [];
+  }
 }
 
 function safeParseMessageArray(raw: string): Message[] {
@@ -382,9 +448,11 @@ export function checkpointConversationsDb(): void {
   conversationsDb?.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 }
 
-/** 按 id 查找内存中的会话。 */
+/** 按 id 查找会话;命中时确保消息树已加载(P1-1 懒加载,对调用方透明)。 */
 export function getConversation(idValue: string): Conversation | undefined {
-  return state.conversations.find((conversation) => conversation.id === idValue);
+  const conversation = state.conversations.find((item) => item.id === idValue);
+  if (conversation) ensureConversationNodesLoaded(conversation);
+  return conversation;
 }
 
 /** 把 Conversation 转成含生成状态快照的 DTO。 */
