@@ -201,12 +201,20 @@ docker run -d \
   --name rikkahub \
   -p 8080:8080 \
   -v ./pc-data:/app/pc-data \
+  -e RIKKAHUB_PASSWORD=your-password \
   rikkahub-pc
 ```
 
 Then open `http://localhost:8080` in your browser. The image uses
 `distroless/base-debian12` and bundles `unzip`/`zip`; clipboard and TTS are
 not available inside a headless container.
+
+**Set `RIKKAHUB_PASSWORD` (or pass `--password <password>`) whenever the server
+is reachable beyond your own machine** — the container binds `0.0.0.0`, so
+without a password anyone on the same network can read your conversations and
+API keys. With a password set, the web UI shows an unlock prompt and every API
+request requires the issued access token. The desktop app binds `127.0.0.1`
+and does not need this.
 
 
 ## 🧰 Tech stack

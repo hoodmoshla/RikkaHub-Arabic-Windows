@@ -40,7 +40,7 @@ import { resolveFileUrl } from "~/lib/files";
 import { normalizeImageForModelUpload } from "~/lib/image-normalize";
 import { DOCUMENT_UPLOAD_ACCEPT, uploadFilesToDraft } from "~/lib/upload";
 import { cn } from "~/lib/utils";
-import api from "~/services/api";
+import api, { appendWebAuthQuery } from "~/services/api";
 import type { UIMessagePart } from "~/types";
 
 export interface ChatInputProps {
@@ -76,7 +76,8 @@ function websocketApiUrl(path: string) {
     typeof window === "undefined"
       ? "ws://localhost:8080"
       : window.location.origin.replace(/^http/i, "ws");
-  return `${base}/api/${path.replace(/^\/+/, "")}`;
+  // WebSocket 无法携带 Authorization header，启用 web 鉴权时 token 走 access_token query
+  return `${base}${appendWebAuthQuery(`/api/${path.replace(/^\/+/, "")}`)}`;
 }
 
 function resampleLinear(input: Float32Array, inputRate: number, outputRate: number) {

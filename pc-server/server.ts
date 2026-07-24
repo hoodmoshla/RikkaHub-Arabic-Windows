@@ -13,6 +13,7 @@ import { asrRealtimeSessions, normalizeAsrProviders, sendAsrAudio, startAsrRealt
 import { DEFAULT_SYSTEM_TTS_ID, defaultTtsProviders, normalizeTtsProviders } from "./media/tts";
 import { normalizeS3Config, normalizeWebDavConfig } from "./backup/storage";
 import { error, mime } from "./api/request";
+import { handleAuthTokenRequest, isWebAuthAuthorized, warnIfExposedWithoutAuth } from "./api/auth";
 import { routeStatic } from "./api/static";
 import { addLog, defaultRequestStats, normalizeRequestStats } from "./api/logs";
 import { routeApi } from "./api/router";
@@ -3659,6 +3660,7 @@ function resolveBindHostname(): string {
 }
 
 const bindHostname = resolveBindHostname();
+warnIfExposedWithoutAuth(bindHostname);
 
 // Origin 白名单：拦截恶意网页对本机服务的跨站请求（浏览器会自动带上 Origin，
 // 而 localhost 服务默认不受同源策略保护——任意网页都能 fetch http://127.0.0.1:8080）。
@@ -3711,6 +3713,14 @@ const { server, port } = (() => {
             try {
               if (url.pathname.startsWith("/api/") && !isAllowedOrigin(request)) {
                 return error("Forbidden: cross-origin request blocked", 403);
+              }
+              // Web 鉴权（阶段 5.2）：仅在配置了访问密码时生效。auth/token 端点先于
+              // 鉴权检查处理（它就是换 token 的入口）；其余 /api/* 一律要求有效 token。
+              if (url.pathname === "/api/auth/token" && request.method === "POST") {
+                return await handleAuthTokenRequest(request);
+              }
+              if (url.pathname.startsWith("/api/") && !isWebAuthAuthorized(request, url)) {
+                return error("Unauthorized", 401);
               }
               if (url.pathname === "/api/asr/realtime" && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
                 const upgraded = server.upgrade(request, { data: { kind: "asr" } as any });
