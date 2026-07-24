@@ -485,7 +485,7 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
       const raw = await executeToolCall(toolCall, assistant, context);
       // ask_user / MCP 审批等 pending 状态直接作为单 output 载荷返回，让协调器走暂停路径。
       if (isRecord(raw) && "pending" in raw) {
-        return { output: [raw as ToolPendingOutput] };
+        return { output: [raw as unknown as ToolPendingOutput] };
       }
       const normalized = await toolResultToParts(raw);
       const output = await realizeToolResult(normalized);

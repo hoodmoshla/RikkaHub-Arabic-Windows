@@ -5,8 +5,10 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": false,
-    // 5.4c 类型硬化第一档：全仓无隐式 any。后续分档推进 strictNullChecks 等。
+    // 5.4c 类型硬化第一档：全仓无隐式 any；本轮第二档：strictNullChecks（空安全）。
+    // 后续档：strictFunctionTypes / strictPropertyInitialization → 最终 strict: true。
     "noImplicitAny": true,
+    "strictNullChecks": true,
     "noEmit": true,
     "skipLibCheck": true,
     "types": ["bun"],

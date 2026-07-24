@@ -215,7 +215,7 @@ export function normalizeState(input: Partial<State>): State {
     1,
   );
   normalized.nextMemoryId = Math.max(
-    normalized.nextMemoryId,
+    normalized.nextMemoryId ?? 1,
     ...(normalized.memories ?? []).map((memory) => memory.id + 1),
     1,
   );

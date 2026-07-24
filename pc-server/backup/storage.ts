@@ -42,7 +42,7 @@ export function normalizeS3Config(value: unknown): S3Config {
   };
 }
 
-function webDavAuthHeader(config: WebDavConfig) {
+function webDavAuthHeader(config: WebDavConfig): Record<string, string> {
   return config.username || config.password
     ? { Authorization: `Basic ${Buffer.from(`${config.username}:${config.password}`).toString("base64")}` }
     : {};
@@ -59,7 +59,7 @@ function webDavUrl(config: WebDavConfig, fileName = "") {
 }
 
 async function webDavRequest(config: WebDavConfig, method: string, fileName = "", init: RequestInit & { timeoutMs?: number } = {}) {
-  const headers = {
+  const headers: Record<string, string> = {
     ...webDavAuthHeader(config),
     ...(init.headers as Record<string, string> | undefined ?? {}),
   };

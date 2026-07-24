@@ -674,7 +674,7 @@ async function waitForConversation(id: string, predicate: (conversation: AnyReco
   const started = Date.now();
   let last: AnyRecord | null = null;
   while (Date.now() - started < timeoutMs) {
-    last = await api(`/api/conversations/${id}`);
+    last = (await api(`/api/conversations/${id}`)) as AnyRecord;
     if (predicate(last)) return last;
     await Bun.sleep(250);
   }
@@ -1018,7 +1018,7 @@ async function runInjectionChainSmoke() {
   await waitForConversation(conversationId, (item) => !item.isGenerating, "injection conversation");
   const first = requests.slice(beforeCount).find((item) => item.path === "/v1/chat/completions" && item.body?.stream === true)?.body;
   assert(first, "injection chat request missing");
-  const requestText = promptTextFromChatBody(first);
+  const requestText = promptTextFromChatBody(first!);
   assert(requestText.includes("MODE_INJECTION_SMOKE"), "mode injection did not enter request body");
   assert(requestText.includes("LOREBOOK_SMOKE"), "lorebook injection did not enter request body");
   return { mode: mode.item.id, lorebook: lorebook.item.id };
@@ -1051,7 +1051,7 @@ async function runSkillChainSmoke() {
   await waitForConversation(conversationId, (item) => !item.isGenerating, "skill context conversation");
   const first = requests.slice(beforeCount).find((item) => item.path === "/v1/chat/completions" && item.body?.stream === true)?.body;
   assert(first, "skill chat request missing");
-  const requestText = promptTextFromChatBody(first);
+  const requestText = promptTextFromChatBody(first!);
   assert(requestText.includes("<name>smoke-skill</name>"), "enabled skill did not enter system context");
   assert(first.tools?.some((tool: AnyRecord) => tool.function?.name === "use_skill"), "use_skill tool was not exposed when skill is enabled");
   await expectApiError(
@@ -1097,7 +1097,7 @@ async function runTemplateTimeAndSettingsSmoke() {
   await waitForConversation(conversationId, (item) => !item.isGenerating, "template time conversation");
   const first = requests.slice(beforeCount).find((item) => item.path === "/v1/chat/completions" && item.body?.stream === true)?.body;
   assert(first, "template/time chat request missing");
-  const requestText = promptTextFromChatBody(first);
+  const requestText = promptTextFromChatBody(first!);
   assert(requestText.includes("WRAPPED(user): 模板和时间提醒 smoke。"), "message template did not wrap user content");
   assert(requestText.includes("<time_reminder>Current time:"), "time reminder was not injected for first user message");
   assert(requestText.includes("since last message"), "time reminder did not inject the one-hour gap branch for later user messages");
@@ -1341,7 +1341,7 @@ async function scrape(urls) {
   const first = requests.slice(beforeCount).find((item) => item.path === "/v1/chat/completions" && item.body?.stream === true)?.body;
   assert(first?.tools?.some((tool: AnyRecord) => tool.function?.name === "search_web"), "search_web was not exposed to provider request");
   assert(first?.tools?.some((tool: AnyRecord) => tool.function?.name === "scrape_web"), "scrape_web was not exposed to provider request");
-  const requestText = promptTextFromChatBody(first);
+  const requestText = promptTextFromChatBody(first!);
   assert(requestText.includes("Available tools: search_web, scrape_web"), "search context was not injected into provider request");
   const stats = await api("/api/stats");
   assert((stats.requestGroups ?? []).some((item: AnyRecord) => item.name === "搜索引擎请求" && Number(item.ok ?? 0) + Number(item.failed ?? 0) >= 2), "stats did not count search/scrape requests");
@@ -1391,7 +1391,7 @@ async function runLocalToolsMemorySmoke() {
   });
   await waitForConversation(followConversationId, (item) => !item.isGenerating, "memory context conversation");
   const followFirst = requests.slice(followBefore).find((item) => item.path === "/v1/chat/completions" && item.body?.stream === true)?.body;
-  assert(promptTextFromChatBody(followFirst).includes("User likes smoke memory"), "stored memory did not enter later provider request");
+  assert(promptTextFromChatBody(followFirst!).includes("User likes smoke memory"), "stored memory did not enter later provider request");
   // 新端点(1.3.2):记忆由 memoryStore 管理,查 memory/assistant/:id。smoke 用 always_assistant,
   // 记忆落在当前助手层。旧 GET /api/settings/memories 已随 memory_tool 旧链路一并废弃(I3 清理)。
   const settingsNow = await api("/api/settings") as AnyRecord;

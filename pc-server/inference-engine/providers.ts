@@ -515,7 +515,7 @@ export async function streamClaudeChatWithTools(
       // The tool part was already created during the stream — find it and run the tool.
       let toolResult: ToolResult;
       try {
-        toolResult = await dispatchCtx!.executeTool(toolCall, dispatchCtx);
+        toolResult = await dispatchCtx!.executeTool!(toolCall, dispatchCtx);
       } catch (err) {
         toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
@@ -607,7 +607,7 @@ export async function fetchClaudeTextWithTools(
     const text = claudeTextFromContent(content);
     if (text) {
       allContent += `${allContent ? "\n" : ""}${text}`;
-      hooks.sink?.({ kind: "text_delta", text });
+      hooks?.sink?.({ kind: "text_delta", text });
     }
     const toolUses = content.filter((item: JsonValue): item is Record<string, JsonValue> => isRecord(item) && item.type === "tool_use");
     if (toolUses.length === 0) return allContent.trim() || "(empty response)";
@@ -652,7 +652,7 @@ export async function fetchClaudeTextWithTools(
       }
       let toolResult: ToolResult;
       try {
-        toolResult = await dispatchCtx!.executeTool(toolCall as ToolCall, dispatchCtx);
+        toolResult = await dispatchCtx!.executeTool!(toolCall as ToolCall, dispatchCtx);
       } catch (err) {
         toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
@@ -894,7 +894,7 @@ export async function streamGoogleChatWithTools(
       };
       let toolResult: ToolResult;
       try {
-        toolResult = await dispatchCtx!.executeTool(toolCall, dispatchCtx);
+        toolResult = await dispatchCtx!.executeTool!(toolCall, dispatchCtx);
       } catch (err) {
         toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
@@ -970,7 +970,7 @@ export async function fetchOpenAiText(
     const content = completionMessageText(raw);
     if (content) {
       allContent += content;
-      hooks.sink?.({ kind: "text_delta", text: content });
+      hooks?.sink?.({ kind: "text_delta", text: content });
     }
     const toolCalls = Array.isArray(assistantMessage.tool_calls) ? assistantMessage.tool_calls : [];
     if (toolCalls.length === 0) return allContent.trim() || "(empty response)";
@@ -1003,7 +1003,7 @@ export async function fetchOpenAiText(
       }
       let toolResult: ToolResult;
       try {
-        toolResult = await dispatchCtx!.executeTool(toolCall as ToolCall, dispatchCtx);
+        toolResult = await dispatchCtx!.executeTool!(toolCall as ToolCall, dispatchCtx);
       } catch (err) {
         toolResult = { output: [toolExecutionErrorPayload(err)] };
       }
@@ -1839,7 +1839,7 @@ export async function fetchOpenAiTextStreaming(
       }
       let toolResult: ToolResult;
       try {
-        toolResult = await dispatchCtx!.executeTool(toolCall as ToolCall, dispatchCtx);
+        toolResult = await dispatchCtx!.executeTool!(toolCall as ToolCall, dispatchCtx);
       } catch (err) {
         toolResult = { output: [toolExecutionErrorPayload(err)] };
       }

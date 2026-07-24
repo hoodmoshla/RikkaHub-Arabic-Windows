@@ -36,7 +36,7 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
     //   macOS:   暂未发布 —— 返回 undefined,前端引导用户去 Release 页手动下载。
     // 容器化部署(Docker 等)无法通过替换二进制持久更新,直接返回 undefined,
     // 前端会提示用 docker pull 升级镜像。
-    const pickAsset = (assets: GithubRelease["assets"]): GithubRelease["assets"][number] | undefined => {
+    const pickAsset = (assets: NonNullable<GithubRelease["assets"]>): NonNullable<GithubRelease["assets"]>[number] | undefined => {
       if (RUNNING_IN_CONTAINER) return undefined;
       if (RUNTIME_PLATFORM === "linux") {
         return assets.find((a) => /linux[-_]x64.*\.tar\.gz$/i.test(a.name ?? ""));

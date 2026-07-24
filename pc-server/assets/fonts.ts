@@ -196,7 +196,9 @@ function readSystemFontFamilies(): string[] {
     /* 枚举失败 → families 为空 → 走兜底清单 */
   }
   cachedRawSystemFamilies = families.size > 0 ? [...families].sort((a, b) => a.localeCompare(b)) : null;
-  return cachedRawSystemFamilies;
+  // 枚举失败时返回 []（而非 null）：签名是 string[]，null 会让调用方遍历崩溃；
+  // 缓存仍存 null 保持"失败不缓存、下次重试"语义。（strictNullChecks 暴露的真实缺陷）
+  return cachedRawSystemFamilies ?? [];
 }
 
 // 系统 FontEntry:剔除与 builtin/custom 同名的(用户:自带与系统重合的用自带的,不重复显示)。

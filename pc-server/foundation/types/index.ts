@@ -8,7 +8,7 @@ export type MupdfModule = typeof import("mupdf");
 
 export * from "./parts";
 
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue | undefined };
 
 export interface Model {
   id: string;
