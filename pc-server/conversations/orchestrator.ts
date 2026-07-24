@@ -69,13 +69,25 @@ import {
 } from "./helpers";
 import { generateSuggestionsForConversation, generateTitleForConversation, limitAuxiliaryText, modelExists, shouldAutoGenerateTitle } from "./auxiliary";
 
+/** 生成入口一次性解析的配置快照（P1-4）。流式生成横跨多个 await 点，用户中途改配置
+ *  （换模型/改工具集/删助手）时，updateSettings 会整体替换 state.settings——持有入口
+ *  时刻的引用即天然快照（旧对象不会被原地修改），保证同一次生成读到同一代配置。 */
+export interface GenerationSnapshot {
+  assistant: Assistant;
+  provider: Provider;
+  model: Model;
+}
+
 export async function callProvider(
   conversation: Conversation,
   signal?: AbortSignal,
   hooks?: StreamHooksWithSink,
+  snapshot?: GenerationSnapshot,
 ) {
-  const assistant = findAssistant(conversation.assistantId);
-  const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
+  const assistant = snapshot?.assistant ?? findAssistant(conversation.assistantId);
+  const picked = snapshot
+    ? { provider: snapshot.provider, model: snapshot.model }
+    : findModel(assistant.chatModelId ?? state.settings.chatModelId);
   const providerItem = picked.provider;
   const selectedModel = picked.model.modelId === "auto" ? "gpt-4o-mini" : picked.model.modelId;
   const url = endpointFor(providerItem);
@@ -190,10 +202,12 @@ export async function callProviderStreaming(
   conversation: Conversation,
   assistantMessage: Message,
   assistantNode: MessageNode,
-  ctx: { signal?: AbortSignal; sink: GenerationEventSink; executeTool: ToolExecutor },
+  ctx: { signal?: AbortSignal; sink: GenerationEventSink; executeTool: ToolExecutor; snapshot?: GenerationSnapshot },
 ): Promise<string> {
-  const assistant = findAssistant(conversation.assistantId);
-  const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
+  const assistant = ctx.snapshot?.assistant ?? findAssistant(conversation.assistantId);
+  const picked = ctx.snapshot
+    ? { provider: ctx.snapshot.provider, model: ctx.snapshot.model }
+    : findModel(assistant.chatModelId ?? state.settings.chatModelId);
   const providerItem = picked.provider;
   const selectedModel = picked.model.modelId === "auto" ? "gpt-4o-mini" : picked.model.modelId;
   const url = endpointFor(providerItem);
@@ -219,7 +233,8 @@ export async function callProviderStreaming(
     executeTool: ctx.executeTool,
   };
   if (providerItem.type !== "openai") {
-    return callProvider(conversation, ctx.signal, hooks);
+    // 把本函数已解析的快照透传，确保 claude/google 路径与 openai 路径读到同一代配置
+    return callProvider(conversation, ctx.signal, hooks, { assistant, provider: picked.provider, model: picked.model });
   }
   if (providerItem.useResponseApi) {
     const responseTools = [
@@ -423,6 +438,9 @@ async function runGeneration(
     signal,
     sink,
     executeTool: deps.executeTool,
+    // P1-4：generateAnswer 入口解析的 assistant/provider/model 贯穿本次生成，
+    // callProviderStreaming 不再从可能已被替换的 state.settings 重新解析。
+    snapshot: { assistant: deps.assistant, provider: deps.providerItem, model: deps.selectedModel },
   });
 }
 
