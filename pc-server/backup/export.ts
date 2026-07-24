@@ -197,7 +197,12 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
  *  rikka_hub.db exactly (ConversationEntity + message_node + room_master_table). */
 function generateRikkaHubDb(dbPath: string): boolean {
   const cachedDbPath = join(dataDir, "rikka_hub_cached.db");
-  if (!existsSync(cachedDbPath)) return false;
+  if (!existsSync(cachedDbPath)) {
+    // 模板在成功导入一次安卓备份后才存在。缺失时导出 zip 静默不含 rikka_hub.db,
+    // 安卓端导入后会话为空——至少留条日志,别让用户以为导出是完整的(DB-first 批1 验证时记录的遗留项)。
+    console.warn("[backup] rikka_hub_cached.db 模板缺失,导出 zip 将不含 rikka_hub.db(安卓端导入无会话)");
+    return false;
+  }
   try {
     const cachedDb = new Database(cachedDbPath, { readonly: true });
     const schemaRows = cachedDb.query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 1 WHEN 'index' THEN 2 ELSE 3 END, name").all() as any[];
