@@ -420,139 +420,76 @@ export async function streamClaudeChatWithTools(
   signal: AbortSignal | undefined,
   hooks: StreamHooksWithSink,
 ) {
+  // P1-5:循环骨架统一到 runStreamingToolLoop,本函数只保留 Claude 特定的 Round Adapter。
   let messages = Array.isArray(body.messages) ? [...body.messages] : [];
-  let currentBody = { ...body, messages, stream: true };
-  let allContent = "";
-  for (let round = 0; round < MAX_TOOL_STEPS; round += 1) {
-    if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
-    const roundStarted = Date.now();
-    const response = await fetch(url, {
+  const initialBody: Record<string, unknown> = { ...body, messages, stream: true };
+
+  const adapter: ProviderRoundAdapter = {
+    providerItem,
+    logUrl: url,
+    logHeaders: headers,
+    fetchRound: (requestBody) => fetch(url, {
       method: "POST",
       headers: { ...headers, Accept: "text/event-stream" },
-      body: JSON.stringify(currentBody),
+      body: JSON.stringify(requestBody),
       signal,
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      addLog({
-        providerId: providerItem.id,
-        providerName: providerItem.name,
-        url,
-        ok: false,
-        status: response.status,
-        kind: round === 0 ? "provider:chat:stream" : "provider:chat:tool_result:stream",
-        durationMs: Date.now() - roundStarted,
-        method: "POST",
-        requestHeaders: headers,
-        responseHeaders: Object.fromEntries(response.headers.entries()),
-        requestBody: jsonBody(currentBody),
-        responseBody: textBody(text),
-        error: textBody(text),
-      });
-      throw new Error(`${providerItem.name} ${response.status}: ${text.slice(0, 500)}`);
-    }
-    const round_ = await readClaudeStreamingRound(response, hooks, assistant, signal);
-    if (hooks.message && round_.usage) {
-      if (hooks.sink) hooks.sink({ kind: "usage", usage: round_.usage });
-      else hooks.message.usage = round_.usage;
-    }
-    addLog({
-      providerId: providerItem.id,
-      providerName: providerItem.name,
-      url,
-      ok: true,
-      status: response.status,
-      kind: round === 0 ? "provider:chat:stream" : "provider:chat:tool_result:stream",
-      durationMs: Date.now() - roundStarted,
-      method: "POST",
-      requestHeaders: headers,
-      responseHeaders: Object.fromEntries(response.headers.entries()),
-      requestBody: jsonBody(currentBody),
-      responseBody: textBody(round_.raw),
-    });
-    if (round_.textOut) {
-      allContent += `${allContent ? "\n" : ""}${round_.textOut}`;
-    }
-    // Collect tool_use blocks and dispatch them.
-    const toolUses = round_.blocks.filter((b) => b.type === "tool_use");
-    if (toolUses.length === 0) {
-      finishReasoningParts(hooks.message!);
-      return allContent.trim() || "(empty response)";
-    }
-    const toolResultBlocks: Array<Record<string, JsonValue>> = [];
-    const dispatchCtx = toolCallContext(hooks);
-    // Pre-scan for any tool that requires user approval. Anthropic requires every tool_use to
-    // be answered by a tool_result in the next turn, so we can't execute a mixed batch where
-    // some tools are pending — the safest correct behavior is to render the pending tool
-    // cards (already created during the stream above) and bail out of the turn. generateAnswer
-    // will see hasPendingToolApproval and pause until the user approves/denies.
-    const hasPendingInBatch = toolUses.some((toolUse) => toolNeedsApproval(String(toolUse.name ?? ""), assistant));
-    if (hasPendingInBatch) {
-      return allContent.trim() || "";
-    }
-    for (const toolUse of toolUses) {
-      const toolCallId = String(toolUse.id ?? id());
-      const toolName = String(toolUse.name ?? "");
-      const toolInput = isRecord(toolUse.input)
-        ? toolUse.input
-        : (typeof toolUse.input === "string" && toolUse.input ? safeJsonParse(toolUse.input) : {});
-      const toolCall = {
-        id: toolCallId,
-        type: "function" as const,
-        function: {
-          name: toolName,
-          arguments: JSON.stringify(toolInput ?? {}),
-        },
-      };
-      // The tool part was already created during the stream — find it and run the tool.
-      let toolResult: ToolResult;
-      try {
-        toolResult = await dispatchCtx!.executeTool!(toolCall, dispatchCtx);
-      } catch (err) {
-        toolResult = { output: [toolExecutionErrorPayload(err)] };
-      }
-      const outputParts = toolResult.output;
-      if (hooks.message) {
-        if (hooks.sink) {
-          hooks.sink({ kind: "tool_result", toolCallId, output: outputParts });
-        } else {
-          hooks.message.parts = hooks.message.parts.map((part) => {
-            if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== toolCallId) return part;
-            return { ...part, input: toolCall.function.arguments, output: outputParts };
-          });
-          touchStream(hooks);
-        }
-      }
-      toolResultBlocks.push({
+    }),
+    async readRound(response, sig) {
+      const round = await readClaudeStreamingRound(response, hooks, assistant, sig);
+      const toolCalls: NormalizedToolCall[] = round.blocks
+        .filter((block) => block.type === "tool_use")
+        .map((toolUse) => {
+          const toolInput = isRecord(toolUse.input)
+            ? toolUse.input
+            : (typeof toolUse.input === "string" && toolUse.input ? safeJsonParse(toolUse.input) : {});
+          return {
+            id: String(toolUse.id ?? id()),
+            name: String(toolUse.name ?? ""),
+            arguments: JSON.stringify(toolInput ?? {}),
+          };
+        });
+      return { text: round.textOut, usage: round.usage, toolCalls, replay: round };
+    },
+    encodeNextTurn(result, toolResults) {
+      const round = result.replay as ClaudeStreamRoundResult;
+      const toolResultBlocks = toolResults.map(({ call, output }) => ({
         type: "tool_result",
-        tool_use_id: toolCallId,
-        content: claudeBlocksFromUiParts(outputParts) as unknown as JsonValue,
-      });
-    }
-    // Anthropic requires us to echo the assistant's content blocks verbatim (including the
-    // tool_use entries) before sending the tool_result user turn. Strip our internal markers
-    // and pass the rest through.
-    const assistantBlocksForReplay = round_.blocks
-      .filter((block) => block && (block.type === "text" || block.type === "thinking" || block.type === "tool_use"))
-      .map((block) => {
-        if (block.type === "tool_use") {
-          return { type: "tool_use", id: block.id, name: block.name, input: block.input ?? {} };
-        }
-        if (block.type === "thinking") {
-          return block.signature
-            ? { type: "thinking", thinking: block.thinking ?? "", signature: block.signature }
-            : { type: "thinking", thinking: block.thinking ?? "" };
-        }
-        return { type: "text", text: block.text ?? "" };
-      });
-    messages = [
-      ...messages,
-      { role: "assistant", content: assistantBlocksForReplay },
-      { role: "user", content: toolResultBlocks },
-    ];
-    currentBody = { ...body, messages, stream: true };
-  }
-  throw new Error("Too many consecutive Claude tool calls without final assistant content");
+        tool_use_id: call.id,
+        content: claudeBlocksFromUiParts(output) as unknown as JsonValue,
+      }));
+      // Anthropic requires us to echo the assistant's content blocks verbatim (including the
+      // tool_use entries) before sending the tool_result user turn. Strip our internal markers
+      // and pass the rest through.
+      const assistantBlocksForReplay = round.blocks
+        .filter((block) => block && (block.type === "text" || block.type === "thinking" || block.type === "tool_use"))
+        .map((block) => {
+          if (block.type === "tool_use") {
+            return { type: "tool_use", id: block.id, name: block.name, input: block.input ?? {} };
+          }
+          if (block.type === "thinking") {
+            return block.signature
+              ? { type: "thinking", thinking: block.thinking ?? "", signature: block.signature }
+              : { type: "thinking", thinking: block.thinking ?? "" };
+          }
+          return { type: "text", text: block.text ?? "" };
+        });
+      messages = [
+        ...messages,
+        { role: "assistant", content: assistantBlocksForReplay },
+        { role: "user", content: toolResultBlocks },
+      ];
+      return { ...body, messages, stream: true };
+    },
+    logResponseBody(result) {
+      return textBody((result.replay as ClaudeStreamRoundResult).raw);
+    },
+    joinTextWithNewline: true,
+    toolCardsCreatedInStream: true,
+    finishReasoningOnFinal: true,
+    exhaustedError: "Too many consecutive Claude tool calls without final assistant content",
+    abortCheckAfterRead: false,
+  };
+  return runStreamingToolLoop(adapter, initialBody, assistant, signal, hooks);
 }
 
 export async function fetchClaudeTextWithTools(
