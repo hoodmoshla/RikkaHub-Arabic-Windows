@@ -40,6 +40,7 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from "~/components/ui/s
 import { useIsMobile } from "~/hooks/use-mobile";
 import { toConversationSummaryUpdate, useConversationList } from "~/hooks/use-conversation-list";
 import { onHotkeyAction, type HotkeyBusAction } from "~/lib/hotkey-events";
+import { applyNodeUpdate } from "~/lib/conversation-sync";
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
 import { useCurrentModel } from "~/hooks/use-current-model";
 import { getAssistantDisplayName, getModelDisplayName } from "~/lib/display";
@@ -408,37 +409,6 @@ function buildEditedParts(session: EditingSession, draftParts: UIMessagePart[]):
   return [...preservedParts, ...appendedAttachments];
 }
 
-function applyNodeUpdate(
-  conversation: ConversationDto,
-  event: ConversationNodeUpdateEventDto,
-): ConversationDto {
-  if (conversation.id !== event.conversationId) {
-    return conversation;
-  }
-
-  const nextNodes = [...conversation.messages];
-  const indexById = nextNodes.findIndex((node) => node.id === event.nodeId);
-  const targetIndex = indexById >= 0 ? indexById : event.nodeIndex;
-
-  if (targetIndex < 0) {
-    return conversation;
-  }
-
-  if (targetIndex < nextNodes.length) {
-    nextNodes[targetIndex] = event.node;
-  } else if (targetIndex === nextNodes.length) {
-    nextNodes.push(event.node);
-  } else {
-    nextNodes.push(event.node);
-  }
-
-  return {
-    ...conversation,
-    messages: nextNodes,
-    updateAt: event.updateAt,
-    isGenerating: event.isGenerating,
-  };
-}
 
 function useConversationDetail(activeId: string | null, updateSummary: ConversationSummaryUpdater) {
   const { t } = useTranslation("page");

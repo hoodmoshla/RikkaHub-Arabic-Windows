@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import api, { sse } from "~/services/api";
+import { mergeConversationList, refreshConversationList, sortConversationList } from "~/lib/conversation-list-ops";
 import type {
   ConversationDto,
   ConversationListDto,
@@ -57,33 +58,22 @@ export function useConversationList({
   const refreshTimerRef = React.useRef<number | null>(null);
   const listRequestEpochRef = React.useRef(0);
 
-  const sortConversations = React.useCallback((items: ConversationListDto[]) => {
-    return [...items].sort((left, right) => {
-      if (left.isPinned !== right.isPinned) {
-        return left.isPinned ? -1 : 1;
-      }
-      return right.updateAt - left.updateAt;
-    });
-  }, []);
+  // FE-P1-3:排序/合并/刷新纯逻辑迁至 lib/conversation-list-ops.ts(可单测),
+  // 这里保留 useCallback 包装以维持既有调用点与依赖数组形状不变。
+  const sortConversations = React.useCallback(
+    (items: ConversationListDto[]) => sortConversationList(items),
+    [],
+  );
 
   const mergeConversations = React.useCallback(
-    (base: ConversationListDto[], incoming: ConversationListDto[]) => {
-      const conversationById = new Map(base.map((item) => [item.id, item]));
-      for (const item of incoming) {
-        conversationById.set(item.id, item);
-      }
-      return sortConversations(Array.from(conversationById.values()));
-    },
-    [sortConversations],
+    (base: ConversationListDto[], incoming: ConversationListDto[]) => mergeConversationList(base, incoming),
+    [],
   );
 
   const refreshConversations = React.useCallback(
-    (previous: ConversationListDto[], incoming: ConversationListDto[], replaceCount: number) => {
-      const incomingIds = new Set(incoming.map((item) => item.id));
-      const tail = previous.slice(replaceCount).filter((item) => !incomingIds.has(item.id));
-      return sortConversations([...incoming, ...tail]);
-    },
-    [sortConversations],
+    (previous: ConversationListDto[], incoming: ConversationListDto[], replaceCount: number) =>
+      refreshConversationList(previous, incoming, replaceCount),
+    [],
   );
 
   const refreshList = React.useCallback(() => {
