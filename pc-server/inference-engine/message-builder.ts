@@ -3,7 +3,7 @@
 // 不处理网络请求、不读写 state.json、不广播 SSE。
 
 import { existsSync, readFileSync } from "node:fs";
-import type { ApiMessage, Assistant, JsonValue, Message, Model, Provider } from "../foundation/types";
+import type { ApiMessage, Assistant, JsonValue, Message, MessagePart, Model, Provider, ToolOutputEntry } from "../foundation/types";
 import { id, isRecord } from "../foundation/utils";
 import { extractStoredFileTextSync, fallbackDocumentText } from "../files/index";
 import { parseToolInput, resolvedToolOutput } from "../tools/format";
@@ -41,7 +41,7 @@ ${content}
 }
 
 
-export function contentPartsForApi(parts: JsonValue[], targetModel?: Model) {
+export function contentPartsForApi(parts: MessagePart[], targetModel?: Model) {
   const stripImageForOcr = targetModel ? !supportsInputModality(targetModel, "IMAGE") : false;
   const result: any[] = [];
   for (const part of parts) {
@@ -101,7 +101,7 @@ export function contentPartsForApi(parts: JsonValue[], targetModel?: Model) {
 }
 
 
-export function apiContentFromParts(parts: JsonValue[], fallbackText = "", targetModel?: Model) {
+export function apiContentFromParts(parts: MessagePart[], fallbackText = "", targetModel?: Model) {
   const contentParts = contentPartsForApi(parts, targetModel);
   if (contentParts.length === 0) return fallbackText;
   if (contentParts.length === 1 && contentParts[0].type === "text") return contentParts[0].text;
@@ -153,9 +153,9 @@ export function claudeContentBlocks(content: any) {
 }
 
 
-export function claudeBlocksFromUiParts(parts: JsonValue[]) {
+export function claudeBlocksFromUiParts(parts: ToolOutputEntry[]) {
   const blocks: any[] = [];
-  for (const part of parts) {
+  for (const part of parts as unknown as Array<Record<string, JsonValue>>) {
     if (!isRecord(part)) continue;
     if (part.type === "text") {
       const text = String(part.text ?? "");
@@ -481,7 +481,7 @@ export const GOOGLE_SAFETY_SETTINGS = [
 
 // 构建 Gemini 的完整请求体。镜像安卓 GoogleProvider.buildCompletionRequestBody。
 
-export function groupAssistantPartsByToolBoundary(parts: JsonValue[]): Array<
+export function groupAssistantPartsByToolBoundary(parts: MessagePart[]): Array<
   { kind: "content"; parts: JsonValue[] } | { kind: "tools"; tools: JsonValue[] }
 > {
   const groups: Array<{ kind: "content"; parts: JsonValue[] } | { kind: "tools"; tools: JsonValue[] }> = [];

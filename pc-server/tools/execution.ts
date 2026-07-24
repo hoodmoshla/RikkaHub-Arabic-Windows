@@ -3,7 +3,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Assistant, JsonValue, StoredFile } from "../foundation/types";
+import type { Assistant, JsonValue, MessagePart, StoredFile, ToolOutputEntry } from "../foundation/types";
 import type { ToolCall, ToolContext, ToolResult } from "../inference-engine/events";
 import { extensionFromMime, getStringArray, isRecord } from "../foundation/utils";
 import { dataDir, filesDir } from "../foundation/paths";
@@ -149,11 +149,11 @@ export async function toolResultToParts(toolResult: unknown): Promise<ToolResult
         }
       }
     }
-    return { output: toolResult.output as JsonValue[], ...(fileCreations.length ? { fileCreations } : {}) };
+    return { output: toolResult.output as ToolOutputEntry[], ...(fileCreations.length ? { fileCreations } : {}) };
   }
   if (typeof toolResult === "string") return { output: [{ type: "text", text: toolResult }] };
   if (isRecord(toolResult) && Array.isArray(toolResult.content)) {
-    const parts: JsonValue[] = [];
+    const parts: MessagePart[] = [];
     const fileCreations: Array<{ data: string; mime: string; prefix: string }> = [];
     for (const item of toolResult.content) {
       if (!isRecord(item)) continue;
@@ -186,8 +186,8 @@ export async function toolResultToParts(toolResult: unknown): Promise<ToolResult
 }
 
 /** 将 ToolResult 中的 fileCreations 落盘，并补充对应的 image parts。 */
-export async function realizeToolResult(result: ToolResult): Promise<JsonValue[]> {
-  const extra: JsonValue[] = [];
+export async function realizeToolResult(result: ToolResult): Promise<ToolOutputEntry[]> {
+  const extra: MessagePart[] = [];
   if (result.fileCreations) {
     for (const fc of result.fileCreations) {
       const url = await saveToolBinaryContent(fc.data, fc.mime, fc.prefix);

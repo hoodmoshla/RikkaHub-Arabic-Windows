@@ -1,7 +1,7 @@
 // api/handlers/conversations.ts — 会话路由（stream、batch-delete、列表/分页/搜索、单会话子路由）
 // 纪律：纯搬迁自 server.ts routeApi()；生成编排（generateAnswer 等）仍在 server.ts，经导入使用。
 
-import type { Conversation, JsonValue } from "../../foundation/types";
+import type { Conversation, JsonValue, MessagePart } from "../../foundation/types";
 import { applyPlaceholders, id, message, textFromParts } from "../../foundation/utils";
 import { saveState, state } from "../../persistence/json-store";
 import {
@@ -123,7 +123,7 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       generating.get(conversation.id)?.abort();
       generating.delete(conversation.id);
       finishInterruptedPendingToolsInConversation(conversation);
-      const processedParts = applyInputRegexTransformParts(body.parts ?? [], assistant);
+      const processedParts = applyInputRegexTransformParts((body.parts ?? []) as MessagePart[], assistant);
       const userMessage = message("USER", markOcrPendingParts(processedParts, picked.model));
       bumpAnalyticsMsgCount();
       const userNode = { id: id(), messages: [userMessage], selectIndex: 0 };
@@ -304,9 +304,10 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       const msg = node.messages[msgIndex];
       const assistant = findAssistant(conversation.assistantId);
       const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
+      // 边界断言：body.parts 来自前端，契约即 UIMessagePart[]
       const editedParts = msg.role === "USER"
-        ? applyInputRegexTransformParts(body.parts ?? msg.parts, assistant)
-        : body.parts ?? msg.parts;
+        ? applyInputRegexTransformParts((body.parts ?? msg.parts) as MessagePart[], assistant)
+        : (body.parts ?? msg.parts) as MessagePart[];
       msg.parts = markOcrPendingParts(editedParts, picked.model);
       msg.translation = null;
       msg.finishedAt = msg.role === "ASSISTANT" ? new Date().toISOString() : null;

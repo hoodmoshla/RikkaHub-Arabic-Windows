@@ -2,8 +2,11 @@
 // 纪律：本文件只放类型，不放运行时值，不引入副作用。
 
 import type { Settings } from "./settings";
+import type { MessagePart } from "./parts";
 
 export type MupdfModule = typeof import("mupdf");
+
+export * from "./parts";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -167,7 +170,7 @@ export interface TtsProvider {
 export interface Message {
   id: string;
   role: "USER" | "ASSISTANT" | "SYSTEM" | "TOOL";
-  parts: JsonValue[];
+  parts: MessagePart[];
   annotations: JsonValue[];
   createdAt: string;
   finishedAt: string | null;

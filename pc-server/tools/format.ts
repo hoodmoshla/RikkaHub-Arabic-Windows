@@ -2,7 +2,7 @@
 // 纪律：纯函数，只负责把工具 part / 输出转成 API 消息可用的字符串或对象。
 
 import { id, isRecord, textFromParts } from "../foundation/utils";
-import type { JsonValue } from "../foundation/types";
+import type { JsonValue, TextPart, ToolErrorOutput, ToolOutputEntry } from "../foundation/types";
 
 export function parseToolInput(value: unknown): Record<string, JsonValue> {
   if (isRecord(value)) return value as Record<string, JsonValue>;
@@ -17,7 +17,7 @@ export function parseToolInput(value: unknown): Record<string, JsonValue> {
   }
 }
 
-export function toolExecutionErrorPayload(err: unknown): JsonValue {
+export function toolExecutionErrorPayload(err: unknown): ToolErrorOutput {
   if (err instanceof Error) {
     return {
       error: `[${err.name || "Error"}] ${err.message}${err.stack ? `\n${err.stack}` : ""}`,
@@ -26,7 +26,7 @@ export function toolExecutionErrorPayload(err: unknown): JsonValue {
   return { error: String(err) };
 }
 
-export function openAiToolOutput(parts: JsonValue[]): string {
+export function openAiToolOutput(parts: ToolOutputEntry[]): string {
   const text = textFromParts(parts);
   if (text) return text;
   return parts.length ? JSON.stringify(parts) : "";
@@ -45,7 +45,7 @@ export function toolOutputForApproval(part: Record<string, unknown>): string {
 
 export function resolvedToolOutput(part: Record<string, unknown>): string {
   const output = Array.isArray(part.output) ? part.output : [];
-  const fromOutput = openAiToolOutput(output as JsonValue[]);
+  const fromOutput = openAiToolOutput(output as ToolOutputEntry[]);
   if (fromOutput) return fromOutput;
   return toolOutputForApproval(part);
 }
@@ -61,10 +61,10 @@ export function apiToolCallFromPart(part: Record<string, unknown>) {
   };
 }
 
-export function partsToToolResultText(parts: JsonValue[]): string {
+export function partsToToolResultText(parts: ToolOutputEntry[]): string {
   if (!Array.isArray(parts)) return "";
   return parts
-    .map((part) => (isRecord(part) && part.type === "text" ? String(part.text ?? "") : ""))
+    .map((part) => (isRecord(part) && part.type === "text" ? String((part as TextPart).text ?? "") : ""))
     .filter(Boolean)
     .join("\n");
 }

@@ -2,7 +2,7 @@
 // 纪律：只负责单个 Message 的 part 增删/改写，不直接写 state.json、不广播 SSE。
 // 调用方通过 hooks.sink 把事件交给协调器处理。
 
-import type { JsonValue, Message } from "../foundation/types";
+import type { JsonValue, Message, ReasoningPart, ToolPart } from "../foundation/types";
 import { isRecord } from "../foundation/utils";
 
 export function setMessageLoading(msg: Message, label = "正在生成回复") {
@@ -27,15 +27,14 @@ export function hasOpenReasoningPart(msg: Message) {
 }
 
 /** 把 loading / 占位 reasoning 替换成工具 part。事件流模式下只发事件，不直接改 message。 */
-export function replaceLoadingReasoningWithTool(msg: Message, toolPart: JsonValue, sink?: (event: any) => void) {
+export function replaceLoadingReasoningWithTool(msg: Message, toolPart: ToolPart, sink?: (event: any) => void) {
   if (sink) {
-    const tp = isRecord(toolPart) ? toolPart : {};
     sink({
       kind: "tool_call_created",
-      toolCallId: String(tp.toolCallId ?? ""),
-      toolName: String(tp.toolName ?? ""),
-      input: String(tp.input ?? ""),
-      approvalState: tp.approvalState ?? { type: "auto" },
+      toolCallId: String(toolPart.toolCallId ?? ""),
+      toolName: String(toolPart.toolName ?? ""),
+      input: String(toolPart.input ?? ""),
+      approvalState: toolPart.approvalState ?? { type: "auto" },
     });
     return;
   }
@@ -75,7 +74,7 @@ export function ensureReasoningPart(hooks: { message?: Message }, metadata?: Rec
     }
     return last;
   }
-  const next = {
+  const next: ReasoningPart = {
     type: "reasoning",
     reasoning: "",
     createdAt: new Date().toISOString(),

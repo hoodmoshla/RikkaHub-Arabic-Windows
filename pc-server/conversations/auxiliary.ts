@@ -1,7 +1,7 @@
 // conversations/auxiliary.ts — 辅助生成（标题/建议/翻译/提示词优化/OCR/会话压缩）
 // 纪律：纯搬迁自 server.ts（阶段 5.3g），行为不变。
 
-import type { Assistant, AuxiliaryTextOptions, Conversation, JsonValue, Message, Model } from "../foundation/types";
+import type { Assistant, AuxiliaryTextOptions, Conversation, JsonValue, Message, MessagePart, Model } from "../foundation/types";
 import { applyPlaceholders, id, isRecord, localeDisplayName, message, textFromParts, uniqueStrings } from "../foundation/utils";
 import { saveState, state } from "../persistence/json-store";
 import { addLog } from "../api/logs";
@@ -316,7 +316,7 @@ function shouldOcrForModel(modelItem: Model) {
   return !supportsInputModality(modelItem, "IMAGE") && modelExists(state.settings.ocrModelId);
 }
 
-export async function attachOcrToImageParts(parts: JsonValue[], modelItem: Model) {
+export async function attachOcrToImageParts(parts: MessagePart[], modelItem: Model) {
   if (!shouldOcrForModel(modelItem)) return parts;
   const next = [...parts];
   for (let index = 0; index < next.length; index += 1) {
@@ -346,7 +346,7 @@ export async function attachOcrToImageParts(parts: JsonValue[], modelItem: Model
   return next;
 }
 
-export function markOcrPendingParts(parts: JsonValue[], modelItem: Model) {
+export function markOcrPendingParts(parts: MessagePart[], modelItem: Model) {
   if (!shouldOcrForModel(modelItem)) return parts;
   return parts.map((part) => {
     if (!isRecord(part) || part.type !== "image") return part;

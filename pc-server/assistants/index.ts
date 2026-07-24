@@ -2,7 +2,7 @@
 // 纪律：负责 defaultAssistant、findAssistant、模板变量、正则变换、Lorebook/Mode 注入。
 // 不直接读写 state；调用方传入 assistants / lorebooks / modeInjections 等集合。
 
-import type { Assistant, JsonValue, Message, Model } from "../foundation/types";
+import type { Assistant, JsonValue, Message, MessagePart, Model, TextPart } from "../foundation/types";
 import {
   cloneJson,
   formatLocalDate,
@@ -100,11 +100,11 @@ export function renderAssistantMessageTemplate(template: string, messageText: st
   return renderTemplate(template || "{{ message }}", variables);
 }
 
-function transformedTextPart(part: JsonValue, text: string): JsonValue {
-  return isRecord(part) ? { ...part, text } : part;
+function transformedTextPart(part: TextPart, text: string): TextPart {
+  return { ...part, text };
 }
 
-export function applyMessageTemplateToParts(parts: JsonValue[], role: string, template: string) {
+export function applyMessageTemplateToParts(parts: MessagePart[], role: string, template: string) {
   return parts.map((part) => {
     if (!isRecord(part) || part.type !== "text") return part;
     return transformedTextPart(part, renderAssistantMessageTemplate(template, String(part.text ?? ""), role));
@@ -140,7 +140,7 @@ export function applyRegexesToText(text: string, regexes: JsonValue[]) {
   return value;
 }
 
-export function applyInputRegexTransformParts(parts: JsonValue[], assistant: Assistant) {
+export function applyInputRegexTransformParts(parts: MessagePart[], assistant: Assistant) {
   const activeRegexes = activeRegexesForScope(assistant, "USER");
   if (activeRegexes.length === 0) return parts;
   return parts.map((part) =>
@@ -164,7 +164,7 @@ export function applyRegexOutputTransform(msg: Message, assistant: Assistant) {
 function applyThinkTagTransform(msg: Message) {
   if (msg.role !== "ASSISTANT") return;
   const now = new Date().toISOString();
-  const transformed: JsonValue[] = [];
+  const transformed: MessagePart[] = [];
   const thinkRegex = /<think>([\s\S]*?)(?:<\/think>|$)/gi;
   for (const part of msg.parts) {
     if (!isRecord(part) || part.type !== "text") {

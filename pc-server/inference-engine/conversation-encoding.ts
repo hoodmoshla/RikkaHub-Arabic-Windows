@@ -192,7 +192,7 @@ export function conversationMessagesForApi(
     const rawContent = textFromParts(selected.parts);
     const role = selected.role === "SYSTEM" ? "system" : selected.role === "TOOL" ? "tool" : "user";
     const placeholderParts = selected.parts.map((part) =>
-      isRecord(part) && part.type === "text"
+      part.type === "text"
         ? { ...part, text: applyPlaceholders(String(part.text ?? ""), templateVariables(rawContent, role, assistant, picked.model)) }
         : part,
     );
@@ -218,7 +218,7 @@ export function conversationResponseApiInput(conversation: Conversation, assista
       const rawContent = textFromParts(selected.parts);
       const role = selected.role === "SYSTEM" ? "system" : selected.role === "TOOL" ? "tool" : "user";
       const placeholderParts = selected.parts.map((part) =>
-        isRecord(part) && part.type === "text"
+        part.type === "text"
           ? { ...part, text: applyPlaceholders(String(part.text ?? ""), templateVariables(rawContent, role, assistant, picked.model)) }
           : part,
       );

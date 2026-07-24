@@ -1,7 +1,7 @@
 // foundation/utils.ts — 纯工具函数
 // 纪律：不依赖业务状态，不引入副作用。
 
-import type { JsonValue, Message } from "./types";
+import type { JsonValue, Message, MessagePart, TextPart, ToolOutputEntry } from "./types";
 
 export function compareSemver(a: string, b: string): number {
   const norm = (v: string) => v.replace(/^v/i, "").trim();
@@ -35,10 +35,10 @@ export function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-export function textFromParts(parts: JsonValue[]) {
+export function textFromParts(parts: ToolOutputEntry[]) {
   return parts
     .map((part) => {
-      if (part && typeof part === "object" && !Array.isArray(part) && part.type === "text") return String(part.text ?? "");
+      if (part && typeof part === "object" && !Array.isArray(part) && part.type === "text") return String((part as TextPart).text ?? "");
       return "";
     })
     .join("\n")
@@ -195,7 +195,7 @@ export function visibleReasoningFromMessage(msg: Message | undefined) {
     : "";
 }
 
-export function reasoningFromParts(parts: JsonValue[]) {
+export function reasoningFromParts(parts: MessagePart[]) {
   return parts
     .map((part) => (isRecord(part) && part.type === "reasoning" ? String(part.reasoning ?? "") : ""))
     .filter(Boolean)
@@ -203,7 +203,7 @@ export function reasoningFromParts(parts: JsonValue[]) {
     .trim();
 }
 
-export function message(role: Message["role"], parts: JsonValue[], modelId: string | null = null): Message {
+export function message(role: Message["role"], parts: MessagePart[], modelId: string | null = null): Message {
   const now = new Date().toISOString();
   return {
     id: id(),

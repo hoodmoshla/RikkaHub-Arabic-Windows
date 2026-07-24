@@ -3,7 +3,7 @@
 // 临时反向依赖 server.ts：本文件仍从 server.ts import 尚未拆出的辅助函数。
 
 import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import type { Assistant, JsonValue, Message, Provider, ApiMessage, ClaudeStreamRoundResult, GoogleStreamRoundResult } from "../foundation/types";
+import type { Assistant, JsonValue, Message, Provider, ApiMessage, ClaudeStreamRoundResult, GoogleStreamRoundResult, ToolPart } from "../foundation/types";
 import { id, isRecord, reasoningFromParts, safeJsonParse, visibleReasoningFromMessage, visibleTextFromMessage } from "../foundation/utils";
 import { MODELS_DEV_CACHE_PATH } from "../foundation/paths";
 import { initialApprovalState, toolNeedsApproval } from "../tools/approval";
@@ -526,7 +526,7 @@ export async function streamClaudeChatWithTools(
         } else {
           hooks.message.parts = hooks.message.parts.map((part) => {
             if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== toolCallId) return part;
-            return { ...part, input: toolCall.function.arguments, output: outputParts as unknown as JsonValue };
+            return { ...part, input: toolCall.function.arguments, output: outputParts };
           });
           touchStream(hooks);
         }
@@ -626,7 +626,7 @@ export async function fetchClaudeTextWithTools(
           arguments: JSON.stringify(isRecord(toolUse.input) ? toolUse.input : {}),
         },
       };
-      const toolPart: Record<string, JsonValue> = {
+      const toolPart: ToolPart = {
         type: "tool",
         toolCallId: toolCall.id,
         toolName: toolCall.function.name,
@@ -660,7 +660,7 @@ export async function fetchClaudeTextWithTools(
       if (hooks?.sink) {
         hooks.sink({ kind: "tool_result", toolCallId: toolCall.id, output: outputParts });
       } else {
-        (toolPart as Record<string, JsonValue>).output = outputParts as unknown as JsonValue;
+        toolPart.output = outputParts;
         touchStream(hooks);
       }
       toolResultBlocks.push({
@@ -905,7 +905,7 @@ export async function streamGoogleChatWithTools(
         } else {
           hooks.message.parts = hooks.message.parts.map((part) => {
             if (!isRecord(part) || part.type !== "tool" || part.toolCallId !== fc.id) return part;
-            return { ...part, input: toolCall.function.arguments, output: outputParts as unknown as JsonValue };
+            return { ...part, input: toolCall.function.arguments, output: outputParts };
           });
           touchStream(hooks);
         }
@@ -979,7 +979,7 @@ export async function fetchOpenAiText(
     const hasPendingInBatch = toolCalls.some((toolCall: any) => toolNeedsApproval(String(toolCall?.function?.name ?? ""), assistant));
     const dispatchCtx = toolCallContext(hooks);
     for (const toolCall of toolCalls) {
-      const toolPart: JsonValue = {
+      const toolPart: ToolPart = {
         type: "tool",
         toolCallId: String(toolCall.id ?? id()),
         toolName: String(toolCall.function?.name ?? ""),
@@ -1011,7 +1011,7 @@ export async function fetchOpenAiText(
       if (hooks?.sink) {
         hooks.sink({ kind: "tool_result", toolCallId: String((toolPart as Record<string, JsonValue>).toolCallId), output: outputParts });
       } else {
-        (toolPart as Record<string, JsonValue>).output = outputParts as unknown as JsonValue;
+        toolPart.output = outputParts;
         touchStream(hooks);
       }
       toolMessages.push({

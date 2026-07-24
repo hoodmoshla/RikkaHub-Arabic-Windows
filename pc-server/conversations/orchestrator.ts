@@ -1,7 +1,7 @@
 // conversations/orchestrator.ts — 会话生成编排（Provider 分发、流式工具循环挂接、生成主链路与收尾任务）
 // 纪律：纯搬迁自 server.ts（阶段 5.3g），行为不变。推理引擎经 GenerationEvent sink 与本层解耦。
 
-import type { ApiMessage, Assistant, Conversation, JsonValue, Message, MessageNode, Model, Provider, StreamHooks } from "../foundation/types";
+import type { ApiMessage, Assistant, Conversation, JsonValue, Message, MessageNode, Model, Provider, StreamHooks, ToolPendingOutput } from "../foundation/types";
 import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolCall, ToolExecutor, ToolResult } from "../inference-engine/events";
 import { id, isRecord, message, textFromParts } from "../foundation/utils";
 import { classifyProxyError } from "../foundation/net";
@@ -483,9 +483,9 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
     // state 写权限的层；后续 Phase 会再把文件落盘拆到 files/ 模块。
     const executeTool: ToolExecutor = async (toolCall, context) => {
       const raw = await executeToolCall(toolCall, assistant, context);
-      // ask_user / MCP 审批等 pending 状态直接作为单 part 返回，让协调器走暂停路径。
+      // ask_user / MCP 审批等 pending 状态直接作为单 output 载荷返回，让协调器走暂停路径。
       if (isRecord(raw) && "pending" in raw) {
-        return { output: [raw as JsonValue] };
+        return { output: [raw as ToolPendingOutput] };
       }
       const normalized = await toolResultToParts(raw);
       const output = await realizeToolResult(normalized);

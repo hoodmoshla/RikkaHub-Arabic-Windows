@@ -1,7 +1,7 @@
 // conversations/helpers.ts — 会话与消息的领域辅助（建会话、预置消息、usage、工具审批状态、生成中止/删除）
 // 纪律：纯搬迁自 server.ts（阶段 5.3f），行为不变；原私有函数为跨模块使用统一补 export。
 
-import type { Assistant, Conversation, JsonValue, Message, MessageNode } from "../foundation/types";
+import type { Assistant, Conversation, JsonValue, Message, MessageNode, MessagePart } from "../foundation/types";
 import { estimateTokens, id, isRecord, message, reasoningFromParts, textFromParts } from "../foundation/utils";
 import { saveState, state } from "../persistence/json-store";
 import { broadcastList, conversationClients } from "../api/sse";
@@ -77,10 +77,11 @@ export function roleFromPreset(value: unknown): Message["role"] {
   return "USER";
 }
 
-export function partsFromPreset(value: unknown): JsonValue[] {
-  if (Array.isArray(value)) return value as JsonValue[];
+export function partsFromPreset(value: unknown): MessagePart[] {
+  // 边界断言：preset 来自 settings JSON，契约即 UIMessagePart[]（与前端/安卓一致）
+  if (Array.isArray(value)) return value as MessagePart[];
   if (typeof value === "string") return [{ type: "text", text: value }];
-  if (isRecord(value) && Array.isArray(value.parts)) return value.parts;
+  if (isRecord(value) && Array.isArray(value.parts)) return value.parts as MessagePart[];
   if (isRecord(value) && typeof value.content === "string") return [{ type: "text", text: value.content }];
   return [];
 }
@@ -98,7 +99,7 @@ export function presetMessageNodes(assistant: Assistant): MessageNode[] {
     .filter(Boolean) as MessageNode[];
 }
 
-export function finishMessage(msg: Message, parts: JsonValue[], usage: JsonValue | null = msg.usage) {
+export function finishMessage(msg: Message, parts: MessagePart[], usage: JsonValue | null = msg.usage) {
   msg.parts = parts;
   msg.finishedAt = new Date().toISOString();
   msg.usage = usage;

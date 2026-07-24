@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { Database } from "bun:sqlite";
-import type { AssistantMemory, Conversation, JsonValue, Message, MessageNode, State, StoredFile } from "../foundation/types";
+import type { AssistantMemory, Conversation, JsonValue, Message, MessageNode, MessagePart, State, StoredFile } from "../foundation/types";
 import { guessMimeFromExt, isRecord, mergeById } from "../foundation/utils";
 import { dataDir, filesDir, skillsDir } from "../foundation/paths";
 import { tempDir } from "../foundation/platform";
@@ -520,7 +520,7 @@ function importAndroidConversations(extractDir: string, dbPath: string, androidF
             ...m,
             // Walk parts deeply and rewrite any Android upload paths into PC file refs. Done
             // per-message so a corrupted node only affects itself, not the whole conversation.
-            parts: rewriteAndroidFileUrlsDeep(m.parts, androidFilenameToPcId) as JsonValue[],
+            parts: rewriteAndroidFileUrlsDeep(m.parts, androidFilenameToPcId) as MessagePart[],
           }));
         return {
           id: String(node.id ?? Bun.randomUUIDv7()),
@@ -634,7 +634,7 @@ function normalizeAndroidMessage(raw: unknown): Message | null {
   return {
     id: typeof r.id === "string" ? r.id : Bun.randomUUIDv7(),
     role: mappedRole,
-    parts: Array.isArray(r.parts) ? (r.parts as JsonValue[]) : [],
+    parts: Array.isArray(r.parts) ? (r.parts as MessagePart[]) : [],
     annotations: Array.isArray(r.annotations) ? (r.annotations as JsonValue[]) : [],
     createdAt: typeof r.createdAt === "string" ? r.createdAt : new Date().toISOString(),
     finishedAt: typeof r.finishedAt === "string" ? r.finishedAt : null,
