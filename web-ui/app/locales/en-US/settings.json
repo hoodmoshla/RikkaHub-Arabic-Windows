@@ -287,10 +287,6 @@
         "title": "Time info",
         "desc": "Reads local PC time, timezone, weekday and timestamp."
       },
-      "js_engine": {
-        "title": "JavaScript engine",
-        "desc": "For calculations and plain-text data conversion. No DOM/Node API."
-      },
       "clipboard": {
         "title": "Clipboard",
         "desc": "Read/write the system clipboard; the model shouldn't write unless explicitly asked."

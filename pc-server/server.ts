@@ -54,7 +54,6 @@ import {
   readSkillBody,
   runAskUserTool,
   runClipboardTool,
-  runEvalJavascriptTool,
   runGetTimeInfoTool,
   runTextToSpeechTool,
   safeSkillDir,
@@ -1629,7 +1628,6 @@ async function executeToolCall(
     return runScrapeWeb(args);
   }
   if (name === "get_time_info") return runGetTimeInfoTool();
-  if (name === "eval_javascript") return runEvalJavascriptTool(args);
   if (name === "clipboard_tool") return runClipboardTool(args);
   if (name === "text_to_speech") return runTextToSpeechTool(args);
   if (name === "ask_user") return runAskUserTool(args);

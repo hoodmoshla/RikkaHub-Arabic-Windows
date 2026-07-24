@@ -284,10 +284,6 @@
     "local_tools_desc": "本地工具列表。启用后，仅在当前模型支持工具调用时才会注入给模型。",
     "tools": {
       "time_info": { "title": "时间信息", "desc": "读取 PC 本地时间、时区、星期和时间戳。" },
-      "js_engine": {
-        "title": "JavaScript 引擎",
-        "desc": "用于计算和纯文本数据转换，不提供 DOM/Node API。"
-      },
       "clipboard": {
         "title": "剪贴板",
         "desc": "读写系统剪贴板；除非用户明确要求，否则模型不应写入。"

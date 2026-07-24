@@ -133,20 +133,6 @@ Do not mention to the user that you are saving a memory.`,
       },
     });
   }
-  if (enabled.has("javascript_engine")) {
-    tools.push({
-      type: "function" as const,
-      function: {
-        name: "eval_javascript",
-        description: "Execute JavaScript code using QuickJS engine (ES2020). The result is the value of the last expression in the code. For calculations with decimals, use toFixed() to control precision. Console output (log/info/warn/error) is captured and returned in 'logs' field. No DOM or Node.js APIs available. Example: '1 + 2' returns 3; 'const x = 5; x * 2' returns 10.",
-        parameters: {
-          type: "object",
-          properties: { code: { type: "string", description: "JavaScript code to evaluate" } },
-          required: ["code"],
-        },
-      },
-    });
-  }
   if (enabled.has("clipboard")) {
     tools.push({
       type: "function" as const,

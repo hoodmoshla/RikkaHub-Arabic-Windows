@@ -21,21 +21,6 @@ export function runGetTimeInfoTool() {
   };
 }
 
-export function runEvalJavascriptTool(args: Record<string, JsonValue>) {
-  const code = String(args.code ?? "");
-  if (code.length > 20_000) throw new Error("JavaScript code is too long");
-  const logs: string[] = [];
-  const toolConsole = {
-    log: (...values: unknown[]) => logs.push(`[LOG] ${values.map((value) => String(value)).join(" ")}`),
-    info: (...values: unknown[]) => logs.push(`[INFO] ${values.map((value) => String(value)).join(" ")}`),
-    warn: (...values: unknown[]) => logs.push(`[WARN] ${values.map((value) => String(value)).join(" ")}`),
-    error: (...values: unknown[]) => logs.push(`[ERROR] ${values.map((value) => String(value)).join(" ")}`),
-  };
-  const fn = new Function("code", "console", "process", "Bun", "require", "globalThis", "\"use strict\"; return eval(code);");
-  const result = fn(code, toolConsole, undefined, undefined, undefined, undefined);
-  return { ...(logs.length ? { logs: logs.join("\n") } : {}), result: result == null ? null : String(result) };
-}
-
 export async function runClipboardTool(args: Record<string, JsonValue>) {
   const action = String(args.action ?? "").trim();
   if (action === "write") {

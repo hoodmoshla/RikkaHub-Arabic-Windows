@@ -722,11 +722,6 @@ export function AssistantsSection({
             <div className="mt-3 grid gap-3 md:grid-cols-2">
               {[
                 ["time_info", t("settings:assistants.tools.time_info.title"), t("settings:assistants.tools.time_info.desc")],
-                [
-                  "javascript_engine",
-                  t("settings:assistants.tools.js_engine.title"),
-                  t("settings:assistants.tools.js_engine.desc"),
-                ],
                 ["clipboard", t("settings:assistants.tools.clipboard.title"), t("settings:assistants.tools.clipboard.desc")],
                 ["tts", t("settings:assistants.tools.tts.title"), t("settings:assistants.tools.tts.desc")],
                 ["ask_user", t("settings:assistants.tools.ask_user.title"), t("settings:assistants.tools.ask_user.desc")],

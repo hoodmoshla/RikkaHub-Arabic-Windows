@@ -156,7 +156,7 @@ const mockServer = Bun.serve({
           }
           if (toolText.includes("User likes smoke memory") || toolText.includes("\"result\":\"42\"")) {
             return sse([
-              { choices: [{ delta: { content: "记忆和 JS 工具结果已收到" } }] },
+              { choices: [{ delta: { content: "记忆和时间工具结果已收到" } }] },
               { choices: [{ delta: { content: "，继续回复。" } }] },
               "[DONE]",
             ]);
@@ -238,9 +238,9 @@ const mockServer = Bun.serve({
             "[DONE]",
           ]);
         }
-        if (body.tools?.some((tool: AnyRecord) => tool.function?.name === "save_memory") && promptText.includes("记忆和 JS 工具")) {
+        if (body.tools?.some((tool: AnyRecord) => tool.function?.name === "save_memory") && promptText.includes("记忆和时间工具")) {
           return sse([
-            { choices: [{ delta: { reasoning_content: "准备写入记忆并执行 JS。" } }] },
+            { choices: [{ delta: { reasoning_content: "准备写入记忆并读取时间。" } }] },
             {
               choices: [{
                 delta: {
@@ -260,7 +260,7 @@ const mockServer = Bun.serve({
                     index: 1,
                     id: "call_js_1",
                     type: "function",
-                    function: { name: "eval_javascript", arguments: "{\"code\":\"40 + 2\"}" },
+                    function: { name: "get_time_info", arguments: "{}" },
                   }],
                 },
               }],
@@ -1353,7 +1353,7 @@ async function runLocalToolsMemorySmoke() {
   await configureAssistantPatch({
     systemPrompt: "Base system prompt.",
     streamOutput: true,
-    localTools: [{ type: "javascript_engine" }],
+    localTools: [{ type: "time_info" }],
     enabledSkills: [],
     mcpServers: [],
     enableMemory: true,
@@ -1369,19 +1369,19 @@ async function runLocalToolsMemorySmoke() {
   const conversationId = `smoke-local-tools-${Date.now()}`;
   await api(`/api/conversations/${conversationId}/messages`, {
     method: "POST",
-    body: JSON.stringify({ parts: [{ type: "text", text: "请调用记忆和 JS 工具。"}] }),
+    body: JSON.stringify({ parts: [{ type: "text", text: "请调用记忆和时间工具。"}] }),
   });
   const conversation = await waitForConversation(
     conversationId,
-    (item) => !item.isGenerating && assistantMessages(item).some((msg: AnyRecord) => textFromParts(msg.parts ?? []).includes("记忆和 JS 工具结果已收到")),
+    (item) => !item.isGenerating && assistantMessages(item).some((msg: AnyRecord) => textFromParts(msg.parts ?? []).includes("记忆和时间工具结果已收到")),
     "local tools conversation",
   );
   const assistantMessage = assistantMessages(conversation)[0];
   assert(assistantMessage.parts.some((part: AnyRecord) => part.type === "tool" && part.toolName === "save_memory" && JSON.stringify(part.output ?? []).includes("User likes smoke memory")), "save_memory output was not persisted");
-  assert(assistantMessage.parts.some((part: AnyRecord) => part.type === "tool" && part.toolName === "eval_javascript" && JSON.stringify(part.output ?? []).includes("42")), "eval_javascript output was not persisted");
+  assert(assistantMessage.parts.some((part: AnyRecord) => part.type === "tool" && part.toolName === "get_time_info" && JSON.stringify(part.output ?? []).includes("timestamp_ms")), "get_time_info output was not persisted");
   const first = requests.slice(beforeCount).find((item) => item.path === "/v1/chat/completions" && item.body?.stream === true)?.body;
   assert(first?.tools?.some((tool: AnyRecord) => tool.function?.name === "save_memory"), "save_memory was not exposed to provider request");
-  assert(first?.tools?.some((tool: AnyRecord) => tool.function?.name === "eval_javascript"), "eval_javascript was not exposed to provider request");
+  assert(first?.tools?.some((tool: AnyRecord) => tool.function?.name === "get_time_info"), "get_time_info was not exposed to provider request");
 
   const followBefore = requests.length;
   const followConversationId = `smoke-memory-context-${Date.now()}`;
