@@ -3646,6 +3646,21 @@ function resolvePreferredPort(): number {
   return 8080;
 }
 
+// 绑定地址：默认只监听 127.0.0.1，局域网内其他设备无法直接访问（服务器目前没有鉴权，
+// 全网卡监听等于把全部会话与 API Key 暴露给同一网络的任何人）。容器场景必须 0.0.0.0
+// 否则宿主机端口映射不通。确有局域网访问需求的用户可用 --host 0.0.0.0 或 RIKKAHUB_HOST
+// 环境变量显式放开——这是有意识的选择，而不是默认暴露。
+function resolveBindHostname(): string {
+  const hostIndex = Bun.argv.findIndex((arg) => arg === "--host");
+  const hostEqualsArg = Bun.argv.find((arg) => arg.startsWith("--host="));
+  const cli = hostEqualsArg?.split("=")[1] ?? (hostIndex >= 0 ? Bun.argv[hostIndex + 1] : undefined);
+  if (cli) return cli;
+  if (process.env.RIKKAHUB_HOST) return process.env.RIKKAHUB_HOST;
+  if (RUNNING_IN_CONTAINER) return "0.0.0.0";
+  return "127.0.0.1";
+}
+
+const bindHostname = resolveBindHostname();
 const preferredPort = resolvePreferredPort();
 // Try the preferred port first; on EADDRINUSE walk upward. Containers don't walk — a port
 // collision inside a container is unexpected, and silently hopping would hide a real problem.
@@ -3658,6 +3673,7 @@ const { server, port } = (() => {
     try {
       return {
         server: Bun.serve({
+          hostname: bindHostname,
           port: tryPort,
           idleTimeout: 0,
           // Default is 128 MB — way too small. Users have reported backup zips of 10+ GB
