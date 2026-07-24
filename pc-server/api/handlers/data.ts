@@ -27,7 +27,7 @@ import {
 } from "../../backup/storage";
 import { error, json, readJson } from "../request";
 import { sseFrame } from "../sse";
-import { updateSettings } from "../../server";
+import { updateSettings } from "../../app-config";
 
 export async function handleDataRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
   if (path === "data/webdav/config" && request.method === "POST") {

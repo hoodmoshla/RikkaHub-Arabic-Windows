@@ -6,7 +6,7 @@ import type { Conversation, JsonValue, MessageNode } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { toConversationDto } from "../conversations";
 import { memoryStore } from "../memory/index";
-import { generating } from "../server";
+import { generating } from "../conversations/generation-state";
 
 // Streaming clients receive a node_update per chunk. Since each update carries the full growing
 // MessageNode (cumulative text), naive per-chunk broadcasts turn into O(N^2) bytes over SSE and

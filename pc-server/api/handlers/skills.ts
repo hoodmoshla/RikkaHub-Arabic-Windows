@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { state } from "../../persistence/json-store";
 import { defaultSkillContent, listSkillFiles, listSkills, parseSkillFrontmatter, readSkillContent, safeSkillDir, skillMetadataFromFile } from "../../tools/skills";
 import { error, json, readJson } from "../request";
-import { updateSettings } from "../../server";
+import { updateSettings } from "../../app-config";
 import { importSkillFromBuffer, importSkillFromGitHub } from "../../tools/skills-import";
 
 export async function handleSkillRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {

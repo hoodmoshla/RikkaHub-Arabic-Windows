@@ -9,7 +9,7 @@ import { callImageGeneration } from "../../media/image-gen";
 import { defaultAsrProvider, normalizeAsrProviders, transcribeAudioWithAsrProvider } from "../../media/asr";
 import { DEFAULT_SYSTEM_TTS_ID, defaultTtsProvider, generateSpeechWithTtsProvider, normalizeTtsProviders } from "../../media/tts";
 import { error, json, readJson } from "../request";
-import { updateSettings } from "../../server";
+import { updateSettings } from "../../app-config";
 
 export async function handleMediaRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
   if (path === "settings/asr-provider/detail" && request.method === "POST") {

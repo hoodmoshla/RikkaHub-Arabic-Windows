@@ -5,7 +5,7 @@ import { saveState, state } from "../../persistence/json-store";
 import { memoryStore } from "../../memory/index";
 import { error, json, readJson } from "../request";
 import { broadcastMemoryUpdate, broadcastSettings, memoryClients, openSse } from "../sse";
-import { updateSettings } from "../../server";
+import { updateSettings } from "../../app-config";
 
 export async function handleMemoryRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
   // ===== memory 路由(1.3.2)=====

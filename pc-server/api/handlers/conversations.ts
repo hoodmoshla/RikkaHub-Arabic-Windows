@@ -27,19 +27,15 @@ import {
   attachOcrToImageParts,
   compressConversation,
   DEFAULT_TRANSLATION_PROMPT,
-  deleteConversationsById,
   englishLanguageName,
-  ensureConversation,
   fetchAuxiliaryText,
-  findAssistant,
-  finishInterruptedPendingToolsInConversation,
   generateAnswer,
   generateTitleForConversation,
-  generating,
-  hasPendingToolApproval,
   isQwenMtModel,
   markOcrPendingParts,
 } from "../../server";
+import { deleteConversationsById, ensureConversation, findAssistant, finishInterruptedPendingToolsInConversation, hasPendingToolApproval } from "../../conversations/helpers";
+import { generating } from "../../conversations/generation-state";
 
 export async function handleConversationRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   if (path === "conversations/stream") {

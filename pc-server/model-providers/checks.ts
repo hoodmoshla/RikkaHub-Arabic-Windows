@@ -1,6 +1,7 @@
 // model-providers/checks.ts — Provider 连通性测试、模型列表与余额拉取
 // 纪律：纯搬迁自 server.ts（阶段 5.3a），行为不变。依赖注入见 imports；不反向依赖 ../server。
 
+import { updateSettings } from "../app-config";
 import type { Assistant, JsonValue, Model, Provider } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { addLog } from "../api/logs";
@@ -13,6 +14,7 @@ import {
   normalizeFetchedModels,
   applyRequestHeaders,
   providerHeaders,
+  providerTestCorePassed,
   providerTestModel,
   textBody,
 } from "./index";
@@ -428,4 +430,16 @@ export async function runProviderCheck(providerItem: Provider, mode: "non_stream
     endpoint: url,
     preview: textBody(text || (mode === "stream" && response.ok ? "流式测试已收到事件" : "")),
   };
+}
+
+export function markProviderTestResult(providerItem: Provider, checks: Array<{ mode: string; ok: boolean }>) {
+  if (!providerTestCorePassed(checks)) return;
+  updateSettings({
+    ...state.settings,
+    providers: state.settings.providers.map((item) =>
+      item.id === providerItem.id
+        ? { ...item, testPassed: true, testPassedAt: Date.now() }
+        : item,
+    ),
+  });
 }

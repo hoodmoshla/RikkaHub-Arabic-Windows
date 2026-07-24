@@ -33,14 +33,14 @@ import {
   DEFAULT_TRANSLATION_PROMPT,
   defaultSettings,
   deleteById,
-  markProviderTestResult,
   normalizePreferredPort,
   normalizeProxyConfig,
   reorderByIds,
-  updateSettings,
   upsertById,
   validateKnownJsonIds,
 } from "../../server";
+import { updateSettings } from "../../app-config";
+import { markProviderTestResult } from "../../model-providers/checks";
 import { endpointFor, fetchProviderBalance, fetchProviderModels, runProviderCheck } from "../../model-providers/checks";
 
 export async function handleSettingsRoutes(request: Request, url: URL, path: string): Promise<Response | null> {

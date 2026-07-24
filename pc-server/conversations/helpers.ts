@@ -1,0 +1,205 @@
+// conversations/helpers.ts — 会话与消息的领域辅助（建会话、预置消息、usage、工具审批状态、生成中止/删除）
+// 纪律：纯搬迁自 server.ts（阶段 5.3f），行为不变；原私有函数为跨模块使用统一补 export。
+
+import type { Assistant, Conversation, JsonValue, Message, MessageNode } from "../foundation/types";
+import { estimateTokens, id, isRecord, message, reasoningFromParts, textFromParts } from "../foundation/utils";
+import { saveState, state } from "../persistence/json-store";
+import { broadcastList, conversationClients } from "../api/sse";
+import { deletePcConversations, flushConvDirtyNow, getConversation, persistConversation, selectedConversationMessages } from "./index";
+import { generating } from "./generation-state";
+import { findAssistant as findAssistantCore } from "../assistants";
+import { fillContextLimit } from "../inference-engine/providers";
+
+export function abortConversationGeneration(conversationId: string) {
+  const wasGenerating = generating.has(conversationId);
+  generating.get(conversationId)?.abort();
+  generating.delete(conversationId);
+  // Mirror completeConversationGeneration: when the user manually stops generation,
+  // the sidebar's per-conversation streaming indicator also needs to flip off, and
+  // since broadcastNodeUpdateNow no longer calls broadcastList on every chunk we
+  // have to refresh the list explicitly here.
+  if (wasGenerating) broadcastList();
+  // 1.2.6:用户中止也要 reconcile 活库——abort 提前 delete 了 generating,后续
+  // completeConversationGeneration 的 if 会失败而跳过 reconcile,所以这里补一次全量
+  // persistConversation。流式中删会话(deleteConversationsById 先调本函数)时
+  // getConversation 仍返回会话(filter 删除在后),persist 后由 deletePcConversations 清掉,幂等无害。
+  flushConvDirtyNow();
+  const conv = getConversation(conversationId);
+  if (conv) persistConversation(conv);
+}
+
+export function deleteConversationsById(ids: Set<string>) {
+  for (const conversationId of ids) {
+    abortConversationGeneration(conversationId);
+    conversationClients.delete(conversationId);
+  }
+  // 先删内存,再删活库——避免删活库后残余脏标记 flush 又把节点 upsert 回来
+  // (flushConvDirty 检查 state.conversations 存在性,内存没了就跳过)。
+  state.conversations = state.conversations.filter((item) => !ids.has(item.id));
+  deletePcConversations(Array.from(ids));
+  saveState();
+  broadcastList();
+}
+
+export function findAssistant(idValue = state.settings.assistantId) {
+  return findAssistantCore(state.settings.assistants, idValue);
+}
+
+export function ensureConversation(idValue: string) {
+  let conversation = getConversation(idValue);
+  if (!conversation) {
+    const now = Date.now();
+    const assistant = findAssistant(state.settings.assistantId);
+    conversation = {
+      id: idValue,
+      assistantId: assistant.id,
+      systemPrompt: null,
+      title: "",
+      messages: presetMessageNodes(assistant),
+      truncateIndex: -1,
+      chatSuggestions: [],
+      isPinned: false,
+      createAt: now,
+      updateAt: now,
+    };
+    state.conversations.unshift(conversation);
+    // 1.2.6:新建会话 persist 进活库(建会话行),否则后续流式 upsert 该会话的节点时
+    // FK 失败(pc_message_node.conversation_id 引用 pc_conversation.id),且流式中崩溃
+    // 会丢会话行。
+    persistConversation(conversation);
+  }
+  return conversation;
+}
+
+export function roleFromPreset(value: unknown): Message["role"] {
+  const role = String(value ?? "USER").toUpperCase();
+  if (role === "ASSISTANT" || role === "SYSTEM" || role === "TOOL") return role;
+  return "USER";
+}
+
+export function partsFromPreset(value: unknown): JsonValue[] {
+  if (Array.isArray(value)) return value as JsonValue[];
+  if (typeof value === "string") return [{ type: "text", text: value }];
+  if (isRecord(value) && Array.isArray(value.parts)) return value.parts;
+  if (isRecord(value) && typeof value.content === "string") return [{ type: "text", text: value.content }];
+  return [];
+}
+
+export function presetMessageNodes(assistant: Assistant): MessageNode[] {
+  return (Array.isArray(assistant.presetMessages) ? assistant.presetMessages : [])
+    .map((preset) => {
+      if (!isRecord(preset)) return null;
+      const msg = message(roleFromPreset(preset.role), partsFromPreset(preset), String(preset.modelId ?? "") || null);
+      if (typeof preset.id === "string") msg.id = preset.id;
+      if (typeof preset.createdAt === "string") msg.createdAt = preset.createdAt;
+      if (typeof preset.finishedAt === "string" || preset.finishedAt === null) msg.finishedAt = preset.finishedAt as string | null;
+      return { id: id(), messages: [msg], selectIndex: 0 };
+    })
+    .filter(Boolean) as MessageNode[];
+}
+
+export function finishMessage(msg: Message, parts: JsonValue[], usage: JsonValue | null = msg.usage) {
+  msg.parts = parts;
+  msg.finishedAt = new Date().toISOString();
+  msg.usage = usage;
+}
+
+export function appendTextPart(msg: Message, text: string) {
+  const last = msg.parts[msg.parts.length - 1];
+  if (last && typeof last === "object" && !Array.isArray(last) && last.type === "text") {
+    last.text = String(last.text ?? "") + text;
+  } else {
+    msg.parts.push({ type: "text", text });
+  }
+}
+
+export function summaryAsText(msg: Message) {
+  return `[${msg.role}]: ${textFromParts(msg.parts)}`;
+}
+export function estimatePromptTokensForConversation(conversation: Conversation) {
+  return selectedConversationMessages(conversation)
+    .filter((msg) => msg.role !== "ASSISTANT")
+    .reduce((sum, msg) => sum + estimateTokens(textFromParts(msg.parts)), 0);
+}
+
+export function ensureUsage(msg: Message, conversation?: Conversation) {
+  const existing = msg.usage;
+  if (existing && typeof existing === "object" && !Array.isArray(existing)) return;
+  const completionTokens = estimateTokens(textFromParts(msg.parts) || reasoningFromParts(msg.parts));
+  const promptTokens = conversation ? estimatePromptTokensForConversation(conversation) : 0;
+  msg.usage = {
+    promptTokens,
+    completionTokens,
+    totalTokens: promptTokens + completionTokens,
+    cachedTokens: 0,
+    estimated: true,
+  };
+  fillContextLimit(msg);
+}
+
+export function toolApprovalType(part: JsonValue) {
+  return isRecord(part) && isRecord(part.approvalState) ? String(part.approvalState.type ?? "auto") : "auto";
+}
+
+export function hasToolParts(msg: Message) {
+  return msg.parts.some((part) => isRecord(part) && part.type === "tool");
+}
+
+export function hasPendingToolApproval(msg: Message) {
+  return msg.parts.some((part) => isRecord(part) && part.type === "tool" && toolApprovalType(part) === "pending");
+}
+
+export function canResumeToolExecution(part: JsonValue) {
+  const type = toolApprovalType(part);
+  return type === "approved" || type === "denied" || type === "answered";
+}
+
+export function hasResumableToolParts(msg: Message) {
+  return msg.parts.some((part) =>
+    isRecord(part) &&
+    part.type === "tool" &&
+    (!Array.isArray(part.output) || part.output.length === 0) &&
+    canResumeToolExecution(part)
+  );
+}
+
+// 是否为"正在生成"的空 ASSISTANT 占位:没有任何可发送内容(文本/思维链/工具/媒体),
+// 只有 loading 占位或完全为空。组装上下文时它不是历史消息,不应占用 contextMessageSize
+// 名额——否则 size=1 时 slice 只取到它(空内容随后被 appendAssistantApiMessages 过滤),
+// 把用户真正的输入挤出上下文,模型只收到 system prompt(issue #16)。
+// 注意:工具恢复场景下尾部 ASSISTANT 已带 tool 部分与结果(模型续轮必须看到),故必须靠
+// "有无内容"判定,而不是 finishedAt——恢复消息 finishedAt 同样为 null 但不能剔除。
+
+// 把上一条 ASSISTANT 消息里所有处于 pending 状态的工具（典型场景：ask_user
+// 没等用户点选项，用户直接发了下一条消息或要求重生成）标记为"用户已取消"，
+// 让本轮生成能干净地接续——对齐安卓 commit 05c12488 的 finishInterruptedPendingTools。
+// 返回 true 表示发生了修改，调用方需要广播状态变更。
+export function finishInterruptedPendingToolsInConversation(conversation: Conversation): boolean {
+  const lastNode = conversation.messages[conversation.messages.length - 1];
+  if (!lastNode) return false;
+  const lastMessage = lastNode.messages[lastNode.selectIndex] ?? lastNode.messages[0];
+  if (!lastMessage || lastMessage.role !== "ASSISTANT") return false;
+  let changed = false;
+  lastMessage.parts = lastMessage.parts.map((part) => {
+    if (!isRecord(part) || part.type !== "tool") return part;
+    if (toolApprovalType(part) !== "pending") return part;
+    changed = true;
+    return {
+      ...part,
+      approvalState: {
+        type: "denied",
+        reason: "User cancelled by sending a new message",
+      },
+      output: Array.isArray(part.output) && part.output.length > 0 ? part.output : [
+        { type: "text", text: "Tool execution cancelled by user (new message sent)." },
+      ],
+    };
+  });
+  if (!changed) return false;
+  if (!lastMessage.finishedAt) lastMessage.finishedAt = new Date().toISOString();
+  // 清理 loading 占位符（如果旧 generation 留下了）
+  lastMessage.parts = lastMessage.parts.filter((part) =>
+    !(isRecord(part) && part.type === "loading"),
+  );
+  return true;
+}
