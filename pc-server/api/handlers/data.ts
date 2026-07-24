@@ -9,6 +9,8 @@ import { dataDir } from "../../foundation/paths";
 import { tempDir } from "../../foundation/platform";
 import { friendlyRequestError } from "../../foundation/net";
 import { state } from "../../persistence/json-store";
+import { getConversationsDb } from "../../conversations";
+import { countConversations } from "../../conversations/read-queries";
 import { createSettingsBackupZipToPath } from "../../backup/export";
 import { applyAndroidZipBackupFromPath, applyBackupPayload, customJsImportWarning, customJsScriptSignatures } from "../../backup/import";
 import {
@@ -229,7 +231,7 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
     return json({
       hasAndroidSchema: !!schemaInfo,
       schemaInfo,
-      conversationCount: state.conversations.length,
+      conversationCount: getConversationsDb() ? countConversations(getConversationsDb()!) : 0,
     });
   }
   if (path === "data/register-schema" && request.method === "POST") {

@@ -4,7 +4,8 @@
 import type { DailyStat } from "../foundation/types";
 import { dateKey, textFromParts } from "../foundation/utils";
 import { state } from "../persistence/json-store";
-import { getConversationsDb, isConversationLoaded, loadConversationNodesFromDb } from "./index";
+import { flushConvDirtyNow, getConversationsDb, loadConversationNodesFromDb } from "./index";
+import { listAllConversationMetas } from "./read-queries";
 
 export function computeStats() {
   const daily = new Map<string, DailyStat>();
@@ -26,18 +27,18 @@ export function computeStats() {
     }
   }
 
-  // P1-1 懒加载:已加载会话读内存(含未 flush 的最新消息,与旧全内存版等价);
-  // 未加载会话从活库瞬时读(parse-统计-释放,不驻留内存)。
+  // DB-first 批1:统计全走活库(先 flush 对齐脏数据,静息态与旧内存版逐字等价;
+  // 流式期间仅"最后 200ms 内的增量"可能未计入,统计场景不可感知)。逐会话瞬时读,不驻留。
+  flushConvDirtyNow();
   const statsDb = getConversationsDb();
-  for (const conversation of state.conversations) {
+  const statsMetas = statsDb ? listAllConversationMetas(statsDb) : [];
+  for (const conversation of statsMetas) {
     const conversationDate = dateKey(conversation.createAt);
     const row = daily.get(conversationDate) ?? { date: conversationDate, messages: 0, conversations: 0, characters: 0 };
     row.conversations += 1;
     daily.set(conversationDate, row);
 
-    const nodes = isConversationLoaded(conversation.id) || !statsDb
-      ? conversation.messages
-      : loadConversationNodesFromDb(statsDb, conversation.id);
+    const nodes = statsDb ? loadConversationNodesFromDb(statsDb, conversation.id) : [];
     for (const node of nodes) {
       for (const msg of node.messages) {
         const msgDate = dateKey(msg.createdAt);
@@ -69,7 +70,7 @@ export function computeStats() {
 
   return {
     totals: {
-      conversations: state.conversations.length,
+      conversations: statsMetas.length,
       messages: userMessages + assistantMessages,
       userMessages,
       assistantMessages,

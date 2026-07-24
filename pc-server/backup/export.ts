@@ -12,7 +12,8 @@ import { dataDir, filesDir, skillsDir } from "../foundation/paths";
 import { tempDir } from "../foundation/platform";
 import { state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
-import { DEFAULT_ASSISTANT_ID, getConversationsDb, isConversationLoaded, loadConversationNodesFromDb } from "../conversations";
+import { DEFAULT_ASSISTANT_ID, flushConvDirtyNow, getConversationsDb, loadConversationNodesFromDb } from "../conversations";
+import { listAllConversationMetas } from "../conversations/read-queries";
 import { exportSkills } from "../tools";
 
 export function copyDirRecursive(src: string, dest: string): number {
@@ -280,13 +281,15 @@ function insertMemoriesIntoDb(db: InstanceType<typeof Database>) {
 function insertConversationsIntoDb(db: InstanceType<typeof Database>) {
   const insertConv = db.prepare("INSERT OR REPLACE INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, suggestions, is_pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
   const insertNode = db.prepare("INSERT OR REPLACE INTO message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)");
-  // P1-1 懒加载:未加载会话从活库瞬时读,峰值内存从全库降为单会话(10GB 用户净改善)。
+  // DB-first 批1:导出全走活库(先 flush 对齐脏数据),逐会话瞬时读,峰值内存=单会话。
+  flushConvDirtyNow();
   const liveDb = getConversationsDb();
+  const exportMetas = liveDb ? listAllConversationMetas(liveDb) : [];
   const txn = db.transaction(() => {
-    for (const conv of state.conversations) {
+    for (const conv of exportMetas) {
       try {
         insertConv.run(conv.id, conv.assistantId || DEFAULT_ASSISTANT_ID, conv.title || "", "[]", conv.createAt || Date.now(), conv.updateAt || Date.now(), JSON.stringify(conv.chatSuggestions || []), conv.isPinned ? 1 : 0);
-        const convNodes = isConversationLoaded(conv.id) || !liveDb ? (conv.messages || []) : loadConversationNodesFromDb(liveDb, conv.id);
+        const convNodes = liveDb ? loadConversationNodesFromDb(liveDb, conv.id) : [];
         for (let i = 0; i < convNodes.length; i++) {
           const node = convNodes[i];
           if (!node?.id) continue;
@@ -331,7 +334,7 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
       join(stageDir, "pc-backup.json"),
       safeJsonStringify(backupPayloadMetadataOnly(sanitizedSettings)),
     );
-    if (state.conversations.length > 0 || memoryStore.exportFlat().length > 0) {
+    if ((getConversationsDb() ? listAllConversationMetas(getConversationsDb()!).length : 0) > 0 || memoryStore.exportFlat().length > 0) {
       onProgress?.("正在生成对话数据库...");
       const dbPath = join(stageDir, "rikka_hub.db");
       try {

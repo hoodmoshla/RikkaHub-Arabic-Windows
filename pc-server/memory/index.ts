@@ -5,7 +5,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import * as fsPromises from "node:fs/promises";
 import { dateKey, isRecord, textFromParts } from "../foundation/utils";
 import { globalMemoryPath, assistantMemoryPath, memoryDir, pendingMemoryPath } from "../foundation/paths";
-import { peekFirstMessageParts } from "../conversations/index";
+import { getConversationsDb, peekFirstMessageParts } from "../conversations/index";
+import { recentConversationMetas } from "../conversations/read-queries";
 import { state } from "../persistence/json-store";
 import type {
   AddMemoryInput,
@@ -531,10 +532,10 @@ ${JSON.stringify(memories, null, 2)}
 
 export function buildRecentChatsPrompt(assistant: Assistant, currentConversationId?: string) {
   if (!assistant.enableRecentChatsReference) return "";
-  const recent = state.conversations
-    .filter((conversation) => conversation.assistantId === assistant.id && conversation.id !== currentConversationId)
-    .sort((left, right) => right.updateAt - left.updateAt)
-    .slice(0, 10)
+  // DB-first 批1:最近会话直查活库(update_at 倒序,并列时 create_at 倒序保持与旧稳定
+  // sort 的等价顺序)。流式期间 updateAt 最多滞后 200ms,提示词场景不可感知。
+  const recentDb = getConversationsDb();
+  const recent = (recentDb ? recentConversationMetas(recentDb, assistant.id, currentConversationId, 10) : [])
     .map((conversation) => ({
       // P1-1 懒加载:标题兜底经 peekFirstMessageParts(未加载会话只读活库单行,不触发整树加载)
       title: conversation.title || textFromParts(peekFirstMessageParts(conversation.id)).slice(0, 40) || "New Conversation",

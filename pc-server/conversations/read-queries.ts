@@ -1,0 +1,93 @@
+// conversations/read-queries.ts — DB-first 只读查询原语（方案见 项目重构方案.md「DB-first 方案」批1）
+//
+// 设计：
+// - 全部函数收 db 参数（不依赖单例），独立可单测；调用方从 getConversationsDb() 取句柄。
+// - 只返回元数据行（不 parse 节点 JSON）；需要消息树时配合 loadConversationNodesFromDb 瞬时读。
+// - 端点侧的过滤/排序/分页尽量留在 JS 逐字复刻旧内存实现：SQLite lower()/LIKE 只处理
+//   ASCII 大小写，与 JS toLowerCase() 的 Unicode 语义有差异；元数据 SELECT 亚毫秒，
+//   JS 侧处理换来与旧行为的逐字等价。SQL 只负责 WHERE assistant_id 与基准排序。
+// - 返回的对象是一次性快照，**不得修改**——它们不在 working set 里，改了既不持久化也不广播。
+import type { Database } from "bun:sqlite";
+import type { Conversation } from "../foundation/types";
+
+/** 会话元数据（messages 恒为空数组）。形状与 Conversation 一致以复用 toListDto 等既有转换。 */
+export type ConversationMeta = Conversation;
+
+interface MetaRow {
+  id: string;
+  assistant_id: string;
+  title: string;
+  system_prompt: string;
+  truncate_index: number;
+  suggestions: string;
+  is_pinned: number;
+  create_at: number;
+  update_at: number;
+}
+
+function rowToMeta(row: MetaRow): ConversationMeta {
+  let chatSuggestions: string[] = [];
+  try {
+    const parsed = JSON.parse(row.suggestions);
+    if (Array.isArray(parsed)) chatSuggestions = parsed.map((v) => String(v));
+  } catch { /* 损坏字段容错为空 */ }
+  return {
+    id: row.id,
+    assistantId: row.assistant_id,
+    systemPrompt: row.system_prompt || null,
+    title: row.title ?? "",
+    messages: [],
+    truncateIndex: typeof row.truncate_index === "number" ? row.truncate_index : -1,
+    chatSuggestions,
+    isPinned: row.is_pinned === 1,
+    createAt: row.create_at,
+    updateAt: row.update_at,
+  };
+}
+
+const META_COLUMNS = "id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at";
+
+/**
+ * 某助手的全部会话元数据，ORDER BY create_at DESC, id DESC——
+ * 与旧 state.conversations 数组顺序的等价还原（数组只在新建/fork 时 unshift，
+ * 顺序严格等于 createAt 倒序，见 index.ts loadConversationMetasFromDb 上方注释）。
+ */
+export function listConversationMetas(db: Database, assistantId: string): ConversationMeta[] {
+  const rows = db.prepare(
+    `SELECT ${META_COLUMNS} FROM pc_conversation WHERE assistant_id = ? ORDER BY create_at DESC, id DESC`,
+  ).all(assistantId) as MetaRow[];
+  return rows.map(rowToMeta);
+}
+
+/** 单会话元数据（导出/搜索 join 等零散场景）。 */
+export function getConversationMeta(db: Database, conversationId: string): ConversationMeta | null {
+  const row = db.prepare(
+    `SELECT ${META_COLUMNS} FROM pc_conversation WHERE id = ?`,
+  ).get(conversationId) as MetaRow | null;
+  return row ? rowToMeta(row) : null;
+}
+
+/** 全部会话元数据（不分助手；stats/export 全量遍历用），排序同 listConversationMetas。 */
+export function listAllConversationMetas(db: Database): ConversationMeta[] {
+  const rows = db.prepare(
+    `SELECT ${META_COLUMNS} FROM pc_conversation ORDER BY create_at DESC, id DESC`,
+  ).all() as MetaRow[];
+  return rows.map(rowToMeta);
+}
+
+/** 某助手最近会话元数据（buildRecentChatsPrompt 用）：updateAt 倒序，并列时保持 createAt 倒序稳定性。 */
+export function recentConversationMetas(db: Database, assistantId: string, excludeId: string | undefined, limit: number): ConversationMeta[] {
+  const rows = db.prepare(
+    `SELECT ${META_COLUMNS} FROM pc_conversation WHERE assistant_id = ? AND id != ? ORDER BY update_at DESC, create_at DESC, id DESC LIMIT ?`,
+  ).all(assistantId, excludeId ?? "", limit) as MetaRow[];
+  return rows.map(rowToMeta);
+}
+
+export function countConversations(db: Database): number {
+  const row = db.prepare("SELECT COUNT(*) AS n FROM pc_conversation").get() as { n: number } | null;
+  return row?.n ?? 0;
+}
+
+export function conversationExistsInDb(db: Database, conversationId: string): boolean {
+  return db.prepare("SELECT 1 FROM pc_conversation WHERE id = ? LIMIT 1").get(conversationId) !== null;
+}

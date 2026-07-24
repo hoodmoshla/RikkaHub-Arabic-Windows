@@ -13,6 +13,7 @@ import {
 } from "../../conversations";
 import { getConversationsDb, markConversationsLoaded } from "../../conversations";
 import { searchMessageFts } from "../../conversations/fts";
+import { listConversationMetas } from "../../conversations/read-queries";
 import { applyInputRegexTransformParts } from "../../assistants/index";
 import { findModel } from "../../model-providers/index";
 import { error, json, readJson } from "../request";
@@ -50,15 +51,21 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     return json({ status: "deleted", deleted: ids.size });
   }
 
+  // DB-first 批1:列表读直查活库元数据(SQL 只做 WHERE+基准排序,过滤/排序/分页留在 JS
+  // 逐字复刻旧内存实现——SQLite lower()/LIKE 只处理 ASCII,与 JS toLowerCase 语义有差异)。
+  // 流式期间 updateAt 最多滞后 200ms(脏标记节流),列表场景不可感知。db 不可用时降级空列表
+  // (活库彻底损坏场景,会话功能整体不可用,与 search 端点既有降级一致)。
   if (path === "conversations" && request.method === "GET") {
-    return json(state.conversations.filter((item) => item.assistantId === state.settings.assistantId).map((item) => toListDto(item, generating.has(item.id))));
+    const db = getConversationsDb();
+    const metas = db ? listConversationMetas(db, state.settings.assistantId) : [];
+    return json(metas.map((item) => toListDto(item, generating.has(item.id))));
   }
   if (path === "conversations/paged" && request.method === "GET") {
     const offset = Number(url.searchParams.get("offset") ?? "0");
     const limit = Number(url.searchParams.get("limit") ?? "20");
     const query = (url.searchParams.get("query") ?? "").toLowerCase();
-    const items = state.conversations
-      .filter((item) => item.assistantId === state.settings.assistantId)
+    const db = getConversationsDb();
+    const items = (db ? listConversationMetas(db, state.settings.assistantId) : [])
       .filter((item) => !query || item.title.toLowerCase().includes(query))
       .sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || b.updateAt - a.updateAt);
     const page = items.slice(offset, offset + limit);
@@ -71,7 +78,8 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     const queryText = (url.searchParams.get("query") ?? "").trim();
     const db = getConversationsDb();
     if (!queryText || !db) return json([]);
-    const byId = new Map(state.conversations.map((conversation) => [conversation.id, conversation]));
+    // DB-first 批1:title/updateAt join 改用活库元数据(原为 state.conversations 内存 map)
+    const byId = new Map(listConversationMetas(db, state.settings.assistantId).map((meta) => [meta.id, meta]));
     const results = searchMessageFts(db, queryText)
       .flatMap((hit) => {
         const conversation = byId.get(hit.conversationId);

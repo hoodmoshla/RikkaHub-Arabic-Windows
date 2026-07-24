@@ -54,7 +54,8 @@ import { openAiLocalTools, openAiMcpTools, openAiSearchTools, openAiSkillTools }
 import { executeToolCall, realizeToolResult, toolResultToParts } from "../tools/execution";
 import { applyOutputTransforms } from "../assistants";
 import { TITLE_CHARACTER_LIMIT } from "../app-config/prompts";
-import { flushConvDirtyNow, getConversation, persistConversation } from "./index";
+import { flushConvDirtyNow, getConversation, getConversationsDb, markMessageNodeDirty, persistConversation, scheduleThrottledConvFlush } from "./index";
+import { conversationExistsInDb } from "./read-queries";
 import { generating } from "./generation-state";
 import {
   appendTextPart,
@@ -351,7 +352,9 @@ function completeConversationGeneration(conversationId: string, controller: Abor
 }
 
 function conversationStillExists(conversationId: string) {
-  return state.conversations.some((item) => item.id === conversationId);
+  // DB-first 批1:直查活库。新建会话即时落库(ensureConversation 1.2.6 起),无漏检窗口。
+  const db = getConversationsDb();
+  return db ? conversationExistsInDb(db, conversationId) : false;
 }
 
 async function runPostGenerationTasks(conversationId: string, snapshot: Conversation, assistantMessageId: string) {
@@ -631,6 +634,11 @@ export function ensureAssistantGenerationNode(conversation: Conversation, modelI
     selectIndex: 0,
   };
   conversation.messages.push(assistantNode);
+  // 新节点立即标脏:节点创建到第一个 chunk 之间存在窗口,若此窗口内导出/统计(DB-first
+  // 读活库)或进程崩溃,未标脏的节点不在任何落库计划里。标脏后 flushConvDirtyNow 可见,
+  // 与旧"读内存必含该节点"行为对齐。
+  markMessageNodeDirty(conversation.id, assistantNode.id);
+  scheduleThrottledConvFlush();
   return assistantNode;
 }
 
