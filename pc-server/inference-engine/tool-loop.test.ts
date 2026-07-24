@@ -1,0 +1,193 @@
+// tool-loop 骨架单测（P1-5 批A）：轮次推进 / 工具分发 / pending bail / 超限 /
+// 非流式降级 / 文本累积模式 / 建卡模式 / abort 冻结点位。
+// mock.module 隔离 addLog(写 state+落盘)与 touchStream(SSE)副作用。
+import { describe, expect, mock, test } from "bun:test";
+
+const logged: unknown[] = [];
+mock.module("../api/logs", () => ({ addLog: (entry: unknown) => logged.push(entry) }));
+mock.module("../api/sse", () => ({ touchStream: () => {} }));
+
+const { runStreamingToolLoop } = await import("./tool-loop");
+type Adapter = Parameters<typeof runStreamingToolLoop>[0];
+type Round = Awaited<ReturnType<Adapter["readRound"]>>;
+
+const assistant = { id: "a1", mcpServers: [] } as never;
+
+function okResponse(): Response {
+  return new Response("", { status: 200 });
+}
+
+function hooksFixture(executeTool?: (call: { function: { name: string } }) => Promise<{ output: never[] }>) {
+  const events: Array<Record<string, unknown>> = [];
+  return {
+    events,
+    hooks: {
+      conversation: { id: "c1", title: "t" },
+      node: { id: "n1" },
+      message: { id: "m1", role: "ASSISTANT", parts: [] as unknown[], annotations: [], createdAt: 0, finishedAt: null },
+      sink: (event: Record<string, unknown>) => events.push(event),
+      executeTool: executeTool ?? (async () => ({ output: [] })),
+    } as never,
+  };
+}
+
+function baseAdapter(rounds: Round[]): Adapter {
+  let call = 0;
+  return {
+    providerItem: { id: "p1", name: "TestProvider" } as never,
+    logUrl: "http://test/chat",
+    logHeaders: {},
+    fetchRound: async () => okResponse(),
+    readRound: async () => {
+      const round = rounds[Math.min(call, rounds.length - 1)];
+      call += 1;
+      return round;
+    },
+    encodeNextTurn: (result, toolResults) => ({ turn: call, resultCount: toolResults.length }),
+    logResponseBody: () => "body",
+    joinTextWithNewline: false,
+    toolCardsCreatedInStream: true,
+    finishReasoningOnFinal: false,
+    exhaustedError: "exhausted",
+    abortCheckAfterRead: false,
+  };
+}
+
+const noTools = (text: string): Round => ({ text, toolCalls: [], replay: null });
+const withTool = (text: string, name = "do_it"): Round => ({
+  text,
+  toolCalls: [{ id: "tc1", name, arguments: "{}" }],
+  replay: null,
+});
+
+describe("轮次与返回值", () => {
+  test("无工具单轮返回文本；空文本兜底 (empty response)", async () => {
+    const { hooks } = hooksFixture();
+    expect(await runStreamingToolLoop(baseAdapter([noTools("你好")]), {}, assistant, undefined, hooks)).toBe("你好");
+    expect(await runStreamingToolLoop(baseAdapter([noTools("")]), {}, assistant, undefined, hooks)).toBe("(empty response)");
+  });
+
+  test("工具轮推进：执行工具→encodeNextTurn→下一轮文本返回；文本按模式累积", async () => {
+    const executed: string[] = [];
+    const { hooks, events } = hooksFixture(async (call) => {
+      executed.push(call.function.name);
+      return { output: [] };
+    });
+    const adapter = baseAdapter([withTool("第一轮"), noTools("第二轮")]);
+    adapter.joinTextWithNewline = true;
+    const encoded: unknown[] = [];
+    const origEncode = adapter.encodeNextTurn;
+    adapter.encodeNextTurn = (result, toolResults) => {
+      encoded.push(toolResults.map((t) => t.call.id));
+      return origEncode(result, toolResults);
+    };
+    const out = await runStreamingToolLoop(adapter, {}, assistant, undefined, hooks);
+    expect(out).toBe("第一轮\n第二轮");
+    expect(executed).toEqual(["do_it"]);
+    expect(encoded).toEqual([["tc1"]]);
+    expect(events.some((e) => e.kind === "tool_result" && e.toolCallId === "tc1")).toBe(true);
+  });
+
+  test("OpenAI 模式：无换行拼接 + 循环层建卡(tool_call_created)", async () => {
+    const { hooks, events } = hooksFixture();
+    const adapter = baseAdapter([withTool("A"), noTools("B")]);
+    adapter.toolCardsCreatedInStream = false;
+    expect(await runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).toBe("AB");
+    expect(events.some((e) => e.kind === "tool_call_created" && e.toolCallId === "tc1")).toBe(true);
+  });
+});
+
+describe("审批与异常", () => {
+  test("pending 工具整批不执行,返回已累积文本", async () => {
+    let executedCount = 0;
+    const { hooks } = hooksFixture(async () => {
+      executedCount += 1;
+      return { output: [] };
+    });
+    const adapter = baseAdapter([
+      { text: "前文", toolCalls: [{ id: "t1", name: "do_it", arguments: "{}" }, { id: "t2", name: "ask_user", arguments: "{}" }], replay: null },
+    ]);
+    expect(await runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).toBe("前文");
+    expect(executedCount).toBe(0);
+  });
+
+  test("工具执行抛错被包装为错误输出,循环继续", async () => {
+    const { hooks, events } = hooksFixture(async () => {
+      throw new Error("tool boom");
+    });
+    const adapter = baseAdapter([withTool("A"), noTools("B")]);
+    expect(await runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).toBe("AB");
+    const toolResult = events.find((e) => e.kind === "tool_result") as { output: Array<{ type: string }> };
+    expect(toolResult.output.length).toBeGreaterThan(0);
+  });
+
+  test("MAX_TOOL_STEPS 超限抛 adapter 文案", async () => {
+    const { hooks } = hooksFixture();
+    const adapter = baseAdapter([withTool("x")]); // 永远返回工具轮
+    await expect(runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).rejects.toThrow("exhausted");
+  });
+
+  test("!ok 响应抛 provider 名与状态码,并记错误日志", async () => {
+    const { hooks } = hooksFixture();
+    const adapter = baseAdapter([noTools("x")]);
+    adapter.fetchRound = async () => new Response("bad key", { status: 401 });
+    logged.length = 0;
+    await expect(runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).rejects.toThrow("TestProvider 401");
+    expect(logged.some((l) => (l as { ok: boolean }).ok === false)).toBe(true);
+  });
+
+  test("abortCheckAfterRead=true 时读流后中止抛 AbortError", async () => {
+    const { hooks } = hooksFixture();
+    const controller = new AbortController();
+    const adapter = baseAdapter([withTool("x")]);
+    adapter.abortCheckAfterRead = true;
+    adapter.readRound = async () => {
+      controller.abort();
+      return withTool("x");
+    };
+    await expect(runStreamingToolLoop(adapter, {}, assistant, controller.signal, hooks)).rejects.toThrow("Generation stopped");
+  });
+});
+
+describe("非流式降级(OpenAI 能力)", () => {
+  test("fetch 失败→降级重试同轮成功;makeBody 生效;sink 收到提示", async () => {
+    const { hooks, events } = hooksFixture();
+    const bodies: Array<Record<string, unknown>> = [];
+    let fetchCalls = 0;
+    const adapter = baseAdapter([noTools("恢复成功")]);
+    adapter.nonStreamFallback = {
+      makeBody: (b) => ({ ...b, stream: false }),
+      connectHint: "\n连接失败重试...",
+      interruptHint: "\n中断重试...",
+    };
+    adapter.fetchRound = async (requestBody) => {
+      bodies.push(requestBody);
+      fetchCalls += 1;
+      if (fetchCalls === 1) throw new Error("ECONNRESET");
+      return okResponse();
+    };
+    expect(await runStreamingToolLoop(adapter, { stream: true }, assistant, undefined, hooks)).toBe("恢复成功");
+    expect(bodies[0]).toEqual({ stream: true });
+    expect(bodies[1]!.stream).toBe(false); // makeBody 覆盖 stream
+    expect(events.some((e) => e.kind === "reasoning_delta" && String(e.text).includes("连接失败重试"))).toBe(true);
+  });
+
+  test("读流中断→降级重试;第二次仍失败则抛出", async () => {
+    const { hooks } = hooksFixture();
+    const adapter = baseAdapter([noTools("x")]);
+    adapter.nonStreamFallback = { makeBody: (b) => b, connectHint: "c", interruptHint: "i" };
+    adapter.readRound = async () => {
+      throw new Error("stream cut");
+    };
+    await expect(runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).rejects.toThrow("stream cut");
+  });
+
+  test("无降级能力时 fetch 失败直接抛", async () => {
+    const { hooks } = hooksFixture();
+    const adapter = baseAdapter([noTools("x")]);
+    adapter.fetchRound = async () => {
+      throw new Error("no fallback");
+    };
+    await expect(runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).rejects.toThrow("no fallback");
+  });
+});

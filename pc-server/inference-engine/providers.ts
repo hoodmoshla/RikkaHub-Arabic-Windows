@@ -21,18 +21,10 @@ import {
 } from "../model-providers";
 import { addLog } from "../api/logs";
 import { touchStream } from "../api/sse";
+import { MAX_TOOL_STEPS, runStreamingToolLoop, toolCallContext, type ProviderRoundAdapter, type NormalizedToolCall } from "./tool-loop";
 
-export const MAX_TOOL_STEPS = 256;
-
-export function toolCallContext(hooks?: StreamHooksWithSink): ToolDispatchContext | undefined {
-  if (!hooks?.conversation) return undefined;
-  return {
-    conversationId: hooks.conversation.id,
-    conversationTitle: hooks.conversation.title || undefined,
-    messageNodeId: hooks.node?.id,
-    executeTool: hooks.executeTool,
-  };
-}
+// P1-5:工具循环骨架迁至 tool-loop.ts,这里重导出维持既有导入方。
+export { MAX_TOOL_STEPS, toolCallContext };
 
 // models.dev 开源模型目录缓存 —— 用于查询模型的最大上下文窗口,显示在对话统计行
 // (分子 = 当前上下文 = promptTokens,分母 = 模型 contextLimit)。
@@ -1659,11 +1651,12 @@ export async function fetchOpenAiTextStreaming(
   hooks: StreamHooksWithSink,
   signal?: AbortSignal,
 ) {
+  // P1-5:循环骨架统一到 runStreamingToolLoop,本函数只保留 OpenAI 特定的 Round Adapter。
   const useResponseInput = Array.isArray(body.input) && !Array.isArray(body.messages);
   let messages = [...(useResponseInput ? body.input ?? [] : body.messages ?? [])];
-  let currentBody: Record<string, any> = useResponseInput ? { ...body, input: messages } : { ...body, messages };
-  let allContent = "";
-  let forceNonStream = false;
+  const initialBody: Record<string, unknown> = useResponseInput ? { ...body, input: messages } : { ...body, messages };
+
+  // 头超时:非流式 180s / 流式 600s;外部 signal 桥接到本轮请求的 controller。
   const fetchRound = (requestBody: Record<string, any>) => {
     const timeoutMs = requestBody.stream === false ? 180_000 : 600_000;
     const controller = new AbortController();
@@ -1687,190 +1680,80 @@ export async function fetchOpenAiTextStreaming(
     }).finally(cleanup);
   };
 
-  for (let round = 0; round < MAX_TOOL_STEPS; round += 1) {
-    const roundStarted = Date.now();
-    const requestBody: Record<string, any> = forceNonStream
-      ? { ...currentBody, stream: false, stream_options: undefined }
-      : currentBody;
-    let response: Response;
-    try {
-      response = await fetchRound(requestBody);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      addLog({
-        providerId: providerItem.id,
-        providerName: providerItem.name,
-        url,
-        ok: false,
-        status: 0,
-        kind: round === 0 ? "provider:chat:stream" : "provider:chat:tool_result:stream",
-        durationMs: Date.now() - roundStarted,
-        method: "POST",
-        requestHeaders: headers,
-        requestBody: jsonBody(requestBody),
-        responseBody: "",
-        error: detail,
-      });
-      if (!forceNonStream && requestBody.stream !== false && !signal?.aborted) {
-        forceNonStream = true;
-        hooks.sink?.({ kind: "reasoning_delta", text: `\n流式连接失败，正在按非流式重试... ${detail}` });
-        round -= 1;
-        continue;
-      }
-      throw err;
-    }
-    if (!response.ok) {
-      const text = await response.text();
-      addLog({
-        providerId: providerItem.id,
-        providerName: providerItem.name,
-        url,
-        ok: false,
-        status: response.status,
-        kind: round === 0 ? "provider:chat:stream" : "provider:chat:tool_result:stream",
-        durationMs: Date.now() - roundStarted,
-        method: "POST",
-        requestHeaders: headers,
-        responseHeaders: Object.fromEntries(response.headers.entries()),
-        requestBody: jsonBody(requestBody),
-        responseBody: textBody(text),
-        error: textBody(text),
-      });
-      throw new Error(`${providerItem.name} ${response.status}: ${text.slice(0, 500)}`);
-    }
+  type OpenAiRoundReplay = Awaited<ReturnType<typeof readOpenAiResponseIntoMessage>>;
 
-    let result: Awaited<ReturnType<typeof readOpenAiResponseIntoMessage>>;
-    try {
-      result = await readOpenAiResponseIntoMessage(response, hooks, signal);
-    } catch (err) {
-      addLog({
-        providerId: providerItem.id,
-        providerName: providerItem.name,
-        url,
-        ok: false,
-        status: response.status,
-        kind: round === 0 ? "provider:chat:stream" : "provider:chat:tool_result:stream",
-        durationMs: Date.now() - roundStarted,
-        method: "POST",
-        requestHeaders: headers,
-        responseHeaders: Object.fromEntries(response.headers.entries()),
-        requestBody: jsonBody(requestBody),
-        responseBody: "",
-        error: err instanceof Error ? err.message : String(err),
-      });
-      if (!forceNonStream && !signal?.aborted) {
-        forceNonStream = true;
-        hooks.sink?.({ kind: "reasoning_delta", text: "\n流式连接中断，正在按非流式重试..." });
-        round -= 1;
-        continue;
-      }
-      throw err;
-    }
-    allContent += result.content;
-    addLog({
-      providerId: providerItem.id,
-      providerName: providerItem.name,
-      url,
-      ok: true,
-      status: response.status,
-      kind: round === 0 ? "provider:chat:stream" : "provider:chat:tool_result:stream",
-      durationMs: Date.now() - roundStarted,
-      method: "POST",
-      requestHeaders: headers,
-      responseHeaders: Object.fromEntries(response.headers.entries()),
-      requestBody: jsonBody(requestBody),
-      responseBody: textBody(result.rawText || result.content || JSON.stringify({
-        toolCalls: result.toolCalls.map((toolCall) => ({
-          id: toolCall.id,
-          name: toolCall.function?.name,
-          argumentsLength: String(toolCall.function?.arguments ?? "").length,
-        })),
-        reasoningLength: result.reasoning.length,
-      })),
-    });
-    if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
-    if (result.toolCalls.length === 0) return allContent.trim() || "(empty response)";
-
-    const toolMessages = [];
-    // Pre-scan as in the chat-completions path: any pending tool aborts the whole batch's
-    // execution so we don't leave Auto tools without a tool_result on the next turn.
-    const hasPendingInBatch = result.toolCalls.some((toolCall: any) =>
-      toolCall && typeof toolCall === "object" && toolCall.function?.name &&
-      toolNeedsApproval(String(toolCall.function?.name ?? ""), assistant)
-    );
-    const dispatchCtx = toolCallContext(hooks);
-    for (const toolCall of result.toolCalls) {
-      // Skip sparse-array holes. The Responses API stream parser indexes into toolCalls[]
-      // by `output_index` (server.ts:7354) — when the model emits both a function_call
-      // (e.g. user-defined tool) and a web_search_call in the same response, the indices
-      // are non-contiguous and the resulting array has `undefined` slots. `for...of` over
-      // a sparse array yields those `undefined`s, which crashed at `toolCall.id` with
-      // "undefined is not an object" (the gpt-5.5 + web_search bug reported by users).
-      // The web_search_call is handled server-side by OpenAI itself — it doesn't need a
-      // local tool execution round-trip — so skipping holes is the correct behavior.
-      if (!toolCall || typeof toolCall !== "object") continue;
-      // Also skip entries with no function name — those are phantom deltas left over
-      // from non-function output items (e.g. arguments.delta events that arrived for an
-      // output_index that turned out to be a web_search_call).
-      if (!toolCall.function?.name) continue;
-      const toolPart: ToolPart = {
-        type: "tool",
-        toolCallId: String(toolCall.id ?? id()),
-        toolName: String(toolCall.function?.name ?? ""),
-        input: String(toolCall.function?.arguments ?? "{}"),
-        output: [],
-        approvalState: initialApprovalState(String(toolCall.function?.name ?? ""), assistant),
-      };
-      if (hooks.message) {
-        finishReasoningParts(hooks.message);
-        hooks.sink?.({
-          kind: "tool_call_created",
-          toolCallId: String(toolPart.toolCallId),
-          toolName: String(toolPart.toolName),
-          input: String(toolPart.input),
-          approvalState: toolPart.approvalState,
+  const adapter: ProviderRoundAdapter = {
+    providerItem,
+    logUrl: url,
+    logHeaders: headers,
+    fetchRound: (requestBody) => fetchRound(requestBody as Record<string, any>),
+    async readRound(response, sig) {
+      const r = await readOpenAiResponseIntoMessage(response, hooks, sig);
+      // 稀疏数组洞与无名条目过滤:Responses API 流按 output_index 建槽,function_call 与
+      // web_search_call 混发时索引不连续产生 undefined 洞(gpt-5.5 + web_search 崩溃 bug);
+      // web_search_call 由 OpenAI 服务端执行,无需本地工具往返,跳过即正确行为。无名条目是
+      // 非 function 输出项残留的幻影 delta。归一化时给缺失 id 生成兜底(原实现在建卡时生成;
+      // executeTool 收到的 id 从"可能 undefined"变为兜底值,工具执行不依赖 id,无行为影响)。
+      const normalized: NormalizedToolCall[] = [];
+      for (const toolCall of r.toolCalls) {
+        if (!toolCall || typeof toolCall !== "object") continue;
+        if (!toolCall.function?.name) continue;
+        normalized.push({
+          id: String(toolCall.id ?? id()),
+          name: String(toolCall.function?.name ?? ""),
+          arguments: String(toolCall.function?.arguments ?? "{}"),
         });
-        touchStream(hooks);
       }
-      if (hasPendingInBatch) {
-        // Render the card in whatever state we set; defer execution until the user approves
-        // or denies the pending one(s).
-        continue;
+      return { text: r.content, toolCalls: normalized, replay: r };
+    },
+    encodeNextTurn(result, toolResults) {
+      const r = result.replay as OpenAiRoundReplay;
+      const toolMessages = toolResults.map(({ call, output }) => {
+        const toolPart: ToolPart = {
+          type: "tool",
+          toolCallId: call.id,
+          toolName: call.name,
+          input: call.arguments,
+          output,
+          approvalState: initialApprovalState(call.name, assistant),
+        };
+        return useResponseInput
+          ? { type: "function_call_output", call_id: call.id, output: resolvedToolOutput(toolPart) }
+          : { role: "tool", tool_call_id: call.id, content: resolvedToolOutput(toolPart) };
+      });
+      if (useResponseInput) {
+        messages = [...messages, ...responseApiToolCallItems(r.toolCalls), ...toolMessages];
+        return { ...body, input: messages, stream: true };
       }
-      let toolResult: ToolResult;
-      try {
-        toolResult = await dispatchCtx!.executeTool!(toolCall as ToolCall, dispatchCtx);
-      } catch (err) {
-        toolResult = { output: [toolExecutionErrorPayload(err)] };
-      }
-      toolPart.output = toolResult.output;
-      if (hooks.sink) {
-        hooks.sink({ kind: "tool_result", toolCallId: toolPart.toolCallId, output: toolPart.output });
-      } else {
-        touchStream(hooks);
-      }
-      toolMessages.push(
-        useResponseInput
-          ? { type: "function_call_output", call_id: toolPart.toolCallId, output: resolvedToolOutput(toolPart) }
-          : { role: "tool", tool_call_id: toolPart.toolCallId, content: resolvedToolOutput(toolPart) },
-      );
-    }
-    if (hasPendingInBatch) {
-      return allContent.trim() || "";
-    }
-
-    if (useResponseInput) {
-      messages = [...messages, ...responseApiToolCallItems(result.toolCalls), ...toolMessages];
-      currentBody = { ...body, input: messages, stream: !forceNonStream };
-    } else {
       messages = [
         ...messages,
-        compactAssistantToolMessage(result.content, result.toolCalls, result.reasoning || reasoningFromParts(hooks.message?.parts ?? [])),
+        compactAssistantToolMessage(r.content, r.toolCalls, r.reasoning || reasoningFromParts(hooks.message?.parts ?? [])),
         ...toolMessages,
       ];
-      currentBody = { ...body, messages, stream: !forceNonStream };
-    }
-  }
-
-  throw new Error("Too many consecutive tool calls without final assistant content");
+      return { ...body, messages, stream: true };
+    },
+    logResponseBody(result) {
+      const r = result.replay as OpenAiRoundReplay;
+      return textBody(r.rawText || r.content || JSON.stringify({
+        toolCalls: r.toolCalls.map((toolCall: any) => ({
+          id: toolCall?.id,
+          name: toolCall?.function?.name,
+          argumentsLength: String(toolCall?.function?.arguments ?? "").length,
+        })),
+        reasoningLength: r.reasoning.length,
+      }));
+    },
+    joinTextWithNewline: false,
+    toolCardsCreatedInStream: false,
+    finishReasoningOnFinal: false,
+    exhaustedError: "Too many consecutive tool calls without final assistant content",
+    abortCheckAfterRead: true,
+    nonStreamFallback: {
+      // stream_options: undefined 会被 JSON.stringify 丢弃,与原实现一致
+      makeBody: (requestBody) => ({ ...requestBody, stream: false, stream_options: undefined }),
+      connectHint: "\n流式连接失败，正在按非流式重试...",
+      interruptHint: "\n流式连接中断，正在按非流式重试...",
+    },
+  };
+  return runStreamingToolLoop(adapter, initialBody, assistant, signal, hooks);
 }
