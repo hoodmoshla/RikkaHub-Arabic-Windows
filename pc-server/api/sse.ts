@@ -2,6 +2,8 @@
 // 纪律：只负责 SSE 推送；不做持久化、不改会话数据。
 // 临时耦合：generating Map 仍从 ../server 导入（生成控制归属待 api/handlers 拆分时收敛）。
 
+import type { StreamHooksWithSink } from "../inference-engine/events";
+import { markConversationRowDirty, markMessageNodeDirty, scheduleThrottledConvFlush } from "../conversations";
 import type { Conversation, JsonValue, MessageNode } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { toConversationDto } from "../conversations";
@@ -169,3 +171,23 @@ export function broadcastNodeUpdate(conversation: Conversation, node: MessageNod
   clearNodeBroadcast(conversation, node);
   broadcastNodeUpdateNow(conversation, node);
 }
+
+export function touchStream(hooks?: StreamHooksWithSink) {
+  if (!hooks?.conversation || !hooks.node) return;
+  // 事件流模式下，副作用（updateAt、标脏、SSE、持久化）由协调器统一处理，
+  // 这里直接返回，避免推理引擎直接触发广播/SQLite 写入。
+  if (hooks.sink) return;
+  hooks.conversation.updateAt = Date.now();
+  // 1.2.6:流式增量写活库——只标脏当前在长的会话行(updateAt)+ 节点,200ms 合并 upsert
+  // 进 SQLite。不再全量重写 state.json(会话已迁出 state.json)。N 路流式并发时各自标脏,
+  // flush 时逐行 upsert,SQLite WAL 串行化。流式结束(complete/abort)再全量 reconcile。
+  markConversationRowDirty(hooks.conversation.id);
+  markMessageNodeDirty(hooks.conversation.id, hooks.node.id);
+  scheduleThrottledConvFlush();
+  scheduleNodeBroadcast(hooks.conversation, hooks.node);
+}
+
+/** 从 StreamHooks 抽取 save_memory 等工具需要的会话上下文(透传给 pending 队列做来源追溯)。
+ *  hooks 在非流式路径(如 executeApprovedToolPart)可能缺失 → 返回 undefined,runSaveMemoryTool
+ *  入队时降级为空 conversationId(仅丧失来源追溯,不影响核心流程)。
+ *  conversationTitle 取入队时快照(与会话后续改名/删除解耦),空标题不传。 */

@@ -42,3 +42,5 @@ kelivo/
 记忆系统思考.md
 记忆系统重构方案.md
 代理工作方案.md
+pc-server/pc-data/
+pc-server/tsconfig.unused.json

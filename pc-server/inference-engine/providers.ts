@@ -20,10 +20,9 @@ import {
   textBody,
 } from "../model-providers";
 import { addLog } from "../api/logs";
-import {
-  MAX_TOOL_STEPS,
-  touchStream,
-} from "../server";
+import { touchStream } from "../api/sse";
+
+export const MAX_TOOL_STEPS = 256;
 
 export function toolCallContext(hooks?: StreamHooksWithSink): ToolDispatchContext | undefined {
   if (!hooks?.conversation) return undefined;

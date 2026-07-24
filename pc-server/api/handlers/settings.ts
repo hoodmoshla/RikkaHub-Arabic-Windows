@@ -25,12 +25,6 @@ import { addLog } from "../logs";
 import { error, json, readJson } from "../request";
 import { broadcastMemoryUpdate, openSse, settingsClients, sseFrame } from "../sse";
 import {
-  DEFAULT_COMPRESS_PROMPT,
-  DEFAULT_OCR_PROMPT,
-  DEFAULT_PROMPT_OPTIMIZE_PROMPT,
-  DEFAULT_SUGGESTION_PROMPT,
-  DEFAULT_TITLE_PROMPT,
-  DEFAULT_TRANSLATION_PROMPT,
   defaultSettings,
   deleteById,
   normalizePreferredPort,
@@ -39,6 +33,7 @@ import {
   upsertById,
   validateKnownJsonIds,
 } from "../../server";
+import { DEFAULT_COMPRESS_PROMPT, DEFAULT_OCR_PROMPT, DEFAULT_PROMPT_OPTIMIZE_PROMPT, DEFAULT_SUGGESTION_PROMPT, DEFAULT_TITLE_PROMPT, DEFAULT_TRANSLATION_PROMPT } from "../../app-config/prompts";
 import { updateSettings } from "../../app-config";
 import { markProviderTestResult } from "../../model-providers/checks";
 import { endpointFor, fetchProviderBalance, fetchProviderModels, runProviderCheck } from "../../model-providers/checks";

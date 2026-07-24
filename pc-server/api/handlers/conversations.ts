@@ -24,16 +24,10 @@ import {
 } from "../sse";
 import {
   bumpAnalyticsMsgCount,
-  attachOcrToImageParts,
-  compressConversation,
-  DEFAULT_TRANSLATION_PROMPT,
-  englishLanguageName,
-  fetchAuxiliaryText,
-  generateAnswer,
-  generateTitleForConversation,
-  isQwenMtModel,
-  markOcrPendingParts,
 } from "../../server";
+import { DEFAULT_TRANSLATION_PROMPT } from "../../app-config/prompts";
+import { attachOcrToImageParts, compressConversation, englishLanguageName, fetchAuxiliaryText, generateTitleForConversation, isQwenMtModel, markOcrPendingParts } from "../../conversations/auxiliary";
+import { generateAnswer } from "../../conversations/orchestrator";
 import { deleteConversationsById, ensureConversation, findAssistant, finishInterruptedPendingToolsInConversation, hasPendingToolApproval } from "../../conversations/helpers";
 import { generating } from "../../conversations/generation-state";
 
