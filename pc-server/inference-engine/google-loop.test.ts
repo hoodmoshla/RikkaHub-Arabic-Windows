@@ -3,8 +3,12 @@
 // 编码、最终文本——Google 路径首个回归网。
 import { afterAll, describe, expect, mock, test } from "bun:test";
 
-mock.module("../api/logs", () => ({ addLog: () => {} }));
-mock.module("../api/sse", () => ({ touchStream: () => {} }));
+// 展开真实模块只覆盖目标导出:bun 的 mock.module 跨测试文件不回收(见 tool-loop.test.ts)。
+import * as actualLogs from "../api/logs";
+import * as actualSse from "../api/sse";
+
+mock.module("../api/logs", () => ({ ...actualLogs, addLog: () => {} }));
+mock.module("../api/sse", () => ({ ...actualSse, touchStream: () => {} }));
 
 const { streamGoogleChatWithTools } = await import("./providers");
 

@@ -1,11 +1,16 @@
 // tool-loop 骨架单测（P1-5 批A）：轮次推进 / 工具分发 / pending bail / 超限 /
 // 非流式降级 / 文本累积模式 / 建卡模式 / abort 冻结点位。
 // mock.module 隔离 addLog(写 state+落盘)与 touchStream(SSE)副作用。
+// 注意:bun 的 mock.module 全局生效且跨测试文件不回收,必须展开真实模块只覆盖目标
+// 导出,否则同一进程里后续加载 app-config/defaults 等会因缺 defaultRequestStats 而炸。
 import { describe, expect, mock, test } from "bun:test";
 
+import * as actualLogs from "../api/logs";
+import * as actualSse from "../api/sse";
+
 const logged: unknown[] = [];
-mock.module("../api/logs", () => ({ addLog: (entry: unknown) => logged.push(entry) }));
-mock.module("../api/sse", () => ({ touchStream: () => {} }));
+mock.module("../api/logs", () => ({ ...actualLogs, addLog: (entry: unknown) => logged.push(entry) }));
+mock.module("../api/sse", () => ({ ...actualSse, touchStream: () => {} }));
 
 const { runStreamingToolLoop } = await import("./tool-loop");
 type Adapter = Parameters<typeof runStreamingToolLoop>[0];
