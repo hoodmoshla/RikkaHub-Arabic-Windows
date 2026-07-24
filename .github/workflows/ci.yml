@@ -26,6 +26,10 @@ jobs:
         working-directory: pc-server
         run: bun run typecheck
 
+      - name: Run pc-server unit tests
+        working-directory: pc-server
+        run: bun test
+
       - name: Run request-chain smoke
         working-directory: pc-server
         run: bun run smoke:request-chain
@@ -56,6 +60,10 @@ jobs:
       - name: Type check web-ui
         working-directory: web-ui
         run: bun run typecheck
+
+      - name: Run web-ui unit tests
+        working-directory: web-ui
+        run: bun run test:unit
 
       - name: Build web-ui
         working-directory: web-ui

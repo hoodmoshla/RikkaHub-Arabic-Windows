@@ -6,7 +6,7 @@
     "build": "react-router build && bun run copy.ts",
     "dev": "react-router dev",
     "start": "react-router-serve ./build/server/index.js",
-    "test:unit": "bun test app/lib/*.test.ts",
+    "test:unit": "bun test app",
     "typecheck": "react-router typegen && tsc",
     "lint": "oxlint app --fix",
     "fmt": "oxfmt app",

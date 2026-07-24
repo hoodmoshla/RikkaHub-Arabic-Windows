@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "bun run server.ts --dev",
     "start": "bun run server.ts",
+    "test": "bun test",
     "smoke:request-chain": "bun run scripts/request-chain-smoke.ts",
     "smoke:backup-roundtrip": "bun run scripts/backup-roundtrip-smoke.ts",
     "typecheck": "bunx tsc --noEmit --skipLibCheck",
