@@ -5,7 +5,11 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 
-export const sourceRootDir = resolve(import.meta.dir, "..");
+// 仓库根（web-ui/、fonts/、icons/、pc-data/ 的父目录）。本文件位于 pc-server/foundation/，
+// 所以是上两级。注意 import.meta.dir 是位置敏感的：这段代码原在 pc-server/server.ts 时
+// 只需 ".."，搬进本文件时漏改导致源码运行下 rootDir 指向 pc-server/——静态 UI/内置字体/
+// 图标/开发数据目录全部失联（打包 exe 走 executableDir 分支不受影响）。若再移动本文件必须同步调整。
+export const sourceRootDir = resolve(import.meta.dir, "..", "..");
 export const executableDir = dirname(process.execPath);
 export const rootDir = existsSync(join(executableDir, "web-ui")) ? executableDir : sourceRootDir;
 export const dataDir = resolve(process.env.RIKKAHUB_PC_DATA_DIR ?? join(rootDir, "pc-data"));
