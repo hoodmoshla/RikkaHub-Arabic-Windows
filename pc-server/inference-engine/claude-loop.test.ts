@@ -133,4 +133,31 @@ describe("streamClaudeChatWithTools", () => {
     );
     expect(out).toBe("完成");
   });
+
+  // 全面审查 3-1 回归:流内 error 事件(overloaded/rate_limit 等)必须穿透 SSE 容错
+  // catch 冒泡成拒绝。原缺陷:catch 用 message.startsWith("Claude stream error") 判别,
+  // 真实 API 错误文案(如 "Overloaded")不带该前缀 → 被当 malformed fragment 吞掉,
+  // 残缺回答被当正常完成落库。
+  test("流内 error 事件冒泡为拒绝,不被容错 catch 吞掉", async () => {
+    const errorStream = sse([
+      ["message_start", { message: { usage: { input_tokens: 4 } } }],
+      ["content_block_start", { index: 0, content_block: { type: "text", text: "" } }],
+      ["content_block_delta", { index: 0, delta: { type: "text_delta", text: "开头" } }],
+      ["error", { error: { type: "overloaded_error", message: "Overloaded" } }],
+    ]);
+    globalThis.fetch = (async () => new Response(errorStream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })) as unknown as typeof fetch;
+    const hooks = {
+      conversation: { id: "c1", title: "t" },
+      node: { id: "n1" },
+      message: { id: "m1", role: "ASSISTANT", parts: [] as unknown[], annotations: [], createdAt: 0, finishedAt: null },
+      sink: () => {},
+      executeTool: async () => ({ output: [] }),
+    } as never;
+    await expect(
+      streamClaudeChatWithTools("https://api.test/v1/messages", {}, { model: "m", messages: [] }, providerItem, assistant, undefined, hooks),
+    ).rejects.toThrow("Overloaded");
+  });
 });

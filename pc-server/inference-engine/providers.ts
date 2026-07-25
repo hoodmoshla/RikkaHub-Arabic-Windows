@@ -26,6 +26,12 @@ import { MAX_TOOL_STEPS, runStreamingToolLoop, toolCallContext, type ProviderRou
 // P1-5:工具循环骨架迁至 tool-loop.ts,这里重导出维持既有导入方。
 export { MAX_TOOL_STEPS, toolCallContext };
 
+/** 流内上游错误(Claude error 事件 / Gemini promptFeedback.blockReason)。
+ *  全面审查 3-1:SSE 帧解析的容错 catch 必须放行"真实上游错误"、只吞 malformed
+ *  fragment——用类型判别替代字符串前缀匹配(前缀匹配曾把 Anthropic 的
+ *  overloaded/rate_limit 错误当碎片吞掉,残缺回答被当正常完成落库)。 */
+export class UpstreamStreamError extends Error {}
+
 // models.dev 开源模型目录缓存 —— 用于查询模型的最大上下文窗口,显示在对话统计行
 // (分子 = 当前上下文 = promptTokens,分母 = 模型 contextLimit)。
 // 数据源 https://models.dev/api.json,缓存到 pc-data,7 天 TTL,fetch 失败降级为空(不报错)。
@@ -275,7 +281,7 @@ export async function readClaudeStreamingRound(
     if (eventName === "message_stop") return;
     if (eventName === "error") {
       const errMessage = dataJson.error?.message ?? "Claude stream error";
-      throw new Error(String(errMessage));
+      throw new UpstreamStreamError(String(errMessage));
     }
     const index = typeof dataJson.index === "number" ? dataJson.index : -1;
     if (eventName === "content_block_start") {
@@ -381,7 +387,7 @@ export async function readClaudeStreamingRound(
       try {
         handleEvent(eventName, JSON.parse(data));
       } catch (err) {
-        if (err instanceof Error && err.message.startsWith("Claude stream error")) throw err;
+        if (err instanceof UpstreamStreamError) throw err;
         // Ignore malformed fragments — Anthropic occasionally pings.
       }
     }
@@ -399,8 +405,9 @@ export async function readClaudeStreamingRound(
     if (data && data !== "[DONE]") {
       try {
         handleEvent(eventName, JSON.parse(data));
-      } catch {
-        // ignore
+      } catch (err) {
+        if (err instanceof UpstreamStreamError) throw err;
+        // ignore malformed trailing fragment
       }
     }
   }
@@ -648,7 +655,7 @@ export async function readGoogleStreamingRound(
   const handleChunk = (raw: any) => {
     if (!raw || typeof raw !== "object") return;
     const blockReason = raw.promptFeedback?.blockReason;
-    if (blockReason) throw new Error(`Gemini blocked: ${blockReason}`);
+    if (blockReason) throw new UpstreamStreamError(`Gemini blocked: ${blockReason}`);
     const meta = raw.usageMetadata;
     if (meta) result.usage = googleUsageFromMeta(meta) ?? result.usage;
     const candidate = raw.candidates?.[0];
@@ -717,7 +724,7 @@ export async function readGoogleStreamingRound(
         try {
           handleChunk(JSON.parse(payload));
         } catch (err) {
-          if (err instanceof Error && (err.message.startsWith("Gemini blocked") || err.message.startsWith("Gemini "))) throw err;
+          if (err instanceof UpstreamStreamError) throw err;
           // 忽略 Gemini 偶发的非 JSON 行
         }
       }
@@ -728,8 +735,9 @@ export async function readGoogleStreamingRound(
       if (!payload || payload === "[DONE]") continue;
       try {
         handleChunk(JSON.parse(payload));
-      } catch {
-        // ignore trailing fragment
+      } catch (err) {
+        if (err instanceof UpstreamStreamError) throw err;
+        // ignore malformed trailing fragment
       }
     }
   }

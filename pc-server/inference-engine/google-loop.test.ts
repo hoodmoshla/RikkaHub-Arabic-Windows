@@ -103,4 +103,21 @@ describe("streamGoogleChatWithTools", () => {
     const out = await streamGoogleChatWithTools("https://gen.test/v1beta/", {}, "k", "m", { contents: [] }, providerItem, assistant, undefined, hooks);
     expect(out).toBe("完成");
   });
+
+  // 全面审查 3-1 回归:promptFeedback.blockReason 必须穿透 SSE 容错 catch 冒泡为拒绝
+  // (与 Claude 侧统一改用 UpstreamStreamError 类型判别,不再做字符串前缀匹配)。
+  test("promptFeedback.blockReason 冒泡为拒绝,不被容错 catch 吞掉", async () => {
+    const blockedStream = sse([{ promptFeedback: { blockReason: "SAFETY" } }]);
+    globalThis.fetch = (async () => new Response(blockedStream, { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+    const hooks = {
+      conversation: { id: "c1", title: "t" },
+      node: { id: "n1" },
+      message: { id: "m1", role: "ASSISTANT", parts: [] as unknown[], annotations: [], createdAt: 0, finishedAt: null },
+      sink: () => {},
+      executeTool: async () => ({ output: [] }),
+    } as never;
+    await expect(
+      streamGoogleChatWithTools("https://gen.test/v1beta/", {}, "k", "m", { contents: [] }, providerItem, assistant, undefined, hooks),
+    ).rejects.toThrow("Gemini blocked: SAFETY");
+  });
 });
