@@ -25,7 +25,7 @@ export class DataDirLockedError extends Error {
 }
 
 /** kill(pid, 0) 不发信号只探存活;EPERM 表示进程存在但无权限,同样算活着。 */
-export function defaultIsPidAlive(pid: number): boolean {
+function defaultIsPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

@@ -182,8 +182,8 @@ function hasConvDirtyState(convId: string): boolean {
   return false;
 }
 
-// 默认 guards(单测/工具脚本直接 import 本模块时即可用);api/sse.ts 加载时经
-// initWorkingSetSseGuard 注入真实的 SSE 客户端判据(避免 index→sse→index 循环导入)。
+// 默认 guards(单测/工具脚本直接 import 本模块时即可用);bootstrap() 经 api/sse 的
+// initSseWiring 注入真实的 SSE 客户端判据(避免 index→sse→index 循环导入)。
 let hasSseClientsGuard: (convId: string) => boolean = () => false;
 
 export function initWorkingSetSseGuard(hasSseClients: (convId: string) => boolean): void {

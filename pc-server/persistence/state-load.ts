@@ -320,7 +320,7 @@ export function repairRelocatedFilePathsIn(files: StoredFile[], filesDirPath: st
   return repaired;
 }
 
-export function repairRelocatedFilePaths(stateObj: State): number {
+function repairRelocatedFilePaths(stateObj: State): number {
   return repairRelocatedFilePathsIn(stateObj.files, filesDir);
 }
 
