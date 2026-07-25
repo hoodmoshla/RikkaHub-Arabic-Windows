@@ -54,6 +54,33 @@ export function openConversationsDb(): InstanceType<typeof Database> {
   }
 }
 
+/** 建表 + 索引(幂等)。生产(openConversationsDbUnsafe)与回归测试共用同一份 schema,
+ *  防止测试库与真实库漂移(全面审查 2-0 的教训:级联行为必须在真实 schema 上验证)。 */
+export function ensureConversationTables(db: InstanceType<typeof Database>): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pc_conversation (
+      id              TEXT PRIMARY KEY NOT NULL,
+      assistant_id    TEXT NOT NULL,
+      title           TEXT NOT NULL DEFAULT '',
+      system_prompt   TEXT NOT NULL DEFAULT '',
+      truncate_index  INTEGER NOT NULL DEFAULT -1,
+      suggestions     TEXT NOT NULL DEFAULT '[]',
+      is_pinned       INTEGER NOT NULL DEFAULT 0,
+      create_at       INTEGER NOT NULL,
+      update_at       INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS pc_message_node (
+      id              TEXT PRIMARY KEY NOT NULL,
+      conversation_id TEXT NOT NULL,
+      node_index      INTEGER NOT NULL,
+      messages        TEXT NOT NULL DEFAULT '[]',
+      select_index    INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (conversation_id) REFERENCES pc_conversation(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_pc_msg_node_conv ON pc_message_node(conversation_id);
+  `);
+}
+
 /** 实际打开 + PRAGMA + 建表。抛错时确保关闭句柄(Windows 文件锁),否则 rename 会失败。 */
 function openConversationsDbUnsafe(): InstanceType<typeof Database> {
   const db = new Database(conversationsDbPath, { create: true, readwrite: true });
@@ -66,28 +93,7 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA busy_timeout = 5000");
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS pc_conversation (
-        id              TEXT PRIMARY KEY NOT NULL,
-        assistant_id    TEXT NOT NULL,
-        title           TEXT NOT NULL DEFAULT '',
-        system_prompt   TEXT NOT NULL DEFAULT '',
-        truncate_index  INTEGER NOT NULL DEFAULT -1,
-        suggestions     TEXT NOT NULL DEFAULT '[]',
-        is_pinned       INTEGER NOT NULL DEFAULT 0,
-        create_at       INTEGER NOT NULL,
-        update_at       INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS pc_message_node (
-        id              TEXT PRIMARY KEY NOT NULL,
-        conversation_id TEXT NOT NULL,
-        node_index      INTEGER NOT NULL,
-        messages        TEXT NOT NULL DEFAULT '[]',
-        select_index    INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY (conversation_id) REFERENCES pc_conversation(id) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_pc_msg_node_conv ON pc_message_node(conversation_id);
-    `);
+    ensureConversationTables(db);
     ensureMessageFtsTable(db);
     // FTS 自愈重建：老库首次升级（表刚建、空）或索引意外丢失时，从节点表全量重建。
     // 幂等：行数>0 时零成本跳过。
@@ -227,12 +233,23 @@ function safeParseStringArray(raw: string): string[] {
   }
 }
 
-/** upsert 单个会话行(不含节点)。流式中 updateAt/title 变化、以及全量 reconcile 复用。 */
-export function upsertConversationRow(conv: Conversation): void {
-  if (!conversationsDb) throw new Error("conversationsDb not open");
-  conversationsDb.prepare(
-    "INSERT OR REPLACE INTO pc_conversation (id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(
+// 全面审查 2-0(P0)修复:会话/节点 upsert 一律用 ON CONFLICT DO UPDATE,绝不可用
+// INSERT OR REPLACE。SQLite 的 REPLACE = 隐式 DELETE+INSERT,而 foreign_keys=ON 时该隐式
+// DELETE 会触发 pc_message_node 的 ON DELETE CASCADE——对已存在的会话行 REPLACE 一次,
+// 该会话全部节点行被级联清空。流式期间每 200ms flush 都 upsert 会话行,等于整个流式期间
+// 磁盘上只剩正在补写的脏节点;流式中途进程死亡 = 会话历史永久丢失。
+const UPSERT_CONVERSATION_SQL =
+  "INSERT INTO pc_conversation (id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+  "ON CONFLICT(id) DO UPDATE SET assistant_id = excluded.assistant_id, title = excluded.title, system_prompt = excluded.system_prompt, " +
+  "truncate_index = excluded.truncate_index, suggestions = excluded.suggestions, is_pinned = excluded.is_pinned, create_at = excluded.create_at, update_at = excluded.update_at";
+
+const UPSERT_NODE_SQL =
+  "INSERT INTO pc_message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?) " +
+  "ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id, node_index = excluded.node_index, messages = excluded.messages, select_index = excluded.select_index";
+
+/** upsert 单个会话行(不含节点),显式传 db——生产包装与回归测试共用。 */
+export function upsertConversationRowInto(db: InstanceType<typeof Database>, conv: Conversation): void {
+  db.prepare(UPSERT_CONVERSATION_SQL).run(
     conv.id,
     conv.assistantId || DEFAULT_ASSISTANT_ID,
     conv.title || "",
@@ -245,20 +262,29 @@ export function upsertConversationRow(conv: Conversation): void {
   );
 }
 
-/** upsert 单个节点行(INSERT OR REPLACE)。流式热路径用,nodeIndex 由调用方提供。 */
-export function upsertMessageNode(convId: string, node: MessageNode, nodeIndex: number): void {
+/** upsert 单个会话行(不含节点)。流式中 updateAt/title 变化、以及全量 reconcile 复用。 */
+export function upsertConversationRow(conv: Conversation): void {
   if (!conversationsDb) throw new Error("conversationsDb not open");
-  conversationsDb.prepare(
-    "INSERT OR REPLACE INTO pc_message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)",
-  ).run(
+  upsertConversationRowInto(conversationsDb, conv);
+}
+
+/** upsert 单个节点行(含 FTS 同步),显式传 db——生产包装与回归测试共用。 */
+export function upsertMessageNodeInto(db: InstanceType<typeof Database>, convId: string, node: MessageNode, nodeIndex: number): void {
+  db.prepare(UPSERT_NODE_SQL).run(
     node.id,
     convId,
     nodeIndex,
     JSON.stringify(node.messages ?? []),
     node.selectIndex ?? 0,
   );
-  try { replaceNodeFts(conversationsDb, convId, node); }
+  try { replaceNodeFts(db, convId, node); }
   catch (err) { console.warn("[conv-db] FTS 节点同步失败", node.id, err); }
+}
+
+/** upsert 单个节点行。流式热路径用,nodeIndex 由调用方提供。 */
+export function upsertMessageNode(convId: string, node: MessageNode, nodeIndex: number): void {
+  if (!conversationsDb) throw new Error("conversationsDb not open");
+  upsertMessageNodeInto(conversationsDb, convId, node, nodeIndex);
 }
 
 /**
@@ -270,9 +296,7 @@ export function persistConversation(conv: Conversation): void {
   if (!conversationsDb) throw new Error("conversationsDb not open");
   const db = conversationsDb;
   const deleteNodes = db.prepare("DELETE FROM pc_message_node WHERE conversation_id = ?");
-  const insertNode = db.prepare(
-    "INSERT OR REPLACE INTO pc_message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)",
-  );
+  const insertNode = db.prepare(UPSERT_NODE_SQL);
   const txn = db.transaction(() => {
     upsertConversationRow(conv);
     deleteNodes.run(conv.id);
@@ -327,7 +351,7 @@ export function markMessageNodeDirty(convId: string, nodeId: string): void {
 
 /**
  * 遍历脏集合逐行 upsert,然后清空。从内存 state 解析 nodeIndex;若会话/节点已被并发删除
- * (如流式中删会话),跳过——避免 INSERT OR REPLACE 把已删的行又建回来。
+ * (如流式中删会话),跳过——避免 upsert 把已删的行又建回来。
  */
 export function flushConvDirty(): void {
   if (!conversationsDb) return;
@@ -403,15 +427,14 @@ export function clearConvDirtyState(): void {
 
 /**
  * 批量灌库(单事务)。比逐个 persistConversation 快(1 个事务 vs N 个)。迁移用。
- * INSERT OR REPLACE 幂等——中途失败重跑不重复/不冲突。
+ * 幂等:每个会话先显式删旧节点再按当前顺序重插,中途失败重跑不重复/不冲突。
+ * (历史上靠 INSERT OR REPLACE 会话行的隐式级联删节点实现幂等——那正是 2-0 P0 的根源,
+ * 现改为显式 DELETE,语义相同且不再依赖 REPLACE 的删行副作用。)
  */
 export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, conversations: Conversation[]): void {
-  const upsertConv = db.prepare(
-    "INSERT OR REPLACE INTO pc_conversation (id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  );
-  const insertNode = db.prepare(
-    "INSERT OR REPLACE INTO pc_message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)",
-  );
+  const upsertConv = db.prepare(UPSERT_CONVERSATION_SQL);
+  const deleteNodes = db.prepare("DELETE FROM pc_message_node WHERE conversation_id = ?");
+  const insertNode = db.prepare(UPSERT_NODE_SQL);
   const txn = db.transaction(() => {
     for (const conv of conversations) {
       upsertConv.run(
@@ -425,6 +448,7 @@ export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, co
         conv.createAt || Date.now(),
         conv.updateAt || Date.now(),
       );
+      deleteNodes.run(conv.id);
       deleteConversationFts(db, [conv.id]);
       for (let i = 0; i < (conv.messages ?? []).length; i += 1) {
         const node = conv.messages[i];

@@ -346,7 +346,7 @@ function completeConversationGeneration(conversationId: string, controller: Abor
   broadcastList();
   // 1.2.6:流式结束,全量 reconcile 活库——刷残余脏标记 + persistConversation,把流式
   // 期间增量 upsert 的节点和任何新增/删除的节点统一对齐(清孤立节点行)。幂等
-  // (INSERT OR REPLACE 会话行 + 删旧节点 + 重插)。会话已被并发删除时跳过;flushConvDirty
+  // (upsert 会话行 + 删旧节点 + 重插)。会话已被并发删除时跳过;flushConvDirty
   // 也会跳过已删会话的脏标记。
   flushConvDirtyNow();
   const conv = getConversation(conversationId);
