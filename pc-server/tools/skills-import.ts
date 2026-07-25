@@ -2,6 +2,7 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3c），行为不变。
 
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { fetchWithTimeout } from "../foundation/net";
 import { dirname, join, resolve } from "node:path";
 import type { GitHubSkillFile, GitHubSkillInfo } from "../foundation/types";
 import { skillsDir } from "../foundation/paths";
@@ -21,7 +22,7 @@ function parseGitHubSkillUrl(repoUrl: string): GitHubSkillInfo | null {
 }
 
 async function githubJson(url: string) {
-  const response = await fetch(url, { headers: { Accept: "application/vnd.github+json", "User-Agent": "RikkaHub-PC" } });
+  const response = await fetchWithTimeout(url, { headers: { Accept: "application/vnd.github+json", "User-Agent": "RikkaHub-PC" } });
   const text = await response.text();
   if (!response.ok) throw new Error(`GitHub ${response.status}: ${text.slice(0, 500) || response.statusText}`);
   return JSON.parse(text);
@@ -55,7 +56,7 @@ export async function importSkillFromGitHub(repoUrl: string) {
   if (!skillFile) throw new Error("目录中未找到 SKILL.md");
   const downloaded = new Map<string, Buffer>();
   for (const file of files) {
-    const response = await fetch(file.downloadUrl, { headers: { "User-Agent": "RikkaHub-PC" } });
+    const response = await fetchWithTimeout(file.downloadUrl, { headers: { "User-Agent": "RikkaHub-PC" }, timeoutMs: 60_000 });
     if (!response.ok) throw new Error(`下载文件失败 ${file.relativePath}: ${response.status}`);
     downloaded.set(file.relativePath, Buffer.from(await response.arrayBuffer()));
   }

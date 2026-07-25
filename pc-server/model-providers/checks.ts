@@ -2,6 +2,7 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3a），行为不变。依赖注入见 imports；不反向依赖 ../server。
 
 import { updateSettings } from "../app-config";
+import { fetchWithTimeout } from "../foundation/net";
 import type { Assistant, Model, Provider } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { addLog } from "../api/logs";
@@ -45,7 +46,7 @@ export async function fetchProviderModels(providerItem: Provider) {
   const started = Date.now();
   let response: Response;
   try {
-    response = await fetch(endpoint, { headers: providerHeaders(providerItem) });
+    response = await fetchWithTimeout(endpoint, { headers: providerHeaders(providerItem) });
   } catch (err) {
     const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     addLog({
@@ -106,7 +107,7 @@ export async function fetchProviderBalance(providerItem: Provider) {
   const started = Date.now();
   let response: Response;
   try {
-    response = await fetch(endpoint, { headers: providerHeaders(providerItem) });
+    response = await fetchWithTimeout(endpoint, { headers: providerHeaders(providerItem) });
   } catch (err) {
     const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     addLog({
@@ -335,10 +336,13 @@ export async function runProviderCheck(providerItem: Provider, mode: "non_stream
     modelItem,
   );
   try {
-    response = await fetch(url, {
+    response = await fetchWithTimeout(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      // 流式测试响应体可合法慢速产出(下游另有 120s 空闲超时),总时长给 300s 上限;
+      // 非流式/工具测试 60s 足够。
+      timeoutMs: mode === "stream" ? 300_000 : 60_000,
     });
   } catch (err) {
     const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);

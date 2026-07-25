@@ -2,6 +2,7 @@
 // 纪律：负责版本检查、下载源、缓存扫描，不依赖业务状态。
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { fetchWithTimeout } from "../foundation/net";
 import { join } from "node:path";
 import { skipVersionPath, updatesCacheDir } from "../foundation/paths";
 import type { GithubRelease } from "../foundation/types";
@@ -24,7 +25,7 @@ export function writeSkippedVersion(version: string) {
 export const APP_VERSION = "1.4.1";
 
 export async function fetchGithubLatestRelease(repo: string): Promise<GithubRelease> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+  const res = await fetchWithTimeout(`https://api.github.com/repos/${repo}/releases/latest`, {
     headers: { Accept: "application/vnd.github+json", "User-Agent": "RikkaHub-PC" },
   });
   if (!res.ok) {
@@ -39,7 +40,7 @@ export async function fetchGithubLatestRelease(repo: string): Promise<GithubRele
 // manually and pull the tag out of the Location header. No API, no rate limit, no token.
 export async function fetchLatestReleaseFromHtmlRedirect(repo: string): Promise<{ tag: string; htmlUrl: string }> {
   const url = `https://github.com/${repo}/releases/latest`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "HEAD",
     redirect: "manual",
     headers: { "User-Agent": "RikkaHub-PC" },

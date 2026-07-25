@@ -3,6 +3,7 @@
 // 请求日志暂经 ../server 的 addLog 记录（3.5 拆 api/ 时收敛）。
 
 import type { JsonValue, TtsProvider } from "../foundation/types";
+import { fetchWithTimeout } from "../foundation/net";
 import { id, isRecord, mergeById } from "../foundation/utils";
 import { state } from "../persistence/json-store";
 import { jsonBody, textBody } from "../model-providers";
@@ -333,10 +334,11 @@ export async function generateSpeechWithTtsProvider(text: string, providerId?: s
       return pcm16ToWav(pcm, 24000, 1);
     };
   }
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    timeoutMs: 120_000, // 长文本合成分钟级,30s 默认会误杀
   });
   const audio = response.ok && parseAudio
     ? await parseAudio(response)

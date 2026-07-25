@@ -344,3 +344,23 @@ export function normalizePreferredPort(value: unknown): number | null {
   }
   return null;
 }
+
+// ── 统一出站 fetch(全面审查 6-2)────────────────────────────────
+// 外围域(search/scrape/ln 脚本/生图/TTS/ASR/provider 测试/更新检查)此前全部裸 fetch,
+// 上游半开连接/黑洞路由时工具调用与"测试连接"永不返回,挂起的 promise 永久泄漏。
+// 统一走本包装:默认 30s 总时长超时;调用方已有 signal(生成中止等)时两者并联,
+// 任一触发即中止。流式聊天主链路(自带生成中止 signal,可合法长跑)与大文件下载
+// (进度流,总时长上限无意义)不适用本包装。
+export const DEFAULT_OUTBOUND_TIMEOUT_MS = 30_000;
+
+export interface FetchWithTimeoutInit extends RequestInit {
+  /** 总时长上限;默认 DEFAULT_OUTBOUND_TIMEOUT_MS。注意覆盖响应体读取全程,慢任务给足余量。 */
+  timeoutMs?: number;
+}
+
+export function fetchWithTimeout(url: string | URL, init: FetchWithTimeoutInit = {}): Promise<Response> {
+  const { timeoutMs = DEFAULT_OUTBOUND_TIMEOUT_MS, signal, ...rest } = init;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  return fetch(url, { ...rest, signal: combined });
+}

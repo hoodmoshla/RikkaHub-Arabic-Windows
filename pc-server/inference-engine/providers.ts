@@ -6,6 +6,7 @@ import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "n
 import type { Assistant, JsonValue, Message, Provider, ApiMessage, ClaudeStreamRoundResult, GoogleStreamRoundResult, ToolPart } from "../foundation/types";
 import { id, isRecord, reasoningFromParts, safeJsonParse, visibleReasoningFromMessage, visibleTextFromMessage } from "../foundation/utils";
 import { MODELS_DEV_CACHE_PATH } from "../foundation/paths";
+import { fetchWithTimeout } from "../foundation/net";
 import { initialApprovalState, toolNeedsApproval } from "../tools/approval";
 import { openAiToolOutput, partsToToolResultText, resolvedToolOutput, toolExecutionErrorPayload } from "../tools/format";
 import {
@@ -38,6 +39,9 @@ export class UpstreamStreamError extends Error {}
 // 策略参考 opencode 的 models-dev.ts:磁盘缓存 + 原子写(tmp→rename)+ 失败用旧缓存。
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_TTL_MS = 24 * 60 * 60 * 1000; // 1 天
+// 6-2:辅助流(标题/翻译/建议/压缩)总时长硬上限。任务输出可长(压缩长会话分钟级),
+// 给 10 分钟余量——目的只是防上游黑洞导致 promise 永挂,不是节奏控制。
+const AUX_STREAM_TIMEOUT_MS = 600_000;
 export let modelsDevCache: Record<string, any> | null = null;
 let modelsDevLoading: Promise<void> | null = null;
 
@@ -1224,7 +1228,7 @@ export async function fetchOpenAiAuxiliaryStream(
   onDelta: (text: string) => void,
 ) {
   const started = Date.now();
-  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  const response = await fetchWithTimeout(url, { method: "POST", headers, body: JSON.stringify(body), timeoutMs: AUX_STREAM_TIMEOUT_MS });
   let text = "";
   if (response.ok) {
     text = await readOpenAiStream(response, (delta, raw) => {
@@ -1263,7 +1267,7 @@ export async function fetchClaudeAuxiliaryStream(
   onDelta: (text: string) => void,
 ) {
   const started = Date.now();
-  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  const response = await fetchWithTimeout(url, { method: "POST", headers, body: JSON.stringify(body), timeoutMs: AUX_STREAM_TIMEOUT_MS });
   if (!response.ok) {
     const text = await response.text();
     addLog({
@@ -1367,7 +1371,7 @@ export async function fetchGoogleAuxiliaryStream(
   onDelta: (text: string) => void,
 ) {
   const started = Date.now();
-  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  const response = await fetchWithTimeout(url, { method: "POST", headers, body: JSON.stringify(body), timeoutMs: AUX_STREAM_TIMEOUT_MS });
   const rawText = await response.text();
   addLog({
     providerId: providerItem.id,

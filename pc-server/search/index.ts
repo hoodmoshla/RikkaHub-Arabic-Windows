@@ -3,6 +3,7 @@
 // 不处理路由、不处理 SSE；请求日志暂经 ../server 的 addLog 记录（3.5 拆 api/ 时收敛）。
 
 import type { JsonValue, SearchService } from "../foundation/types";
+import { fetchWithTimeout } from "../foundation/net";
 import { domainOfUrl, faviconForUrl, isRecord, stripHtml } from "../foundation/utils";
 import { state } from "../persistence/json-store";
 import { jsonBody, textBody } from "../model-providers";
@@ -73,7 +74,7 @@ async function customJsHttpRequest(
   const body = bodyValue == null || String(method).toUpperCase() === "GET" || String(method).toUpperCase() === "HEAD"
     ? undefined
     : (typeof bodyValue === "string" ? bodyValue : JSON.stringify(bodyValue));
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: String(method || "GET").toUpperCase(),
     headers,
     body,
@@ -291,7 +292,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
   if (type === "tavily") {
     return await withSearchKeyFailover(String(service.apiKey ?? ""), async (apiKey) => {
       const requestHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
-      const response = await fetch("https://api.tavily.com/search", {
+      const response = await fetchWithTimeout("https://api.tavily.com/search", {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify({ query, max_results: maxResults, search_depth: service.depth ?? "basic" }),
@@ -329,7 +330,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const endpoint = "https://api.rikka-ai.com/v1/search";
       const requestBody = { q: query, depth: service.depth ?? "standard", outputType: "sourcedAnswer", includeImages: false };
       const requestHeaders = { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(requestBody),
@@ -368,7 +369,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
   if (type === "exa") {
     return await withSearchKeyFailover(String(service.apiKey ?? ""), async (apiKey) => {
       const requestHeaders = { "Content-Type": "application/json", "x-api-key": apiKey };
-      const response = await fetch("https://api.exa.ai/search", {
+      const response = await fetchWithTimeout("https://api.exa.ai/search", {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify({ query, numResults: maxResults }),
@@ -406,7 +407,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const endpoint = "https://open.bigmodel.cn/api/paas/v4/web_search";
       const requestBody = { search_query: query, search_engine: "search_std", count: maxResults };
       const requestHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(requestBody),
@@ -443,7 +444,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
     return await withSearchKeyFailover(String(service.apiKey ?? ""), async (apiKey) => {
       const endpoint = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`;
       const requestHeaders = { Accept: "application/json", "X-Subscription-Token": apiKey };
-      const response = await fetch(endpoint, { headers: requestHeaders });
+      const response = await fetchWithTimeout(endpoint, { headers: requestHeaders });
       const { text, raw } = await parseJsonResponse(response);
       addLog({
         providerId: String(service.id ?? "search"),
@@ -486,7 +487,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
     const username = String(service.username ?? "");
     const password = String(service.password ?? "");
     if (username && password) headers.Authorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
-    const response = await fetch(endpoint, { headers });
+    const response = await fetchWithTimeout(endpoint, { headers });
     const { text, raw } = await parseJsonResponse(response);
     addLog({
       providerId: String(service.id ?? "search"),
@@ -518,7 +519,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
     return await withSearchKeyFailover(String(service.apiKey ?? ""), async (apiKey) => {
       const endpoint = `https://api.search.tinyfish.ai?query=${encodeURIComponent(query)}`;
       const requestHeaders = { "X-API-Key": apiKey };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         headers: requestHeaders,
       });
       const { text, raw } = await parseJsonResponse(response);
@@ -554,7 +555,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const endpoint = "https://api.perplexity.ai/search";
       const body: Record<string, JsonValue> = { query, max_results: maxResults };
       const requestHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(body),
@@ -586,7 +587,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const summary = service.summary !== false;
       const body: Record<string, JsonValue> = { query, summary, count: maxResults };
       const requestHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(body),
@@ -618,7 +619,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const depth = String(service.depth ?? "standard");
       const body: Record<string, JsonValue> = { q: query, depth, outputType: "sourcedAnswer", includeImages: "false" };
       const requestHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(body),
@@ -649,7 +650,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const endpoint = "https://metaso.cn/api/v1/search";
       const body: Record<string, JsonValue> = { q: query, scope: "webpage", size: maxResults, includeSummary: false };
       const requestHeaders = { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "Content-Type": "application/json" };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(body),
@@ -681,7 +682,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const clamped = Math.max(5, Math.min(10, maxResults));
       const body: Record<string, JsonValue> = { query, max_results: clamped };
       const requestHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(body),
@@ -712,7 +713,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const searchUrl = String(service.searchUrl ?? "").trim() || "https://s.jina.ai/";
       const body: Record<string, JsonValue> = { q: query };
       const requestHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", Accept: "application/json" };
-      const response = await fetch(searchUrl, {
+      const response = await fetchWithTimeout(searchUrl, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(body),
@@ -743,7 +744,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
       const endpoint = "https://api.firecrawl.dev/v2/search";
       const body: Record<string, JsonValue> = { query, limit: maxResults };
       const requestHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(body),
@@ -798,7 +799,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
         store: false,
       };
       const requestHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(body),
@@ -870,7 +871,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
     if (username && password) {
       headers.Authorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
     }
-    const response = await fetch(endpoint, { headers });
+    const response = await fetchWithTimeout(endpoint, { headers });
     const text = await response.text();
     addLog({
       providerId: String(service.id ?? "search"),
@@ -911,7 +912,7 @@ export async function runSearchWeb(params: Record<string, JsonValue>) {
   }
 
   const requestHeaders = { "User-Agent": "Mozilla/5.0 RikkaHubPC/1.0" };
-  const response = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
+  const response = await fetchWithTimeout(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`, {
     headers: requestHeaders,
   });
   const html = await response.text();
@@ -974,7 +975,7 @@ export async function runScrapeWeb(params: Record<string, JsonValue>) {
       const endpoint = "https://api.fetch.tinyfish.ai";
       const requestBody = { urls: [target], format: "markdown" };
       const requestHeaders = { "Content-Type": "application/json", "X-API-Key": apiKey };
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(requestBody),
@@ -1010,7 +1011,7 @@ export async function runScrapeWeb(params: Record<string, JsonValue>) {
     });
   }
   const requestHeaders = { "User-Agent": "Mozilla/5.0 RikkaHubPC/1.0" };
-  const response = await fetch(target, { headers: requestHeaders });
+  const response = await fetchWithTimeout(target, { headers: requestHeaders });
   const text = await response.text();
   addLog({
     providerId: "scrape_web",
@@ -1052,7 +1053,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "rikkahub") {
     const endpoint = "https://api.rikka-ai.com/v1/search";
     const exec = async (k: string): Promise<string> => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(k ? { Authorization: `Bearer ${k}` } : {}) },
         body: JSON.stringify({ q: "RikkaHub", depth: service.depth ?? "standard", outputType: "sourcedAnswer", includeImages: false }),
@@ -1068,7 +1069,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "tavily") {
     const endpoint = "https://api.tavily.com/search";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${k}` },
         body: JSON.stringify({ query: "RikkaHub", max_results: 1 }),
@@ -1081,7 +1082,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "exa") {
     const endpoint = "https://api.exa.ai/search";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": k },
         body: JSON.stringify({ query: "RikkaHub", numResults: 1 }),
@@ -1094,7 +1095,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "tinyfish") {
     const endpoint = "https://api.search.tinyfish.ai?query=RikkaHub";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         headers: { "X-API-Key": k },
       });
       const text = await response.text();
@@ -1105,7 +1106,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "zhipu") {
     const endpoint = "https://open.bigmodel.cn/api/paas/v4/web_search";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${k}` },
         body: JSON.stringify({ search_query: "RikkaHub", search_engine: "search_std", count: 1 }),
@@ -1118,7 +1119,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "brave") {
     const endpoint = "https://api.search.brave.com/res/v1/web/search?q=RikkaHub&count=1";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, { headers: { Accept: "application/json", "X-Subscription-Token": k } });
+      const response = await fetchWithTimeout(endpoint, { headers: { Accept: "application/json", "X-Subscription-Token": k } });
       const text = await response.text();
       if (!response.ok) throwSearchStatus(response.status, `${response.status}: ${text.slice(0, 500)}`);
       return text;
@@ -1138,7 +1139,7 @@ export async function testSearchService(service: SearchService) {
     const username = String(service.username ?? "");
     const password = String(service.password ?? "");
     if (username && password) headers.Authorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
-    const response = await fetch(endpoint, { headers });
+    const response = await fetchWithTimeout(endpoint, { headers });
     const text = await response.text();
     if (!response.ok) throw new Error(`${response.status}: ${text.slice(0, 500)}`);
     return { status: "ok", name, endpoint, preview: textBody(text) };
@@ -1152,7 +1153,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "firecrawl") {
     const endpoint = "https://api.firecrawl.dev/v2/search";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${k}` },
         body: JSON.stringify({ query: "RikkaHub", limit: 1 }),
@@ -1166,7 +1167,7 @@ export async function testSearchService(service: SearchService) {
     const endpoint = String(service.customUrl ?? "").trim() || "https://api.x.ai/v1/responses";
     const model = String(service.model ?? "").trim() || "grok-4-fast";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${k}` },
         body: JSON.stringify({
@@ -1189,7 +1190,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "perplexity") {
     const endpoint = "https://api.perplexity.ai/search";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { Authorization: `Bearer ${k}`, "Content-Type": "application/json" },
         body: JSON.stringify({ query: "RikkaHub", max_results: 1 }),
@@ -1202,7 +1203,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "bocha") {
     const endpoint = "https://api.bochaai.com/v1/web-search";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { Authorization: `Bearer ${k}`, "Content-Type": "application/json" },
         body: JSON.stringify({ query: "RikkaHub", summary: false, count: 1 }),
@@ -1215,7 +1216,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "linkup") {
     const endpoint = "https://api.linkup.so/v1/search";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { Authorization: `Bearer ${k}`, "Content-Type": "application/json" },
         body: JSON.stringify({ q: "RikkaHub", depth: "standard", outputType: "sourcedAnswer", includeImages: "false" }),
@@ -1228,7 +1229,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "metaso") {
     const endpoint = "https://metaso.cn/api/v1/search";
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { Authorization: `Bearer ${k}`, Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify({ q: "RikkaHub", scope: "webpage", size: 1, includeSummary: false }),
@@ -1242,7 +1243,7 @@ export async function testSearchService(service: SearchService) {
     const endpoint = "https://ollama.com/api/web_search";
     // runSearchService 把 max_results clamp 到 [5,10],这里取下界 5 避免被上游拒绝。
     return runSearchKeyTestResult(name, endpoint, apiKey, async (k) => {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers: { Authorization: `Bearer ${k}`, "Content-Type": "application/json" },
         body: JSON.stringify({ query: "RikkaHub", max_results: 5 }),
@@ -1255,7 +1256,7 @@ export async function testSearchService(service: SearchService) {
   if (type === "jina") {
     const searchUrl = String(service.searchUrl ?? "").trim() || "https://s.jina.ai/";
     return runSearchKeyTestResult(name, searchUrl, apiKey, async (k) => {
-      const response = await fetch(searchUrl, {
+      const response = await fetchWithTimeout(searchUrl, {
         method: "POST",
         headers: { Authorization: `Bearer ${k}`, "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ q: "RikkaHub" }),

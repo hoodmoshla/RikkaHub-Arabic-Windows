@@ -3,6 +3,7 @@
 // 请求日志暂经 ../server 的 addLog 记录（3.5 拆 api/ 时收敛）。
 
 import { readFileSync, statSync } from "node:fs";
+import { fetchWithTimeout } from "../foundation/net";
 import { join } from "node:path";
 import type { GeneratedImage, JsonValue, Model, StoredFile } from "../foundation/types";
 import { filesDir } from "../foundation/paths";
@@ -18,6 +19,9 @@ import {
   textBody,
 } from "../model-providers";
 import { addLog } from "../api/logs";
+
+// 6-2:生图 provider 普遍分钟级(尤其批量/高分辨率),默认 30s 会误杀;5 分钟硬上限防永挂。
+const IMAGE_GEN_TIMEOUT_MS = 300_000;
 
 function imageSize(aspectRatio: string) {
   switch (aspectRatio) {
@@ -60,7 +64,7 @@ async function parseImageDataItem(
   }
   const url = String(item.url ?? "");
   if (!url) return null;
-  const dlResp = await fetch(url);
+  const dlResp = await fetchWithTimeout(url, { timeoutMs: 120_000 });
   if (!dlResp.ok) throw new Error(`Failed to download generated image: ${dlResp.status}`);
   const buf = Buffer.from(await dlResp.arrayBuffer());
   const contentType = dlResp.headers.get("content-type")?.split(";")[0]?.trim();
@@ -125,10 +129,11 @@ export async function callImageGeneration(input: {
       instances: [{ prompt: input.prompt }],
       parameters: { sampleCount: count, aspectRatio: sizes.google },
     }, modelItem);
-    const response = await fetch(endpoint, {
+    const response = await fetchWithTimeout(endpoint, {
       method: "POST",
       headers: applyModelRequestHeaders({ "Content-Type": "application/json" }, providerItem, modelItem),
       body: JSON.stringify(body),
+      timeoutMs: IMAGE_GEN_TIMEOUT_MS,
     });
     const text = await response.text();
     addLog({
@@ -177,7 +182,7 @@ export async function callImageGeneration(input: {
     for (const entry of customBodyEntriesForForm(modelItem)) {
       form.append(entry.key, customFormValue(entry.value));
     }
-    const response = await fetch(endpoint, { method: "POST", headers, body: form });
+    const response = await fetchWithTimeout(endpoint, { method: "POST", headers, body: form, timeoutMs: IMAGE_GEN_TIMEOUT_MS });
     const text = await response.text();
     addLog({
       providerId: providerItem.id,
@@ -208,10 +213,11 @@ export async function callImageGeneration(input: {
 
   const endpoint = `${base}/images/generations`;
   const body = applyModelCustomBody({ model: selectedModel, prompt: input.prompt, n: count, size: sizes.openai }, modelItem);
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    timeoutMs: IMAGE_GEN_TIMEOUT_MS,
   });
   const text = await response.text();
   addLog({

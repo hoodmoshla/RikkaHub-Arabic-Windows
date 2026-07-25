@@ -5,7 +5,7 @@
 import { gunzipSync, gzipSync } from "node:zlib";
 import type { AsrProvider, AsrRealtimeSession } from "../foundation/types";
 import { id, isRecord } from "../foundation/utils";
-import { resolveEffectiveProxy, shouldBypassProxy } from "../foundation/net";
+import { fetchWithTimeout, resolveEffectiveProxy, shouldBypassProxy } from "../foundation/net";
 import { state } from "../persistence/json-store";
 import { textBody } from "../model-providers";
 import { addLog } from "../api/logs";
@@ -122,10 +122,11 @@ export async function transcribeAudioWithAsrProvider(file: File) {
           "X-Api-Resource-Id": provider.resourceId || "volc.seedasr.sauc.duration",
           "X-Api-Request-Id": id(),
         };
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers,
     body: form,
+    timeoutMs: 120_000, // 长音频转写偏慢,30s 默认会误杀
   });
   const rawText = await response.text();
   addLog({
