@@ -67,6 +67,9 @@ WORKDIR /app
 COPY --from=tools /tools/ /
 COPY --from=builder /build/pc-server/rikkahub-pc ./
 COPY --from=builder /build/build/client/ ./web-ui/build/client/
+# 8-5:品牌图标与内置字体随镜像分发(Tauri 形态经 bundle resources 携带,Docker 需显式拷)
+COPY icons/ ./icons/
+COPY fonts/ ./fonts/
 
 VOLUME ["/app/pc-data"]
 EXPOSE 8080

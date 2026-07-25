@@ -80,6 +80,8 @@ jobs:
           cp -r web-ui/build/client /tmp/pkg/rikkahub-pc/web-ui/build/client
           # 内置字体(若有)随包分发;目录可能只有 README,空拷贝无副作用。
           cp -r fonts /tmp/pkg/rikkahub-pc/fonts
+          # 8-5:品牌图标随包分发,否则全部降级为灰底首字母
+          cp -r icons /tmp/pkg/rikkahub-pc/icons
           # sanity:确认 index.html 在位,否则 routeStatic 会回退到 "not built" 提示
           test -f /tmp/pkg/rikkahub-pc/web-ui/build/client/index.html
           cd /tmp/pkg

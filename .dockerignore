@@ -10,7 +10,6 @@ pc-data/
 **/*.nsi
 **/*.nsh
 web-ui/src-tauri/
-icons/
 docs/
 .github/
 CLAUDE.md
