@@ -1,169 +1,18 @@
-import { JsonValue, Model, Provider, ProxyMode, ProxyConfig, Assistant, Message, MessageNode, WriteStrategy, Conversation, DailyStat, StoredFile, State, GlobalMemoryFile, AssistantMemoryFile, GitHubSkillInfo, GitHubSkillFile, ApiMessage, FontWeightFile, FontEntry, ManifestEntry, BuiltinManifest, StreamHooks, AuxiliaryTextOptions } from "./foundation/types";
-import type { Settings } from "./foundation/types/settings";
-import { id, uniqueStrings, cloneJson, textFromParts, renderTemplate, applyPlaceholders, localeDisplayName, estimateTokens, dateKey, getStringArray, isRecord, mergeById, extensionFromMime, message, reasoningFromParts } from "./foundation/utils";
-import { executableDir, rootDir, dataDir, filesDir, skillsDir, customFontsDir, statePath, globalMemoryPath, assistantMemoryPath, pendingMemoryPath, deviceIdPath } from "./foundation/paths";
+import { dataDir } from "./foundation/paths";
 import { RUNNING_IN_CONTAINER } from "./foundation/platform";
-import { applyEffectiveProxy, classifyProxyError, installProxyFetchInterceptor, resolveEffectiveProxy, setActualServingPort } from "./foundation/net";
-import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, flushSaveState, saveState, setState, state, writeSlimStateJsonSync, writeSlimStateJsonSyncForMemory } from "./persistence/json-store";
-import { GLOBAL_MEMORY_ID, buildMemoryPrompt, buildRecentChatsPrompt, memoryStore } from "./memory/index";
-import { readZipEntries } from "./files/index";
-import { APP_VERSION } from "./updates/index";
-import { buildSearchContext, runScrapeWeb, runSearchWeb } from "./search/index";
-import { asrRealtimeSessions, normalizeAsrProviders, sendAsrAudio, startAsrRealtimeSession, stopAsrRealtimeSession } from "./media/asr";
-import { DEFAULT_SYSTEM_TTS_ID, defaultTtsProviders, normalizeTtsProviders } from "./media/tts";
-import { normalizeS3Config, normalizeWebDavConfig } from "./app-config/backup-config";
-import { error, json, mime } from "./api/request";
+import { setActualServingPort } from "./foundation/net";
+import { flushSaveState, saveState, state } from "./persistence/json-store";
+import { asrRealtimeSessions, sendAsrAudio, startAsrRealtimeSession, stopAsrRealtimeSession } from "./media/asr";
+import { error, json } from "./api/request";
 import { startAnalytics } from "./app-config/analytics";
 import { bootstrap } from "./bootstrap";
-import { DEFAULT_COMPRESS_PROMPT, DEFAULT_OCR_PROMPT, DEFAULT_PROMPT_OPTIMIZE_PROMPT, DEFAULT_SUGGESTION_PROMPT, DEFAULT_TITLE_PROMPT, DEFAULT_TRANSLATION_PROMPT } from "./app-config/prompts";
-import { attachOcrToImageParts, compressConversation, fetchAuxiliaryText, generateTitleForConversation, markOcrPendingParts } from "./conversations/auxiliary";
-import { generateAnswer, resumeApprovedToolParts } from "./conversations/orchestrator";
 import { generating } from "./conversations/generation-state";
-import { updateSettings } from "./app-config";
-import { abortConversationGeneration, appendTextPart, canResumeToolExecution, deleteConversationsById, ensureConversation, ensureUsage, estimatePromptTokensForConversation, findAssistant, finishInterruptedPendingToolsInConversation, finishMessage, hasPendingToolApproval, hasResumableToolParts, hasToolParts, presetMessageNodes, summaryAsText, toolApprovalType } from "./conversations/helpers";
-import { executeToolCall, realizeToolResult, toolResultToParts } from "./tools/execution";
-import { openAiLocalTools, openAiMcpTools, openAiSearchTools, openAiSkillTools } from "./tools/bound";
-import { isEmptyAssistantPlaceholder } from "./inference-engine/parts";
-import { buildGoogleRequestBody, conversationMessagesForApi, conversationResponseApiInput, conversationResponseApiInstructions, templateVariables } from "./inference-engine/conversation-encoding";
-import { importSkillFromBuffer, importSkillFromGitHub } from "./tools/skills-import";
-import { serveAIIcon } from "./assets/icons";
-import { FONT_EXTENSIONS_SET, MAX_FONT_BYTES, fontCssName, fontExtension, isBareFileName, isFontFile, listBuiltinFonts, listCustomFonts, listSystemFonts, makeBundledFontEntry, resolveFontFile } from "./assets/fonts";
-import { endpointFor, fetchProviderBalance, fetchProviderModels, runProviderCheck } from "./model-providers/checks";
 import { handleAuthTokenRequest, isWebAuthAuthorized, warnIfExposedWithoutAuth } from "./api/auth";
 import { routeStatic } from "./api/static";
-import { addLog, defaultRequestStats, normalizeRequestStats } from "./api/logs";
 import { routeApi } from "./api/router";
-import { broadcastConversation, broadcastList, broadcastMemoryUpdate, broadcastNodeUpdate, broadcastSettings, conversationClients, scheduleNodeBroadcast } from "./api/sse";
-import {
-  applyCustomBody,
-  applyRequestHeaders,
-  builtinProviderRank,
-  DEFAULT_AUTO_MODEL_ID,
-  defaultProviders,
-  enrichModel,
-  findModel,
-  inferModelAbilities,
-  jsonBody,
-  model,
-  modelsEndpointFor,
-  NA_API_PRESET_MODELS,
-  NA_API_PROVIDER_ID,
-  normalizeFetchedModels,
-  providerHeaders,
-  providerTestCorePassed,
-  providerTestModel,
-  SUNSET_PROVIDER_IDS,
-  textBody,
-  TENCENT_PROVIDER_ID,
-} from "./model-providers";
-import {
-  apiToolCallFromPart,
-  resolvedToolOutput,
-  toolExecutionErrorPayload,
-} from "./tools/format";
-import {
-  callMcpTool,
-  listSkills,
-  openAiLocalTools as openAiLocalToolsCore,
-  openAiMcpTools as openAiMcpToolsCore,
-  openAiSearchTools as openAiSearchToolsCore,
-  openAiSkillTools as openAiSkillToolsCore,
-  readSkillBody,
-  runAskUserTool,
-  runClipboardTool,
-  runGetTimeInfoTool,
-  runTextToSpeechTool,
-  safeSkillDir,
-  safeSkillFile,
-  skillMetadataFromFile,
-  parseSkillFrontmatter,
-} from "./tools";
-import {
-  apiContentFromParts,
-  apiContentText,
-  appendAssistantApiMessages,
-  claudeCacheControlEphemeral,
-  claudeMessagesFromApiMessages,
-  claudeSystemContent,
-  claudeThinkingPayload,
-  claudeToolsFromOpenAiTools,
-  dataUrlForMessageUrl,
-  googleContentsFromApiMessages,
-  googleFunctionDeclarations,
-  googleGenerationConfig,
-  GOOGLE_SAFETY_SETTINGS,
-  hasBuiltInTool,
-  hostOfProvider,
-  isModelAllowTemperature,
-  openAiChatCompletionsModalities,
-  parseDataUrl,
-  reasoningLevelNormalized,
-  reasoningPayloadForProvider,
-  auxiliaryReasoningPayloadForProvider,
-  responseApiBuiltInTools,
-  responseApiIncludeForProvider,
-  responseApiMessagesFromUiMessages,
-  responseApiReasoningForProvider,
-  supportsAbility,
-  supportsInputModality,
-  supportsOutputModality,
-} from "./inference-engine/message-builder";
-import {
-  addStreamImage,
-  addStreamText,
-  appendReasoningDelta,
-  finishReasoningParts,
-  replaceLoadingReasoningWithTool,
-  setMessageLoading,
-  streamStartedMessages,
-} from "./inference-engine/parts";
-import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolExecutor, ToolResult } from "./inference-engine/events";
-import {
-  appendUsageFromRaw,
-  completionMessageText,
-  deltaReasoningContent,
-  deltaTextContent,
-  fetchClaudeAuxiliaryStream,
-  fetchClaudeTextWithTools,
-  fetchGoogleAuxiliaryStream,
-  fetchOpenAiAuxiliaryStream,
-  fetchOpenAiText,
-  fetchOpenAiTextStreaming,
-  fetchText,
-  fillContextLimit,
-  loadModelsDev,
-  parseSseChunks,
-  responseEventToDelta,
-  streamClaudeChatWithTools,
-  streamGoogleChatWithTools,
-} from "./inference-engine/providers";
-import {
-  checkpointConversationsDb,
-  deletePcConversations,
-  flushConvDirtyNow,
-  getConversationsDb,
-  getConversation,
-  loadAllConversationsFromDb,
-  markConversationRowDirty,
-  markMessageNodeDirty,
-  migrateConversationsIntoDb,
-  openConversationsDb,
-  persistConversation,
-  scheduleThrottledConvFlush,
-  selectedConversationMessages,
-} from "./conversations";
-import {
-  activePromptInjections as activePromptInjectionsCore,
-  applyMessageTemplateToParts,
-  applyOutputTransforms,
-  applyPromptInjectionsToMessages,
-  defaultAssistant,
-  findAssistant as findAssistantCore,
-  templateVariables as templateVariablesCore,
-} from "./assistants";
+import { loadModelsDev } from "./inference-engine/providers";
+import { checkpointConversationsDb, flushConvDirtyNow, getConversation, persistConversation } from "./conversations";
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { installProcessSafetyNet } from "./observability/app-errors";
 

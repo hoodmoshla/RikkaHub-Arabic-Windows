@@ -8,6 +8,9 @@
     // strict 蕴含 strictFunctionTypes/strictPropertyInitialization/useUnknownInCatchVariables 等,
     // 开启当日全仓零错误(前两档已消化绝大部分),此后不允许回退。
     "strict": true,
+    // 0-1(2026-07-25):server.ts 曾积累 272 个死 import(历史大文件搬迁残留),typecheck
+    // 不报导致新人无法从 import 判断真实依赖。大扫除清零后开启,此后不允许回退。
+    "noUnusedLocals": true,
     "noEmit": true,
     "skipLibCheck": true,
     "types": ["bun"],

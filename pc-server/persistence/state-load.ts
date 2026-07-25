@@ -11,7 +11,6 @@ import {
   CONVERSATIONS_SQLITE_MIGRATION,
   MEMORY_FILE_SPLIT_MIGRATION,
   recoverStateFromBackups,
-  state,
   sweepStaleStateTempFiles,
   writeSlimStateJsonSync,
   writeSlimStateJsonSyncForMemory,

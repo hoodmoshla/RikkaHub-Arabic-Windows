@@ -2,11 +2,11 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3e），行为不变。
 
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { Assistant, JsonValue, MessagePart, StoredFile, ToolOutputEntry } from "../foundation/types";
-import type { ToolCall, ToolContext, ToolResult } from "../inference-engine/events";
+import type { ToolResult } from "../inference-engine/events";
 import { extensionFromMime, getStringArray, isRecord } from "../foundation/utils";
-import { dataDir, filesDir } from "../foundation/paths";
+import { filesDir } from "../foundation/paths";
 import { saveState, state } from "../persistence/json-store";
 import { addLog } from "../api/logs";
 import { broadcastMemoryUpdate } from "../api/sse";
@@ -15,7 +15,6 @@ import { runScrapeWeb, runSearchWeb } from "../search";
 import { callMcpTool } from "./mcp";
 import { runAskUserTool, runClipboardTool, runGetTimeInfoTool, runTextToSpeechTool } from "./local";
 import { readSkillBody, safeSkillFile } from "./skills";
-import { safeDataFilePath } from "../files";
 
 /** save_memory 工具执行(1.3.2)。模型只提议 content,应用按 writeStrategy 决定落地方式:
  *  - always_assistant + 助手层启用 → 直接存助手层

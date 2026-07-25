@@ -49,8 +49,7 @@ beforeEach(() => {
   });
 });
 
-const OLD = 0; // lastAccess 为 Date.now()，用未来时间戳判定闲置
-const FUTURE = () => Date.now() + 120_000;
+const FUTURE = () => Date.now() + 120_000; // lastAccess 为 Date.now(),用未来时间戳判定闲置
 
 describe("单实例保证", () => {
   test("并发 checkout 返回同一实例，仅加载一次", () => {

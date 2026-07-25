@@ -2,7 +2,7 @@
 // 纪律：纯函数，只读取 assistant / settings，不读写 state 运行时副作用。
 
 import { getStringArray, isRecord } from "../foundation/utils";
-import type { Assistant, JsonValue, ToolApprovalState } from "../foundation/types";
+import type { Assistant, ToolApprovalState } from "../foundation/types";
 import { state } from "../persistence/json-store";
 
 export function getMcpToolOverride(
