@@ -189,5 +189,14 @@
     "installer_launch_failed_msg": "Failed to launch installer: {{message}}",
     "applied_restart": "Update applied. Restart Rikkahub to take effect",
     "apply_failed": "Failed to apply update"
+  },
+  "errors": {
+    "load_conversations_failed": "Failed to load conversations",
+    "read_image_failed": "Failed to read image",
+    "decode_image_failed": "Failed to decode image"
+  },
+  "theme": {
+    "custom": "Custom",
+    "unnamed": "Untitled theme"
   }
 }

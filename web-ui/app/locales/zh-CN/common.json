@@ -189,5 +189,14 @@
     "installer_launch_failed_msg": "启动安装程序失败：{{message}}",
     "applied_restart": "更新已应用，请重启 Rikkahub 生效",
     "apply_failed": "应用更新失败"
+  },
+  "errors": {
+    "load_conversations_failed": "加载会话失败",
+    "read_image_failed": "读取图片失败",
+    "decode_image_failed": "图片解码失败"
+  },
+  "theme": {
+    "custom": "自定义",
+    "unnamed": "未命名主题"
   }
 }

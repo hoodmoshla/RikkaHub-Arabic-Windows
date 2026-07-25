@@ -1,4 +1,5 @@
 import * as React from "react";
+import i18n from "~/i18n";
 
 import api, { sse } from "~/services/api";
 import { mergeConversationList, refreshConversationList, sortConversationList } from "~/lib/conversation-list-ops";
@@ -197,7 +198,7 @@ export function useConversationList({
       })
       .catch((err: Error) => {
         if (!active || requestEpoch !== listRequestEpochRef.current) return;
-        setError(err.message || "加载会话失败");
+        setError(err.message || i18n.t("common:errors.load_conversations_failed"));
       })
       .finally(() => {
         if (!active || requestEpoch !== listRequestEpochRef.current) return;

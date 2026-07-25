@@ -88,6 +88,7 @@
     "optimize_context": {
       "user": "用户",
       "assistant": "助手"
-    }
+    },
+    "scroll_to_bottom": "滚动到底部"
   }
 }

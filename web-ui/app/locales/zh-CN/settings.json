@@ -14,7 +14,8 @@
     "logs": "请求日志",
     "proxy": "代理与端口",
     "about": "关于",
-    "donate": "赞助"
+    "donate": "赞助",
+    "meta_title": "RikkaHub PC 设置"
   },
   "memory": {
     "title": "记忆",

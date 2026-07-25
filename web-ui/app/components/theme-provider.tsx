@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import i18n from "~/i18n";
 
 export type ThemeMode = "dark" | "light" | "system";
 export type Theme = ThemeMode;
@@ -147,7 +148,7 @@ function readUserThemes(storageKey: string): UserTheme[] {
     const migrated: UserTheme[] = [
       {
         id: generateUserThemeId(),
-        name: "自定义",
+        name: i18n.t("common:theme.custom"),
         css: { light: legacyLight ?? "", dark: legacyDark ?? "" },
       },
     ];
@@ -286,7 +287,7 @@ export function ThemeProvider({
     ({ name, css }: { name: string; css: CustomThemeCss }): UserTheme => {
       const created: UserTheme = {
         id: generateUserThemeId(),
-        name: name.trim() || "未命名主题",
+        name: name.trim() || i18n.t("common:theme.unnamed"),
         css,
       };
       setUserThemes((prev) => [...prev, created]);

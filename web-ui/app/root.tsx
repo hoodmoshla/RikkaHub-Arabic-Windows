@@ -9,6 +9,7 @@ import {
 } from "react-router";
 import * as React from "react";
 import { AnimatePresence, motion } from "motion/react";
+import i18n from "~/i18n";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Route } from "./+types/root";
@@ -32,8 +33,18 @@ export const links: Route.LinksFunction = () => [
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
+  // 7-1:lang 跟随 i18n 当前语言(此前硬编码 "en");切换语言时同步 <html lang>。
+  React.useEffect(() => {
+    const sync = (lng: string) => {
+      document.documentElement.lang = lng;
+    };
+    i18n.on("languageChanged", sync);
+    return () => {
+      i18n.off("languageChanged", sync);
+    };
+  }, []);
   return (
-    <html lang="en">
+    <html lang={i18n.language}>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />

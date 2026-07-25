@@ -88,6 +88,7 @@
     "optimize_context": {
       "user": "User",
       "assistant": "Assistant"
-    }
+    },
+    "scroll_to_bottom": "Scroll to bottom"
   }
 }

@@ -14,7 +14,8 @@
     "logs": "Request logs",
     "proxy": "Proxy & port",
     "about": "About",
-    "donate": "Donate"
+    "donate": "Donate",
+    "meta_title": "RikkaHub PC Settings"
   },
   "memory": {
     "title": "Memory",

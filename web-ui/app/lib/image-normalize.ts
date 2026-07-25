@@ -1,3 +1,5 @@
+import i18n from "~/i18n";
+
 const DEFAULT_MAX_IMAGE_DIMENSION = 10_000;
 const DEFAULT_MAX_IMAGE_PIXELS = 16_000_000;
 const DEFAULT_JPEG_QUALITY = 0.85;
@@ -25,7 +27,7 @@ async function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result ?? ""));
-    reader.onerror = () => reject(reader.error ?? new Error("读取图片失败"));
+    reader.onerror = () => reject(reader.error ?? new Error(i18n.t("common:errors.read_image_failed")));
     reader.readAsDataURL(file);
   });
 }
@@ -34,7 +36,7 @@ async function loadImage(dataUrl: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("图片解码失败"));
+    image.onerror = () => reject(new Error(i18n.t("common:errors.decode_image_failed")));
     image.src = dataUrl;
   });
 }

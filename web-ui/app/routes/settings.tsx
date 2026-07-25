@@ -1,5 +1,6 @@
 import * as React from "react";
 import { useTranslation } from "react-i18next";
+import i18n from "~/i18n";
 
 import {
   ArrowLeft,
@@ -156,7 +157,7 @@ const navItems: Array<{
 ];
 
 export function meta() {
-  return [{ title: "RikkaHub PC 设置" }];
+  return [{ title: i18n.t("settings:nav.meta_title") }];
 }
 
 export default function SettingsPage() {
