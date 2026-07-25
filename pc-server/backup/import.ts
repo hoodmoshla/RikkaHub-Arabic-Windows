@@ -13,6 +13,7 @@ import { MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state } from "../pers
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
 import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, getConversationsDb, loadAllConversationsFromDb, resetConversationsDbTo, snapshotConversationsDbBeforeImport } from "../conversations";
 import { reportError } from "../observability/app-errors";
+import { hashBytesSha256, hashFileSha256, rewritePcFileUrlsDeep } from "./file-refs";
 import { clearWorkingSet } from "../conversations/working-set";
 import { importSkills } from "../tools";
 import { ANDROID_AVATAR_TYPE_TO_PC, copyDirRecursive, rewriteAvatarsInSettings } from "./export";
@@ -189,36 +190,78 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
       }
     }
     importSkills((body as { skills?: unknown }).skills);
-    // Re-link file bytes from upload/<fileName>. We trust the metadata in pc-backup.json's
-    // files[] array for mime/extractedText etc., but assign new local ids and paths.
+    // 批5:re-link 改为元数据驱动。旧实现按目录字母序重编号且不改写引用(id>9 时
+    // '10.png'<'2.png',字母序≠id 序),恢复后消息附件/头像/画廊全面错位。现在:每条元数据
+    // 用 backupName(导出端 zip 内实际文件名;老备份无此字段时退回 fileName)定位字节,
+    // 注册新 id 并记录 旧id→新id;导出端内容去重使多条元数据共享同一 backupName,在此
+    // 天然归并为一条。未被元数据认领的 upload/ 文件按未知文件兜底注册,坚持不丢字节。
     const uploadDir = join(extractDir, "upload");
     const incomingFiles = Array.isArray((incoming as State).files) ? (incoming as State).files : [];
-    if (existsSync(uploadDir) && incomingFiles.length > 0) {
+    const oldIdToNewId = new Map<number, number>();
+    if (existsSync(uploadDir)) {
       mkdirSync(filesDir, { recursive: true });
-      // Build a lookup by display name → metadata so we can match upload/ entries back to
-      // their saved metadata (mime, extractedText, original id).
-      const metaByName = new Map<string, StoredFile>();
-      for (const meta of incomingFiles) {
-        if (meta && typeof meta.fileName === "string") metaByName.set(meta.fileName, meta);
-      }
-      for (const entry of readdirSync(uploadDir)) {
+      const registerStaged = (entry: string, meta: StoredFile | undefined): number => {
         const srcPath = join(uploadDir, entry);
-        const stats = statSync(srcPath);
-        if (!stats.isFile()) continue;
         const newId = state.nextFileId++;
         const ext = extname(entry) || "";
         const targetPath = join(filesDir, `${newId}${ext}`);
         writeFileSync(targetPath, readFileSync(srcPath));
-        const meta = metaByName.get(entry);
         state.files.push({
           id: newId,
           path: targetPath,
           fileName: meta?.fileName ?? entry,
           mime: meta?.mime ?? guessMimeFromExt(ext),
-          size: meta?.size ?? stats.size,
+          size: meta?.size ?? statSync(srcPath).size,
           extractedText: meta?.extractedText,
         });
         filesImported += 1;
+        return newId;
+      };
+      const newIdByStagedName = new Map<string, number>();
+      for (const meta of incomingFiles) {
+        if (!meta || typeof meta !== "object") continue;
+        const rawName = typeof meta.backupName === "string" && meta.backupName ? meta.backupName : meta.fileName;
+        if (typeof rawName !== "string" || !rawName) continue;
+        // 备份文件是外部输入:zip 内文件名不允许路径分隔符/上跳,防路径穿越。
+        if (rawName.includes("..") || rawName.includes("/") || rawName.includes("\\")) continue;
+        const srcPath = join(uploadDir, rawName);
+        if (!existsSync(srcPath) || !statSync(srcPath).isFile()) continue;
+        let newId = newIdByStagedName.get(rawName);
+        if (newId === undefined) {
+          newId = registerStaged(rawName, meta);
+          newIdByStagedName.set(rawName, newId);
+        }
+        if (typeof meta.id === "number") oldIdToNewId.set(meta.id, newId);
+      }
+      for (const entry of readdirSync(uploadDir)) {
+        if (newIdByStagedName.has(entry)) continue;
+        if (!statSync(join(uploadDir, entry)).isFile()) continue;
+        registerStaged(entry, undefined);
+      }
+    }
+    // 引用改写:把恢复进来的会话/设置/画廊里的 /api/files/<旧id>/content 指向新 id。
+    // 旧实现完全不改写,是"恢复后图片错位/丢失"的根因之一(备份 2.0 调查)。
+    if (oldIdToNewId.size > 0) {
+      if (Array.isArray(state.conversations)) {
+        state.conversations = rewritePcFileUrlsDeep(
+          state.conversations as unknown as JsonValue,
+          oldIdToNewId,
+        ) as unknown as typeof state.conversations;
+      }
+      state.settings = rewritePcFileUrlsDeep(
+        state.settings as unknown as JsonValue,
+        oldIdToNewId,
+      ) as unknown as typeof state.settings;
+      if (Array.isArray(state.generatedImages)) {
+        const rewritten = rewritePcFileUrlsDeep(
+          state.generatedImages as unknown as JsonValue,
+          oldIdToNewId,
+        ) as unknown as typeof state.generatedImages;
+        state.generatedImages = rewritten.map((img) =>
+          typeof img.fileId === "number" && oldIdToNewId.has(img.fileId)
+            ? { ...img, fileId: oldIdToNewId.get(img.fileId)! }
+            : img,
+        );
       }
     }
     // Skills are restored via importSkills() above; count them from the skills array if present.
@@ -461,15 +504,56 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
   const uploadDir = join(extractDir, "upload");
   if (existsSync(uploadDir)) {
     mkdirSync(filesDir, { recursive: true });
+    // 批5 去重:此前每次安卓 zip 导入把 upload/ 全量追加注册(旧条目仍被消息引用,删不得),
+    // 每 PC↔APP 往返一轮附件翻倍(用户实测 4 份 = 两轮)。现按内容 sha256 对照现有文件,
+    // 命中即复用旧 id,只登记 filename→id 映射供 URL 改写。只对尺寸相同的候选计算 hash,
+    // 避免每次导入都全量读一遍 files 目录。
+    const existingBySize = new Map<number, { id: number; path: string }[]>();
+    for (const f of state.files) {
+      let p = f.path && existsSync(f.path) ? f.path : "";
+      if (!p) {
+        const ext = extname(f.fileName || "") || extname(f.path || "") || "";
+        const fallback = join(filesDir, `${f.id}${ext}`);
+        p = existsSync(fallback) ? fallback : "";
+      }
+      if (!p) continue;
+      const size = statSync(p).size;
+      const list = existingBySize.get(size) ?? [];
+      list.push({ id: f.id, path: p });
+      existingBySize.set(size, list);
+    }
+    const hashCache = new Map<string, string | null>();
+    const findExistingByContent = (bytes: Uint8Array): number | undefined => {
+      const candidates = existingBySize.get(bytes.byteLength);
+      if (!candidates || candidates.length === 0) return undefined;
+      const incomingHash = hashBytesSha256(bytes);
+      for (const c of candidates) {
+        let h = hashCache.get(c.path);
+        if (h === undefined) {
+          h = hashFileSha256(c.path);
+          hashCache.set(c.path, h);
+        }
+        if (h !== null && h === incomingHash) return c.id;
+      }
+      return undefined;
+    };
+    let dedupedFiles = 0;
     for (const entry of readdirSync(uploadDir)) {
       const srcPath = join(uploadDir, entry);
       const stats = statSync(srcPath);
       if (!stats.isFile()) continue;
+      const bytes = readFileSync(srcPath);
+      const existingId = findExistingByContent(bytes);
+      if (existingId !== undefined) {
+        androidFilenameToPcId.set(entry, existingId);
+        dedupedFiles += 1;
+        continue;
+      }
       const fileId = state.nextFileId++;
       const ext = extname(entry) || "";
       const targetName = `${fileId}${ext}`;
       const targetPath = join(filesDir, targetName);
-      writeFileSync(targetPath, readFileSync(srcPath));
+      writeFileSync(targetPath, bytes);
       state.files.push({
         id: fileId,
         path: targetPath,
@@ -477,8 +561,14 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
         mime: guessMimeFromExt(ext),
         size: stats.size,
       });
+      const list = existingBySize.get(stats.size) ?? [];
+      list.push({ id: fileId, path: targetPath });
+      existingBySize.set(stats.size, list);
       androidFilenameToPcId.set(entry, fileId);
       filesImported += 1;
+    }
+    if (dedupedFiles > 0) {
+      console.log(`[import] upload 去重:${dedupedFiles} 个文件与现有内容一致,复用原条目`);
     }
   }
 

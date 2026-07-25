@@ -15,6 +15,7 @@ import { state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
 import { DEFAULT_ASSISTANT_ID, exportPcConversationsDump, flushConvDirtyNow, getConversationsDb, loadConversationNodesFromDb } from "../conversations";
 import { listAllConversationMetas } from "../conversations/read-queries";
+import { collectPcFileRefs, hashFileSha256 } from "./file-refs";
 import { exportSkills } from "../tools";
 
 export function copyDirRecursive(src: string, dest: string): number {
@@ -70,7 +71,7 @@ function sanitizeModelModalitiesForExport(settings: Settings): Settings {
 // `pc-backup.json` of a zip backup, and is the only OOM-safe path for users with multi-GB
 // of attachments (inlining base64 file bytes can easily push a couple GB of files into
 // a JS string, blowing the V8 heap limit).
-export function backupPayloadMetadataOnly(settingsOverride?: Settings) {
+export function backupPayloadMetadataOnly(settingsOverride?: Settings, backupNameById?: Map<number, string>) {
   const settings = settingsOverride ?? state.settings;
   return {
     version: 2,
@@ -81,18 +82,16 @@ export function backupPayloadMetadataOnly(settingsOverride?: Settings) {
     state: {
       settings,
       generatedImages: state.generatedImages,
-      files: state.files,
+      // backupName = zip 内 upload/ 实际文件名(去重/重名规避后),恢复端据此回链原 id(批5)。
+      files: state.files.map((file) =>
+        backupNameById?.has(file.id) ? { ...file, backupName: backupNameById.get(file.id) } : file,
+      ),
       memories: memoryStore.exportFlat(),
     },
     skills: exportSkills(),
-    files: state.files.map((file) => ({
-      id: file.id,
-      path: file.path,
-      fileName: file.fileName,
-      mime: file.mime,
-      size: file.size,
-      extractedText: file.extractedText,
-    })),
+    // 批5:移除曾经的顶层 files[] 副本——与 state.files 完全重复(含 extractedText 时是
+    // 双份全文文本),zip 恢复端只读 state.files。老 JSON 备份的顶层 files(带 base64 data)
+    // 由另一条导出路径生产,不受影响。
   };
 }
 
@@ -321,6 +320,92 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>) {
 // by the local-export endpoint to avoid pulling the whole zip into a Buffer just to turn
 // around and stream it as the HTTP response — for users with multi-GB attachments, the zip
 // itself can exceed 4 GB and Buffer.from(...) on it is an OOM in waiting.
+// 收集全系统对文件 id 的引用:state 全量 JSON(设置头像/生图画廊 url 等)+ 活库全部节点
+// messages(消息附件/工具输出图)+ generatedImages.fileId 数字引用。宁可多留不可错删:
+// 引用扫描为并集,只有任何形态都未命中的条目(孤儿:删会话不删文件、画廊截断遗留等)
+// 才不进备份。调用方需先 flushConvDirtyNow() 保证活库为最新。
+function collectReferencedFileIds(): Set<number> {
+  const ids = new Set<number>();
+  collectPcFileRefs(safeJsonStringify(state), ids);
+  for (const img of state.generatedImages ?? []) {
+    if (typeof img.fileId === "number") ids.add(img.fileId);
+  }
+  const db = getConversationsDb();
+  if (db) {
+    for (const row of db.prepare("SELECT messages FROM pc_message_node").all() as { messages: string }[]) {
+      collectPcFileRefs(row.messages, ids);
+    }
+  }
+  return ids;
+}
+
+type UploadStagingPlan = {
+  copies: Array<{ srcPath: string; name: string }>;
+  backupNameById: Map<number, string>;
+  totalFiles: number;
+  missingSkipped: number;
+  orphanSkipped: number;
+  dedupedCount: number;
+};
+
+// 批5:附件 staging 计划。①无引用孤儿不进备份;②内容 sha256 去重(只对尺寸碰撞组计算,
+// 避免全量读盘两遍),重复内容共享同一 zip 内文件名——多个 id 的 backupName 指向同一份字节,
+// 恢复端天然归并;③重名规避沿用 stem_<id>.ext。
+function buildUploadStagingPlan(): UploadStagingPlan {
+  const referenced = collectReferencedFileIds();
+  const resolved: Array<{ file: (typeof state.files)[number]; srcPath: string; size: number }> = [];
+  let missingSkipped = 0;
+  let orphanSkipped = 0;
+  for (const file of state.files) {
+    // path 可能因跨机器/跨平台迁移 state.json、或 dataDir 漂移而失效(指向不存在的文件)。
+    // PC 文件命名固定为 <id>.<ext>,path 找不到时回退到 filesDir 下按 id 重找,尽量不丢附件。
+    let srcPath = file.path;
+    if (!srcPath || !existsSync(srcPath)) {
+      const ext = extname(file.fileName || "") || extname(file.path || "") || "";
+      const fallback = join(filesDir, `${file.id}${ext}`);
+      srcPath = existsSync(fallback) ? fallback : "";
+    }
+    if (!srcPath) {
+      missingSkipped++;
+      continue;
+    }
+    if (!referenced.has(file.id)) {
+      orphanSkipped++;
+      continue;
+    }
+    resolved.push({ file, srcPath, size: statSync(srcPath).size });
+  }
+  const sizeCount = new Map<number, number>();
+  for (const r of resolved) sizeCount.set(r.size, (sizeCount.get(r.size) ?? 0) + 1);
+  const usedNames = new Set<string>();
+  const nameByHash = new Map<string, string>();
+  const backupNameById = new Map<number, string>();
+  const copies: Array<{ srcPath: string; name: string }> = [];
+  let dedupedCount = 0;
+  for (const { file, srcPath, size } of resolved) {
+    const hash = (sizeCount.get(size) ?? 0) > 1 ? hashFileSha256(srcPath) : null;
+    if (hash) {
+      const prior = nameByHash.get(hash);
+      if (prior) {
+        backupNameById.set(file.id, prior);
+        dedupedCount++;
+        continue;
+      }
+    }
+    let name = file.fileName || `${file.id}${extname(srcPath) || ""}`;
+    if (usedNames.has(name)) {
+      const ext = extname(name);
+      const stem = name.slice(0, name.length - ext.length);
+      name = `${stem}_${file.id}${ext}`;
+    }
+    usedNames.add(name);
+    if (hash) nameByHash.set(hash, name);
+    backupNameById.set(file.id, name);
+    copies.push({ srcPath, name });
+  }
+  return { copies, backupNameById, totalFiles: state.files.length, missingSkipped, orphanSkipped, dedupedCount };
+}
+
 export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?: (message: string) => void): number {
   const tmpRoot = join(tempDir(), `rikkahub-backup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const stageDir = join(tmpRoot, "stage");
@@ -335,10 +420,15 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
       join(stageDir, "settings.json"),
       safeJsonStringify(rewriteAvatarsInSettings(sanitizedSettings, PC_AVATAR_TYPE_TO_ANDROID)),
     );
+    // 批5:先算附件 staging 计划(引用收集 + 内容去重 + zip 内文件名分配),让每个条目的
+    // backupName 随 pc-backup.json 元数据导出,恢复端据此精确回链原 id。
+    onProgress?.("正在分析附件引用...");
+    flushConvDirtyNow();
+    const uploadPlan = buildUploadStagingPlan();
     console.log(`[backup] staging pc-backup.json...`);
     writeFileSync(
       join(stageDir, "pc-backup.json"),
-      safeJsonStringify(backupPayloadMetadataOnly(sanitizedSettings)),
+      safeJsonStringify(backupPayloadMetadataOnly(sanitizedSettings, uploadPlan.backupNameById)),
     );
     // 备份 2.0:PC 原生会话 dump——PC→PC 恢复的权威载体,与安卓模板解耦。活库已打开即
     // 无条件生成(零会话也写:恢复端以 dump 存在为准执行替换语义);安卓端导入对未知
@@ -371,44 +461,25 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
         if (existsSync(dbPath)) try { rmSync(dbPath); } catch { /* */ }
       }
     }
-    if (state.files.length > 0) {
+    if (uploadPlan.copies.length > 0) {
       const uploadStage = join(stageDir, "upload");
       mkdirSync(uploadStage, { recursive: true });
-      const usedNames = new Set<string>();
-      const totalFiles = state.files.length;
       let stagedFiles = 0;
-      let skippedFiles = 0;
-      for (const file of state.files) {
-        // path 可能因跨机器/跨平台迁移 state.json、或 dataDir 漂移而失效(指向不存在的文件)。
-        // PC 文件命名固定为 <id>.<ext>,path 找不到时回退到 filesDir 下按 id 重找,尽量不丢附件。
-        let srcPath = file.path;
-        if (!srcPath || !existsSync(srcPath)) {
-          const ext = extname(file.fileName || "") || extname(file.path || "") || "";
-          const fallback = join(filesDir, `${file.id}${ext}`);
-          srcPath = existsSync(fallback) ? fallback : "";
-        }
-        if (!srcPath) {
-          skippedFiles++;
-          continue;
-        }
-        let name = file.fileName || `${file.id}${extname(srcPath) || ""}`;
-        if (usedNames.has(name)) {
-          const ext = extname(name);
-          const stem = name.slice(0, name.length - ext.length);
-          name = `${stem}_${file.id}${ext}`;
-        }
-        usedNames.add(name);
+      for (const { srcPath, name } of uploadPlan.copies) {
         stagedFiles++;
-        onProgress?.(`正在打包附件 (${stagedFiles}/${totalFiles})...`);
+        onProgress?.(`正在打包附件 (${stagedFiles}/${uploadPlan.copies.length})...`);
         try {
           writeFileSync(join(uploadStage, name), readFileSync(srcPath));
         } catch (copyErr) {
           console.warn("[backup] failed to stage upload file", srcPath, copyErr);
         }
       }
-      if (skippedFiles > 0) {
-        reportError("backup", "warn", `${skippedFiles}/${totalFiles} 个附件源文件缺失(路径失效或已删除),未包含在备份中`);
-      }
+    }
+    if (uploadPlan.missingSkipped > 0) {
+      reportError("backup", "warn", `${uploadPlan.missingSkipped}/${uploadPlan.totalFiles} 个附件源文件缺失(路径失效或已删除),未包含在备份中`);
+    }
+    if (uploadPlan.orphanSkipped > 0 || uploadPlan.dedupedCount > 0) {
+      console.log(`[backup] upload staging: 跳过 ${uploadPlan.orphanSkipped} 个无引用孤儿文件, 内容去重 ${uploadPlan.dedupedCount} 个`);
     }
     if (existsSync(skillsDir)) {
       onProgress?.("正在打包技能文件...");
