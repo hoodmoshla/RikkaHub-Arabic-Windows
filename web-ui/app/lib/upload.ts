@@ -204,7 +204,12 @@ export async function uploadFilesToDraft(
       formData.append("files", safeFile, safeFile.name);
     });
 
-    const response = await api.postMultipart<UploadFilesResponseDto>("files/upload", formData);
+    // 7-2:唯一上传通道不能吃 ky 默认 30s 超时——大文件/慢网/远程部署 30s 传不完,
+    // ky abort 后服务端可能已落盘,产生孤儿文件+重试重复。与导入导出(XHR timeout=0)
+    // 及翻译/生图等长操作(timeout:false)对齐。大文件流式上传重做见路线图。
+    const response = await api.postMultipart<UploadFilesResponseDto>("files/upload", formData, {
+      timeout: false,
+    });
     const parts = response.files.map(toMessagePart);
     onAddParts(parts);
     return { error: null };
