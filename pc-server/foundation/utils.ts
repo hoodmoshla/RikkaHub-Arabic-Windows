@@ -112,8 +112,11 @@ export function safeJsonStringify(value: unknown): string {
 }
 
 export function backupStamp(): string {
-  // Match Android's DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss") so the filename stamp lines up.
-  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "_");
+  // 对齐安卓 DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")——安卓用的是本地时区,
+  // 此前 toISOString() 是 UTC,中国用户导出的文件名时间早 8 小时,跨端排序错位(1-9)。
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
 export function stripHtml(value: string) {
