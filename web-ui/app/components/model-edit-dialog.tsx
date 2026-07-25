@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Plus, Trash2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "~/components/ui/button";
 import {
@@ -37,10 +38,10 @@ import type {
 // Mirrors Android's ModelType segmented selector (CHAT/IMAGE/EMBEDDING). Server-side audit
 // (pc-server/server.ts:9864) only routes "IMAGE" today — "EMBEDDING" is declared but unused.
 // We surface it anyway because Android has it and the upstream JSON schema accepts it.
-const TYPE_OPTIONS: { value: ModelType; label: string; hint?: string }[] = [
-  { value: "CHAT", label: "聊天" },
-  { value: "IMAGE", label: "图像生成" },
-  { value: "EMBEDDING", label: "嵌入" },
+const TYPE_OPTIONS: { value: ModelType; labelKey: string }[] = [
+  { value: "CHAT", labelKey: "model_edit.type_chat" },
+  { value: "IMAGE", labelKey: "model_edit.type_image" },
+  { value: "EMBEDDING", labelKey: "model_edit.type_embedding" },
 ];
 
 // Android only has TEXT/IMAGE today; PC kept the wider list because some providers
@@ -54,36 +55,24 @@ const TYPE_OPTIONS: { value: ModelType; label: string; hint?: string }[] = [
 // - AUDIO/VIDEO 保留为灰显占位——保持 UI 一致性 + 为未来音视频对话能力留接口,当前不可勾选;
 // - 导出时由后端 sanitizeModelModalitiesForExport 统一剥离这三个值,老数据里的脏值也不会
 //   写进备份文件。
-const MODALITY_OPTIONS: { value: ModelModality; label: string; disabled?: boolean }[] = [
-  { value: "TEXT", label: "文本" },
-  { value: "IMAGE", label: "图像" },
-  { value: "AUDIO", label: "音频", disabled: true },
-  { value: "VIDEO", label: "视频", disabled: true },
-  // { value: "DOCUMENT", label: "文档" },  // 永久移除:LLM 无"文档"模态
+const MODALITY_OPTIONS: { value: ModelModality; labelKey: string; disabled?: boolean }[] = [
+  { value: "TEXT", labelKey: "model_edit.modality_text" },
+  { value: "IMAGE", labelKey: "model_edit.modality_image" },
+  { value: "AUDIO", labelKey: "model_edit.modality_audio", disabled: true },
+  { value: "VIDEO", labelKey: "model_edit.modality_video", disabled: true },
+  // DOCUMENT 永久移除:LLM 无"文档"模态
 ];
 
-const ABILITY_OPTIONS: { value: ModelAbility; label: string; hint: string }[] = [
-  { value: "TOOL", label: "工具调用", hint: "启用后请求才会带 tools 字段" },
-  {
-    value: "REASONING",
-    label: "推理输出",
-    hint: "启用后请求才会带 thinking/reasoning 字段",
-  },
+const ABILITY_OPTIONS: { value: ModelAbility; labelKey: string; hintKey: string }[] = [
+  { value: "TOOL", labelKey: "model_edit.ability_tool", hintKey: "model_edit.ability_tool_hint" },
+  { value: "REASONING", labelKey: "model_edit.ability_reasoning", hintKey: "model_edit.ability_reasoning_hint" },
 ];
 
 // `url_context` is declared in Android but the PC server has no code path that maps it
 // to a provider-specific tool — surfacing it would be a UI shell. Skipping for now.
-const BUILTIN_TOOL_OPTIONS: { value: BuiltInToolType; label: string; hint: string }[] = [
-  {
-    value: "search",
-    label: "联网搜索",
-    hint: "Google: googleSearch；OpenAI Responses: web_search",
-  },
-  {
-    value: "image_generation",
-    label: "图像生成",
-    hint: "OpenAI Responses 注入 image_generation 工具",
-  },
+const BUILTIN_TOOL_OPTIONS: { value: BuiltInToolType; labelKey: string; hintKey: string }[] = [
+  { value: "search", labelKey: "model_edit.tool_search", hintKey: "model_edit.tool_search_hint" },
+  { value: "image_generation", labelKey: "model_edit.tool_image_generation", hintKey: "model_edit.tool_image_generation_hint" },
 ];
 
 const TAB_BASIC = "basic";
@@ -91,10 +80,10 @@ const TAB_ADVANCED = "advanced";
 const TAB_TOOLS = "tools";
 type TabId = typeof TAB_BASIC | typeof TAB_ADVANCED | typeof TAB_TOOLS;
 
-const TABS: { id: TabId; label: string }[] = [
-  { id: TAB_BASIC, label: "基础" },
-  { id: TAB_ADVANCED, label: "高级" },
-  { id: TAB_TOOLS, label: "内置工具" },
+const TABS: { id: TabId; labelKey: string }[] = [
+  { id: TAB_BASIC, labelKey: "model_edit.tab_basic" },
+  { id: TAB_ADVANCED, labelKey: "model_edit.tab_advanced" },
+  { id: TAB_TOOLS, labelKey: "model_edit.tab_tools" },
 ];
 
 export interface ModelEditDialogProps {
@@ -172,6 +161,7 @@ export function ModelEditDialog({
   onSave,
   onDelete,
 }: ModelEditDialogProps) {
+  const { t } = useTranslation("settings");
   const [draft, setDraft] = React.useState<ProviderModel>(initialModel);
   const [tab, setTab] = React.useState<TabId>(TAB_BASIC);
   const [error, setError] = React.useState<string | null>(null);
@@ -203,12 +193,12 @@ export function ModelEditDialog({
     const displayName = (draft.displayName ?? "").trim();
 
     if (mode === "add" && !modelId) {
-      setError("请填写模型 ID（这是发送给上游 API 的 model 字段，不能为空）");
+      setError(t("model_edit.error_model_id_required"));
       setTab(TAB_BASIC);
       return;
     }
     if (!displayName) {
-      setError("请填写显示名称");
+      setError(t("model_edit.error_display_name_required"));
       setTab(TAB_BASIC);
       return;
     }
@@ -216,13 +206,13 @@ export function ModelEditDialog({
     // (server.ts:5429, 5484) would push `headers[""] = …` which is a footgun.
     const headers = toArray<CustomHeader>(draft.customHeaders);
     if (headers.some((header) => !(header.name ?? "").trim())) {
-      setError("自定义请求头有未填写的 name，请补全或删除该行");
+      setError(t("model_edit.error_header_name_missing"));
       setTab(TAB_ADVANCED);
       return;
     }
     const bodies = toArray<CustomBody>(draft.customBodies);
     if (bodies.some((body) => !(body.key ?? "").trim())) {
-      setError("自定义请求体有未填写的 key，请补全或删除该行");
+      setError(t("model_edit.error_body_key_missing"));
       setTab(TAB_ADVANCED);
       return;
     }
@@ -253,13 +243,13 @@ export function ModelEditDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{mode === "add" ? "添加模型" : "编辑模型"}</DialogTitle>
+          <DialogTitle>{mode === "add" ? t("model_edit.title_add") : t("model_edit.title_edit")}</DialogTitle>
           <DialogDescription>
             {mode === "add"
-              ? "手动配置一个上游模型。模型 ID 必须与上游 API 期望的字符串一致。"
+              ? t("model_edit.desc_add")
               : modelIdLocked
-                ? "从供应商列表拉取的模型，模型 ID 不可修改（改了会破坏请求路由）。"
-                : "手动添加的模型，所有字段都可编辑。"}
+                ? t("model_edit.desc_locked")
+                : t("model_edit.desc_manual")}
           </DialogDescription>
         </DialogHeader>
 
@@ -277,7 +267,7 @@ export function ModelEditDialog({
                   : "border-transparent text-muted-foreground hover:text-foreground",
               )}
             >
-              {item.label}
+              {t(item.labelKey)}
             </button>
           ))}
         </div>
@@ -337,24 +327,24 @@ export function ModelEditDialog({
               variant="outline"
               className="text-destructive hover:bg-destructive/10"
               onClick={() => {
-                if (window.confirm(`删除模型「${draft.displayName || draft.modelId}」？`)) {
+                if (window.confirm(t("model_edit.delete_confirm", { name: draft.displayName || draft.modelId }))) {
                   onDelete();
                   onOpenChange(false);
                 }
               }}
             >
               <Trash2 className="size-4" />
-              删除
+              {t("model_edit.delete")}
             </Button>
           ) : (
             <span />
           )}
           <div className="flex gap-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              取消
+              {t("model_edit.cancel")}
             </Button>
             <Button type="button" onClick={handleSave}>
-              保存
+              {t("model_edit.save")}
             </Button>
           </div>
         </DialogFooter>
@@ -384,6 +374,7 @@ function BasicTab({
   onSetModalities,
   onSetAbility,
 }: BasicTabProps) {
+  const { t } = useTranslation("settings");
   const inputModalities = toArray(draft.inputModalities);
   const outputModalities = toArray(draft.outputModalities);
   const abilities = toArray(draft.abilities);
@@ -391,35 +382,35 @@ function BasicTab({
   return (
     <div className="space-y-4 py-3">
       <Field
-        label="模型 ID"
+        label={t("model_edit.model_id")}
         hint={
           modelIdLocked
-            ? "已锁定。这是发送给上游 API 的 model 字段，修改会导致请求失败。"
-            : "上游 API 接收的 model 字符串（例如 gpt-4o-mini、claude-sonnet-4）。"
+            ? t("model_edit.model_id_hint_locked")
+            : t("model_edit.model_id_hint")
         }
       >
         <Input
           value={draft.modelId ?? ""}
           disabled={modelIdLocked}
           onChange={(event) => onUpdate("modelId", event.target.value.trim())}
-          placeholder="例如：gpt-4o-mini"
+          placeholder={t("model_edit.model_id_placeholder")}
         />
       </Field>
 
-      <Field label="显示名称" hint="仅 UI 展示用，不会发到上游。">
+      <Field label={t("model_edit.display_name")} hint={t("model_edit.display_name_hint")}>
         <Input
           value={draft.displayName ?? ""}
           onChange={(event) => onUpdate("displayName", event.target.value)}
-          placeholder="例如：GPT-4o Mini"
+          placeholder={t("model_edit.display_name_placeholder")}
         />
       </Field>
 
       <Field
-        label="模型类型"
-        hint="IMAGE 类型在测试图像端点会被作为默认模型挑选；EMBEDDING 目前未参与路由分发。"
+        label={t("model_edit.model_type")}
+        hint={t("model_edit.model_type_hint")}
       >
         <SegmentedRow
-          options={TYPE_OPTIONS}
+          options={TYPE_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
           value={[draft.type ?? "CHAT"]}
           onToggle={(value, _enabled) => onUpdate("type", value)}
           singleSelect
@@ -428,26 +419,26 @@ function BasicTab({
 
       {isChat ? (
         <>
-          <Field label="输入模态" hint="文本以外的模态今天仅作为元数据保存，不参与上游请求过滤。">
+          <Field label={t("model_edit.input_modalities")} hint={t("model_edit.input_modalities_hint")}>
             <SegmentedRow
-              options={MODALITY_OPTIONS}
+              options={MODALITY_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey), disabled: option.disabled }))}
               value={inputModalities}
               onToggle={(value, enabled) => onSetModalities("input", value, enabled)}
             />
           </Field>
 
           <Field
-            label="输出模态"
-            hint="勾选 IMAGE 后，OpenRouter 路径会在请求体里加 modalities=['image','text']。"
+            label={t("model_edit.output_modalities")}
+            hint={t("model_edit.output_modalities_hint")}
           >
             <SegmentedRow
-              options={MODALITY_OPTIONS}
+              options={MODALITY_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey), disabled: option.disabled }))}
               value={outputModalities}
               onToggle={(value, enabled) => onSetModalities("output", value, enabled)}
             />
           </Field>
 
-          <Field label="能力">
+          <Field label={t("model_edit.abilities")}>
             <div className="space-y-2">
               {ABILITY_OPTIONS.map((option) => (
                 <div
@@ -455,8 +446,8 @@ function BasicTab({
                   className="flex items-start justify-between gap-3 rounded-md border px-3 py-2"
                 >
                   <div className="min-w-0">
-                    <div className="text-sm font-medium">{option.label}</div>
-                    <div className="text-xs text-muted-foreground">{option.hint}</div>
+                    <div className="text-sm font-medium">{t(option.labelKey)}</div>
+                    <div className="text-xs text-muted-foreground">{t(option.hintKey)}</div>
                   </div>
                   <Switch
                     checked={abilities.includes(option.value)}
@@ -470,8 +461,8 @@ function BasicTab({
       ) : (
         <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
           {draft.type === "IMAGE"
-            ? "图像生成模型不使用模态/能力字段。"
-            : "嵌入模型不使用模态/能力字段。"}
+            ? t("model_edit.not_chat_image")
+            : t("model_edit.not_chat_embedding")}
         </div>
       )}
     </div>
@@ -495,6 +486,7 @@ function AdvancedTab({
   onBodiesChange,
   onProviderOverwriteChange,
 }: AdvancedTabProps) {
+  const { t } = useTranslation("settings");
   const updateHeader = (index: number, patch: Partial<CustomHeader>) => {
     onHeadersChange(headers.map((header, i) => (i === index ? { ...header, ...patch } : header)));
   };
@@ -524,32 +516,32 @@ function AdvancedTab({
       <section className="space-y-2">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-sm font-medium">自定义请求头</div>
+            <div className="text-sm font-medium">{t("model_edit.custom_headers")}</div>
             <div className="text-xs text-muted-foreground">
-              会注入到所有走这个模型的上游请求里（server.ts:5429）。
+              {t("model_edit.custom_headers_hint")}
             </div>
           </div>
           <Button type="button" variant="outline" size="sm" onClick={addHeader}>
             <Plus className="size-4" />
-            添加
+            {t("model_edit.add")}
           </Button>
         </div>
         {headers.length === 0 ? (
           <div className="rounded-md border border-dashed p-3 text-center text-xs text-muted-foreground">
-            没有自定义请求头
+            {t("model_edit.no_custom_headers")}
           </div>
         ) : (
           <div className="space-y-2">
             {headers.map((header, index) => (
               <div key={index} className="flex items-center gap-2">
                 <Input
-                  placeholder="Header 名"
+                  placeholder={t("model_edit.header_name_placeholder")}
                   className="flex-1"
                   value={header.name}
                   onChange={(event) => updateHeader(index, { name: event.target.value })}
                 />
                 <Input
-                  placeholder="Header 值"
+                  placeholder={t("model_edit.header_value_placeholder")}
                   className="flex-[2]"
                   value={header.value}
                   onChange={(event) => updateHeader(index, { value: event.target.value })}
@@ -559,7 +551,7 @@ function AdvancedTab({
                   variant="ghost"
                   size="icon"
                   onClick={() => removeHeader(index)}
-                  aria-label="删除"
+                  aria-label={t("model_edit.remove")}
                 >
                   <Trash2 className="size-4" />
                 </Button>
@@ -572,20 +564,19 @@ function AdvancedTab({
       <section className="space-y-2">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-sm font-medium">自定义请求体</div>
+            <div className="text-sm font-medium">{t("model_edit.custom_bodies")}</div>
             <div className="text-xs text-muted-foreground">
-              会和上游请求 JSON 深合并（server.ts:5484）。值用 JSON
-              语法：字符串要带引号，数字直接写，对象/数组也支持。
+              {t("model_edit.custom_bodies_hint")}
             </div>
           </div>
           <Button type="button" variant="outline" size="sm" onClick={addBody}>
             <Plus className="size-4" />
-            添加
+            {t("model_edit.add")}
           </Button>
         </div>
         {bodies.length === 0 ? (
           <div className="rounded-md border border-dashed p-3 text-center text-xs text-muted-foreground">
-            没有自定义请求体
+            {t("model_edit.no_custom_bodies")}
           </div>
         ) : (
           <div className="space-y-2">
@@ -604,10 +595,10 @@ function AdvancedTab({
   );
 }
 
-const PROVIDER_OVERWRITE_TYPES: { value: ProviderOverwrite["type"]; label: string }[] = [
-  { value: "openai", label: "OpenAI 兼容" },
-  { value: "claude", label: "Anthropic Claude" },
-  { value: "google", label: "Google Gemini" },
+const PROVIDER_OVERWRITE_TYPES: { value: ProviderOverwrite["type"]; labelKey: string }[] = [
+  { value: "openai", labelKey: "model_edit.overwrite_type_openai" },
+  { value: "claude", labelKey: "model_edit.overwrite_type_claude" },
+  { value: "google", labelKey: "model_edit.overwrite_type_google" },
 ];
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
@@ -634,10 +625,11 @@ function ProviderOverwriteSection({
   overwrite: ProviderOverwrite | null;
   onChange: (next: ProviderOverwrite | null) => void;
 }) {
+  const { t } = useTranslation("settings");
   const enable = () => {
     onChange({
       type: "openai",
-      name: "供应商覆盖",
+      name: t("model_edit.provider_overwrite"),
       baseUrl: DEFAULT_BASE_URLS.openai,
       apiKey: "",
     });
@@ -652,22 +644,20 @@ function ProviderOverwriteSection({
     <section className="space-y-2">
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-sm font-medium">供应商覆盖</div>
+          <div className="text-sm font-medium">{t("model_edit.provider_overwrite")}</div>
           <div className="text-xs text-muted-foreground">
-            为这一个模型单独指定 baseUrl 与 API
-            Key。设置后该模型的请求会走这里的配置，不走当前供应商的默认配置——典型用途是把某个模型走自建
-            OpenAI 兼容网关。
+            {t("model_edit.provider_overwrite_hint")}
           </div>
         </div>
         {overwrite ? (
           <Button type="button" variant="outline" size="sm" onClick={clear}>
             <Trash2 className="size-4" />
-            清除覆盖
+            {t("model_edit.clear_overwrite")}
           </Button>
         ) : (
           <Button type="button" variant="outline" size="sm" onClick={enable}>
             <Plus className="size-4" />
-            配置覆盖
+            {t("model_edit.configure_overwrite")}
           </Button>
         )}
       </div>
@@ -675,7 +665,7 @@ function ProviderOverwriteSection({
         <div className="space-y-3 rounded-md border p-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1">
-              <div className="text-xs font-medium">协议类型</div>
+              <div className="text-xs font-medium">{t("model_edit.protocol_type")}</div>
               <Select
                 value={overwrite.type}
                 onValueChange={(value) => {
@@ -697,18 +687,18 @@ function ProviderOverwriteSection({
                 <SelectContent>
                   {PROVIDER_OVERWRITE_TYPES.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
-                      {option.label}
+                      {t(option.labelKey)}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1">
-              <div className="text-xs font-medium">显示名称</div>
+              <div className="text-xs font-medium">{t("model_edit.display_name")}</div>
               <Input
                 value={overwrite.name}
                 onChange={(event) => update({ name: event.target.value })}
-                placeholder="供应商覆盖"
+                placeholder={t("model_edit.provider_overwrite")}
               />
             </div>
           </div>
@@ -717,7 +707,7 @@ function ProviderOverwriteSection({
             <Input
               value={overwrite.baseUrl}
               onChange={(event) => update({ baseUrl: event.target.value })}
-              placeholder="例如 https://api.openai.com/v1"
+              placeholder={t("model_edit.base_url_placeholder")}
             />
           </div>
           <div className="space-y-1">
@@ -745,6 +735,7 @@ function CustomBodyRow({
   onChange: (patch: Partial<CustomBody>) => void;
   onRemove: () => void;
 }) {
+  const { t } = useTranslation("settings");
   // The user types JSON; we store the parsed value so the merge code can deep-merge objects.
   // If parsing fails we keep the raw string and surface a hint — better than silently dropping.
   const [rawValue, setRawValue] = React.useState<string>(() => stringifyBodyValue(body.value));
@@ -770,7 +761,7 @@ function CustomBodyRow({
       onChange({ value: parsed });
     } catch {
       // Keep raw string — at least the user's typing isn't lost. Surface error.
-      setParseError("无法解析为 JSON，保留为字符串。如需对象/数组，请检查格式。");
+      setParseError(t("model_edit.json_parse_error"));
       onChange({ value: next });
     }
   };
@@ -779,17 +770,17 @@ function CustomBodyRow({
     <div className="space-y-1 rounded-md border p-2">
       <div className="flex items-start gap-2">
         <Input
-          placeholder="key（支持 a.b.c 嵌套）"
+          placeholder={t("model_edit.body_key_placeholder")}
           className="flex-1"
           value={body.key}
           onChange={(event) => onChange({ key: event.target.value })}
         />
-        <Button type="button" variant="ghost" size="icon" onClick={onRemove} aria-label="删除">
+        <Button type="button" variant="ghost" size="icon" onClick={onRemove} aria-label={t("model_edit.remove")}>
           <Trash2 className="size-4" />
         </Button>
       </div>
       <Textarea
-        placeholder='JSON 值。例如：true、42、"hello"、{"foo":1}'
+        placeholder={t("model_edit.body_value_placeholder")}
         className="font-mono text-xs"
         rows={2}
         value={rawValue}
@@ -819,10 +810,11 @@ interface ToolsTabProps {
 }
 
 function ToolsTab({ tools, isChat, onToolToggle }: ToolsTabProps) {
+  const { t } = useTranslation("settings");
   if (!isChat) {
     return (
       <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground my-3">
-        内置工具只对 CHAT 模型生效。
+        {t("model_edit.tools_chat_only")}
       </div>
     );
   }
@@ -834,8 +826,8 @@ function ToolsTab({ tools, isChat, onToolToggle }: ToolsTabProps) {
           className="flex items-start justify-between gap-3 rounded-md border px-3 py-2"
         >
           <div className="min-w-0">
-            <div className="text-sm font-medium">{option.label}</div>
-            <div className="text-xs text-muted-foreground">{option.hint}</div>
+            <div className="text-sm font-medium">{t(option.labelKey)}</div>
+            <div className="text-xs text-muted-foreground">{t(option.hintKey)}</div>
           </div>
           <Switch
             checked={isToolActive(tools, option.value)}

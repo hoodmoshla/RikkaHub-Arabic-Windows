@@ -283,13 +283,22 @@
     "local_tools_title": "本地工具",
     "local_tools_desc": "本地工具列表。启用后，仅在当前模型支持工具调用时才会注入给模型。",
     "tools": {
-      "time_info": { "title": "时间信息", "desc": "读取 PC 本地时间、时区、星期和时间戳。" },
+      "time_info": {
+        "title": "时间信息",
+        "desc": "读取 PC 本地时间、时区、星期和时间戳。"
+      },
       "clipboard": {
         "title": "剪贴板",
         "desc": "读写系统剪贴板；除非用户明确要求，否则模型不应写入。"
       },
-      "tts": { "title": "语音播报", "desc": "调用系统语音朗读文本。" },
-      "ask_user": { "title": "询问用户", "desc": "需要澄清时在对话中展示问题，由用户回答后继续。" }
+      "tts": {
+        "title": "语音播报",
+        "desc": "调用系统语音朗读文本。"
+      },
+      "ask_user": {
+        "title": "询问用户",
+        "desc": "需要澄清时在对话中展示问题，由用户回答后继续。"
+      }
     },
     "custom_request_title": "自定义请求",
     "headers_desc": "发送模型请求时会追加到请求头。",
@@ -470,17 +479,38 @@
       "optimize": "用户草稿 + 可选对话背景"
     },
     "feature": {
-      "chat": { "title": "默认聊天模型", "desc": "首页未手动选择模型时使用。" },
+      "chat": {
+        "title": "默认聊天模型",
+        "desc": "首页未手动选择模型时使用。"
+      },
       "optimize": {
         "title": "提示词优化",
         "desc": "对话输入框「优化提示词」按钮使用这个模型，把你的草稿改写得更清晰专业。"
       },
-      "title": { "title": "标题生成", "desc": "对话首次回复后读取最近消息自动生成会话标题。" },
-      "translate": { "title": "翻译", "desc": "AI 回复下方翻译按钮使用这个模型和 Prompt。" },
-      "suggestion": { "title": "建议回复", "desc": "回复完成后生成 3 到 5 条用户可点选建议。" },
-      "compress": { "title": "上下文压缩", "desc": "长会话压缩时保留关键上下文并写回会话。" },
-      "ocr": { "title": "OCR", "desc": "图片转文字的备用通道，用于不支持视觉输入的聊天模型。" },
-      "image": { "title": "图像生成", "desc": "用于支持具备图像生成能力的模型入口。" }
+      "title": {
+        "title": "标题生成",
+        "desc": "对话首次回复后读取最近消息自动生成会话标题。"
+      },
+      "translate": {
+        "title": "翻译",
+        "desc": "AI 回复下方翻译按钮使用这个模型和 Prompt。"
+      },
+      "suggestion": {
+        "title": "建议回复",
+        "desc": "回复完成后生成 3 到 5 条用户可点选建议。"
+      },
+      "compress": {
+        "title": "上下文压缩",
+        "desc": "长会话压缩时保留关键上下文并写回会话。"
+      },
+      "ocr": {
+        "title": "OCR",
+        "desc": "图片转文字的备用通道，用于不支持视觉输入的聊天模型。"
+      },
+      "image": {
+        "title": "图像生成",
+        "desc": "用于支持具备图像生成能力的模型入口。"
+      }
     }
   },
   "mcp": {
@@ -777,5 +807,77 @@
     "severity_info": "信息",
     "merged_count": "30 秒内发生 {{count}} 次",
     "no_detail": "无详细堆栈"
+  },
+  "model_edit": {
+    "type_chat": "聊天",
+    "type_image": "图像生成",
+    "type_embedding": "嵌入",
+    "modality_text": "文本",
+    "modality_image": "图像",
+    "modality_audio": "音频",
+    "modality_video": "视频",
+    "ability_tool": "工具调用",
+    "ability_tool_hint": "启用后请求才会带 tools 字段",
+    "ability_reasoning": "推理输出",
+    "ability_reasoning_hint": "启用后请求才会带 thinking/reasoning 字段",
+    "tool_search": "联网搜索",
+    "tool_search_hint": "Google: googleSearch；OpenAI Responses: web_search",
+    "tool_image_generation": "图像生成",
+    "tool_image_generation_hint": "OpenAI Responses 注入 image_generation 工具",
+    "tab_basic": "基础",
+    "tab_advanced": "高级",
+    "tab_tools": "内置工具",
+    "error_model_id_required": "请填写模型 ID（这是发送给上游 API 的 model 字段，不能为空）",
+    "error_display_name_required": "请填写显示名称",
+    "error_header_name_missing": "自定义请求头有未填写的 name，请补全或删除该行",
+    "error_body_key_missing": "自定义请求体有未填写的 key，请补全或删除该行",
+    "title_add": "添加模型",
+    "title_edit": "编辑模型",
+    "desc_add": "手动配置一个上游模型。模型 ID 必须与上游 API 期望的字符串一致。",
+    "desc_locked": "从供应商列表拉取的模型，模型 ID 不可修改（改了会破坏请求路由）。",
+    "desc_manual": "手动添加的模型，所有字段都可编辑。",
+    "delete_confirm": "删除模型「{{name}}」？",
+    "delete": "删除",
+    "cancel": "取消",
+    "save": "保存",
+    "model_id": "模型 ID",
+    "model_id_hint_locked": "已锁定。这是发送给上游 API 的 model 字段，修改会导致请求失败。",
+    "model_id_hint": "上游 API 接收的 model 字符串（例如 gpt-4o-mini、claude-sonnet-4）。",
+    "model_id_placeholder": "例如：gpt-4o-mini",
+    "display_name": "显示名称",
+    "display_name_hint": "仅 UI 展示用，不会发到上游。",
+    "display_name_placeholder": "例如：GPT-4o Mini",
+    "model_type": "模型类型",
+    "model_type_hint": "IMAGE 类型在测试图像端点会被作为默认模型挑选；EMBEDDING 目前未参与路由分发。",
+    "input_modalities": "输入模态",
+    "input_modalities_hint": "文本以外的模态今天仅作为元数据保存，不参与上游请求过滤。",
+    "output_modalities": "输出模态",
+    "output_modalities_hint": "勾选 IMAGE 后，OpenRouter 路径会在请求体里加 modalities=['image','text']。",
+    "abilities": "能力",
+    "not_chat_image": "图像生成模型不使用模态/能力字段。",
+    "not_chat_embedding": "嵌入模型不使用模态/能力字段。",
+    "custom_headers": "自定义请求头",
+    "custom_headers_hint": "会注入到所有走这个模型的上游请求里。",
+    "add": "添加",
+    "no_custom_headers": "没有自定义请求头",
+    "header_name_placeholder": "Header 名",
+    "header_value_placeholder": "Header 值",
+    "remove": "删除",
+    "custom_bodies": "自定义请求体",
+    "custom_bodies_hint": "会和上游请求 JSON 深合并。值用 JSON 语法：字符串要带引号，数字直接写，对象/数组也支持。",
+    "no_custom_bodies": "没有自定义请求体",
+    "overwrite_type_openai": "OpenAI 兼容",
+    "overwrite_type_claude": "Anthropic Claude",
+    "overwrite_type_google": "Google Gemini",
+    "provider_overwrite": "供应商覆盖",
+    "provider_overwrite_hint": "为这一个模型单独指定 baseUrl 与 API Key。设置后该模型的请求会走这里的配置，不走当前供应商的默认配置——典型用途是把某个模型走自建 OpenAI 兼容网关。",
+    "clear_overwrite": "清除覆盖",
+    "configure_overwrite": "配置覆盖",
+    "protocol_type": "协议类型",
+    "base_url_placeholder": "例如 https://api.openai.com/v1",
+    "json_parse_error": "无法解析为 JSON，保留为字符串。如需对象/数组，请检查格式。",
+    "body_key_placeholder": "key（支持 a.b.c 嵌套）",
+    "body_value_placeholder": "JSON 值。例如：true、42、\"hello\"、{\"foo\":1}",
+    "tools_chat_only": "内置工具只对 CHAT 模型生效。"
   }
 }
