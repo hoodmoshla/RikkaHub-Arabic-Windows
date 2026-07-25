@@ -5,11 +5,10 @@
 import { existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { conversationsDbPath, dataDir } from "../foundation/paths";
-import { checkoutConversation, clearWorkingSet, configureWorkingSet, peekConversation, releaseConversation, removeConversations, startWorkingSetSweep } from "./working-set";
+import { checkoutConversation, configureWorkingSet, peekConversation, releaseConversation, startWorkingSetSweep } from "./working-set";
 import { getConversationMeta } from "./read-queries";
 import { generating } from "./generation-state";
 import type { Conversation, ConversationDto, ConversationListDto, Message, MessageNode, MessageNodeDto, PcConversationRow, PcMessageNodeRow } from "../foundation/types";
-import { state } from "../persistence/json-store";
 import { clearAllFts, deleteConversationFts, ensureMessageFtsTable, ftsRowCount, rebuildFtsFromNodeTable, replaceNodeFts } from "./fts";
 import { reportError } from "../observability/app-errors";
 

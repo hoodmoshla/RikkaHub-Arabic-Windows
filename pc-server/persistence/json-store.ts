@@ -246,7 +246,3 @@ export function writeSlimStateJsonSyncForMemory(data: State): void {
   }
 }
 
-/** 顶层启动写盘：供 server.ts 在初始化完成后调用，避免模块加载期 TDZ。 */
-export function saveInitialState() {
-  saveState();
-}

@@ -13,7 +13,7 @@ import {
   claudeBlocksFromUiParts,
 } from "./message-builder";
 import { ensureReasoningPart, finishReasoningParts, normalizeGeneratedImageUrl } from "./parts";
-import type { StreamHooksWithSink, ToolCall, ToolDispatchContext, ToolResult } from "./events";
+import type { StreamHooksWithSink, ToolCall, ToolResult } from "./events";
 import {
   findModel,
   jsonBody,

@@ -18,7 +18,7 @@ import {
   writeSlimStateJsonSyncForMemory,
 } from "./json-store";
 import { reportError } from "../observability/app-errors";
-import { getConversationsDb, loadAllConversationsFromDb, migrateConversationsIntoDb, openConversationsDb, resetConversationsDbTo } from "../conversations";
+import { getConversationsDb, migrateConversationsIntoDb, openConversationsDb, resetConversationsDbTo } from "../conversations";
 import { countConversations } from "../conversations/read-queries";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory";
 import { NA_API_PRESET_MODELS, NA_API_PROVIDER_ID, SUNSET_PROVIDER_IDS, TENCENT_PROVIDER_ID, builtinProviderRank, enrichModel, inferModelAbilities, model } from "../model-providers";

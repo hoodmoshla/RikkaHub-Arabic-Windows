@@ -79,7 +79,7 @@ export function sseFrame(event: string, data: JsonValue | object) {
  *  setTimeout 回调(33ms 节点广播)里,未捕获异常直接杀死整个 Bun 进程;发生在同步广播里
  *  则中断遍历,后续存活客户端静默丢事件。这里统一 try/catch 并把死 controller 从集合
  *  摘除(只吞不摘会让它永久驻留反复抛),对齐 heartbeat 既有的"抛错即清理"模式。 */
-export function broadcastTo(
+function broadcastTo(
   clients: Set<ReadableStreamDefaultController<Uint8Array>> | undefined,
   frame: Uint8Array,
 ): void {
