@@ -4,7 +4,7 @@ import { id, uniqueStrings, cloneJson, textFromParts, renderTemplate, applyPlace
 import { executableDir, rootDir, dataDir, filesDir, skillsDir, customFontsDir, statePath, globalMemoryPath, assistantMemoryPath, pendingMemoryPath, deviceIdPath } from "./foundation/paths";
 import { RUNNING_IN_CONTAINER } from "./foundation/platform";
 import { applyEffectiveProxy, classifyProxyError, installProxyFetchInterceptor, resolveEffectiveProxy, setActualServingPort } from "./foundation/net";
-import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state, writeSlimStateJsonSync, writeSlimStateJsonSyncForMemory } from "./persistence/json-store";
+import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, flushSaveState, saveState, setState, state, writeSlimStateJsonSync, writeSlimStateJsonSyncForMemory } from "./persistence/json-store";
 import { GLOBAL_MEMORY_ID, buildMemoryPrompt, buildRecentChatsPrompt, memoryStore } from "./memory/index";
 import { readZipEntries } from "./files/index";
 import { APP_VERSION } from "./updates/index";
@@ -12,7 +12,7 @@ import { buildSearchContext, runScrapeWeb, runSearchWeb } from "./search/index";
 import { asrRealtimeSessions, normalizeAsrProviders, sendAsrAudio, startAsrRealtimeSession, stopAsrRealtimeSession } from "./media/asr";
 import { DEFAULT_SYSTEM_TTS_ID, defaultTtsProviders, normalizeTtsProviders } from "./media/tts";
 import { normalizeS3Config, normalizeWebDavConfig } from "./backup/storage";
-import { error, mime } from "./api/request";
+import { error, json, mime } from "./api/request";
 import { startAnalytics } from "./app-config/analytics";
 import { loadState } from "./persistence/state-load";
 import { DEFAULT_COMPRESS_PROMPT, DEFAULT_OCR_PROMPT, DEFAULT_PROMPT_OPTIMIZE_PROMPT, DEFAULT_SUGGESTION_PROMPT, DEFAULT_TITLE_PROMPT, DEFAULT_TRANSLATION_PROMPT } from "./app-config/prompts";
@@ -276,6 +276,23 @@ const { server, port } = (() => {
               if (url.pathname.startsWith("/api/") && !isAllowedOrigin(request)) {
                 return error("Forbidden: cross-origin request blocked", 403);
               }
+              // 全面审查 8-2/1-1:优雅停机端点。Windows 上 Tauri 壳 kill=TerminateProcess,
+              // SIGTERM 钩子不运行——壳退出前先 POST 本端点,服务端把全部状态刷盘后才返回
+              // 200,壳收到即可放心硬杀,数据零丢失。仅接受本机回环调用(先于 Web 鉴权:
+              // 壳不持有 token;局域网/远程客户端被 IP 拦住,不能停别人的服务)。
+              if (url.pathname === "/api/app/shutdown" && request.method === "POST") {
+                const ip = server.requestIP(request)?.address ?? "";
+                if (ip !== "127.0.0.1" && ip !== "::1" && ip !== "::ffff:127.0.0.1") {
+                  return error("Forbidden: shutdown is loopback-only", 403);
+                }
+                await flushAllStateBeforeExit();
+                // 响应发出后再停服自退;100ms 让 200 先落到壳侧。
+                setTimeout(() => {
+                  try { server.stop(true); } catch { /* already stopping */ }
+                  process.exit(0);
+                }, 100);
+                return json({ ok: true });
+              }
               // Web 鉴权（阶段 5.2）：仅在配置了访问密码时生效。auth/token 端点先于
               // 鉴权检查处理（它就是换 token 的入口）；其余 /api/* 一律要求有效 token。
               if (url.pathname === "/api/auth/token" && request.method === "POST") {
@@ -361,10 +378,21 @@ console.log("Press Ctrl+C to stop RikkaHub PC.");
 // Worker that stores only an anonymous device UUID + date + version.
 startAnalytics();
 
-function shutdown() {
-  server.stop(true);
-  // 1.2.6:关停前刷活库残余脏标记 + WAL checkpoint(TRUNCATE 把 -wal 并入主库并截断),
-  // 确保活库数据完整落盘、下次启动读到最新。
+let shutdownStarted = false;
+
+/** 全面审查 1-1/8-11/2-0b:关停前的完整刷盘链。信号路径与 /api/app/shutdown 端点共用,
+ *  幂等(双触发只跑一次)。顺序:state.json(saveState 清节流定时器并立即起写 +
+ *  flushSaveState 循环追到最后一笔尾随写)→ 活库脏行 → 生成中会话全量 reconcile(2-0b)
+ *  → WAL checkpoint(TRUNCATE 把 -wal 并入主库并截断)。 */
+async function flushAllStateBeforeExit(): Promise<void> {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  try {
+    saveState();
+    await flushSaveState();
+  } catch (err) {
+    console.warn("[shutdown] state.json 刷盘失败", err);
+  }
   try {
     flushConvDirtyNow();
     // 全面审查 2-0b:生成中的会话再做一次全量 reconcile——流式增量 flush 只补写脏节点,
@@ -378,6 +406,11 @@ function shutdown() {
   } catch (err) {
     console.warn("[conv-db] 关停刷库失败", err);
   }
+}
+
+async function shutdown() {
+  server.stop(true);
+  await flushAllStateBeforeExit();
   process.exit(0);
 }
 

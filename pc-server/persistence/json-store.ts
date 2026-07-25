@@ -201,10 +201,14 @@ export function saveState(): void {
   activeSaveStatePromise.catch((err) => console.warn("saveState failed", err));
 }
 
-/** Used by graceful shutdown paths to ensure the final write completes on disk. */
+/** Used by graceful shutdown paths to ensure the final write completes on disk.
+ *  全面审查 1-1:必须循环追引用——coalesced 尾随写在 finally 里把 activeSaveStatePromise
+ *  换成新 promise,只 await 一次旧引用会漏掉最后一笔(拿到旧引用即返回)。 */
 export async function flushSaveState(): Promise<void> {
-  if (activeSaveStatePromise) {
-    try { await activeSaveStatePromise; } catch { /* already logged */ }
+  while (activeSaveStatePromise) {
+    const current = activeSaveStatePromise;
+    try { await current; } catch { /* already logged */ }
+    if (activeSaveStatePromise === current) break; // 防御:引用未变说明已结算,避免死循环
   }
 }
 

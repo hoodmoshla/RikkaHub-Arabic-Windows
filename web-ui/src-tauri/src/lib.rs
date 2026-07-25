@@ -11,7 +11,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -40,6 +40,58 @@ const SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Default)]
 struct SidecarState {
     child: Mutex<Option<CommandChild>>,
+    /// Actual sidecar HTTP port once known (0 = not started yet). Needed by the
+    /// graceful-shutdown path so we can POST /api/app/shutdown before killing.
+    port: AtomicU16,
+}
+
+/// 全面审查 8-2:壳退出前先请求 sidecar 优雅停机。服务端把 state.json、活库脏行、
+/// 生成中会话、WAL checkpoint 全部刷盘后才返回 200——收到 200 后再 kill 是零丢失的。
+/// 连接/写/读任一步失败或超时(约 3s 上限)则返回 false,调用方直接硬杀兜底(旧行为)。
+/// Windows 上 child.kill() = TerminateProcess,sidecar 的 SIGTERM 钩子不会运行,
+/// 这个 HTTP 通道是 Tauri 形态唯一的优雅停机路径。
+fn request_sidecar_shutdown(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let addr = match format!("127.0.0.1:{port}").parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))
+    else {
+        return false;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    // 服务端刷盘(state 尾随写追平 + 活库 reconcile + checkpoint)通常毫秒级,给足 2.5s。
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(2500)));
+    let request = format!(
+        "POST /api/app/shutdown HTTP/1.1
+Host: 127.0.0.1:{port}
+Content-Length: 0
+Connection: close
+
+"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 256];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"),
+        _ => false,
+    }
+}
+
+/// Take the child out of the state and shut it down: graceful HTTP first, hard kill after.
+fn shutdown_sidecar(state: &SidecarState) {
+    let Some(child) = state.child.lock().unwrap().take() else {
+        return;
+    };
+    let port = state.port.load(Ordering::Relaxed);
+    if port != 0 && request_sidecar_shutdown(port) {
+        // 200 已确认数据落盘,服务端随即自退;稍等让它体面退出,kill 只是兜底清理。
+        thread::sleep(Duration::from_millis(300));
+    }
+    let _ = child.kill();
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -541,6 +593,10 @@ pub fn run() {
                     }
                 };
 
+            if let Some(state) = handle.try_state::<SidecarState>() {
+                state.port.store(actual_port, Ordering::Relaxed);
+            }
+
             handle.emit("sidecar://ready", true).ok();
 
             // The window's static URL (tauri.conf.json) is http://localhost:8080. When the
@@ -583,9 +639,7 @@ pub fn run() {
                     // User opted out of tray: tear down the sidecar so the Bun process
                     // doesn't linger in the background.
                     if let Some(state) = app.try_state::<SidecarState>() {
-                        if let Some(child) = state.child.lock().unwrap().take() {
-                            let _ = child.kill();
-                        }
+                        shutdown_sidecar(&state);
                     }
                 }
             }
@@ -596,9 +650,7 @@ pub fn run() {
         .run(|app_handle, event| {
             if let RunEvent::ExitRequested { .. } = event {
                 if let Some(state) = app_handle.try_state::<SidecarState>() {
-                    if let Some(child) = state.child.lock().unwrap().take() {
-                        let _ = child.kill();
-                    }
+                    shutdown_sidecar(&state);
                 }
             }
         });
