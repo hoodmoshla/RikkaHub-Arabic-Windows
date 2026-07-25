@@ -14,6 +14,7 @@ import {
   recoverStateFromBackups,
   setState,
   state,
+  sweepStaleStateTempFiles,
   writeSlimStateJsonSync,
   writeSlimStateJsonSyncForMemory,
 } from "./json-store";
@@ -297,6 +298,7 @@ export function loadState(): State {
   // 已 DB 化,本次启动会话表现为空,但数据仍在 state.json,不丢。
   migrateMemoryFilesIfNeeded(state);
   migrateFileDedupIfNeeded(state);
+  sweepStaleStateTempFiles(); // 1-4:此刻本进程尚未开始任何原子写,清扫安全
   return state;
 }
 

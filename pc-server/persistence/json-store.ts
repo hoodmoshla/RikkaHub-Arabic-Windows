@@ -2,7 +2,7 @@
 // 纪律：负责 state 对象的持久化和共享，不依赖业务逻辑（阶段 2/3 逐步解耦 normalizeState）。
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { dataDir, statePath } from "../foundation/paths";
 import { reportError } from "../observability/app-errors";
@@ -166,6 +166,36 @@ export function recoverStateFromBackups(dataDirPath: string, statePathValue: str
     return parsed;
   } catch { /* 不存在/损坏 */ }
   return null;
+}
+
+// ── 1-4 启动清扫 .tmp 残留 ──────────────────────────────────────
+// 原子写的 rename 失败且 unlink 也失败(Windows 反病毒锁窗口两连击)会留下
+// state.json.*.tmp——每个都是含全部 apiKey 的完整 state 副本,生产环境实测会
+// 永久堆积。启动时清扫;10 分钟年龄护栏避免误删并发实例正在写的 tmp(双实例
+// 互斥锁是 1-5,另批处理)。
+export function sweepStaleStateTempFilesIn(dir: string, stateBasename: string, maxAgeMs = 10 * 60 * 1000): number {
+  let removed = 0;
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    if (!name.startsWith(`${stateBasename}.`) || !name.endsWith(".tmp")) continue;
+    const fullPath = join(dir, name);
+    try {
+      if (Date.now() - statSync(fullPath).mtimeMs < maxAgeMs) continue;
+      unlinkSync(fullPath);
+      removed++;
+    } catch { /* 单个失败不影响其余清扫 */ }
+  }
+  if (removed > 0) console.log(`[state] 清扫 ${removed} 个残留 .tmp 文件`);
+  return removed;
+}
+
+export function sweepStaleStateTempFiles(): number {
+  return sweepStaleStateTempFilesIn(dataDir, basename(statePath));
 }
 
 export function saveState(): void {
