@@ -109,5 +109,25 @@
     "send_hint_enter": "按 Enter 发送，Shift + Enter 换行",
     "send_hint_newline": "按 Shift + Enter 发送，Enter 换行",
     "long_text_as_file": "长文本已转为文件附件"
+  },
+  "resize_handle": "拖动调整输入框大小",
+  "compress_history": "压缩对话历史",
+  "optimize": {
+    "title": "优化提示词",
+    "slow_hint": "优化模型响应较慢,正在等待…",
+    "empty_result": "优化结果为空,请重试或更换优化模型",
+    "success": "已优化提示词",
+    "timeout": "优化超时,请稍后重试或检查优化模型是否可用",
+    "failed": "提示词优化失败",
+    "undo": "撤销",
+    "undo_title": "撤销本次优化,恢复原文"
+  },
+  "asr": {
+    "not_configured": "请先在设置中配置并选择 ASR 服务",
+    "failed": "语音识别失败",
+    "connect_failed": "语音识别连接失败",
+    "mic_denied": "无法访问麦克风",
+    "start": "语音识别",
+    "stop": "停止语音识别"
   }
 }

@@ -324,7 +324,7 @@ function ChatInputInner({
     setOptimizeHint(null);
     // 8s 后还在转 → 显示"模型响应较慢",给用户感知(不然一直转圈不知道是卡死还是在想)。
     // 完成或出错时在 finally 里清掉。配合下方的 60s 超时,保证不会无限转。
-    const slowTimer = setTimeout(() => setOptimizeHint("优化模型响应较慢,正在等待…"), 8_000);
+    const slowTimer = setTimeout(() => setOptimizeHint(t("optimize.slow_hint")), 8_000);
     try {
       const context = getOptimizeContext?.() ?? "";
       const res = await api.post<{ text: string }>(
@@ -334,22 +334,22 @@ function ChatInputInner({
       );
       const optimized = String(res.text ?? "").trim();
       if (!optimized) {
-        toast.error("优化结果为空,请重试或更换优化模型");
+        toast.error(t("optimize.empty_result"));
         return;
       }
       onValueChange(optimized);
       setOriginalBeforeOptimize(original);
-      toast.success("已优化提示词");
+      toast.success(t("optimize.success"));
     } catch (err) {
       // 区分超时和其他错误,给更可操作的提示。AbortError/TimeoutError 是 ky 超时抛的。
       const isTimeout =
         err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
       toast.error(
         isTimeout
-          ? "优化超时,请稍后重试或检查优化模型是否可用"
+          ? t("optimize.timeout")
           : err instanceof Error
             ? err.message
-            : "提示词优化失败",
+            : t("optimize.failed"),
       );
     } finally {
       clearTimeout(slowTimer);
@@ -406,7 +406,7 @@ function ChatInputInner({
     }
 
     if (!settings?.selectedASRProviderId) {
-      toast.error("请先在设置中配置并选择 ASR 服务");
+      toast.error(t("asr.not_configured"));
       return;
     }
 
@@ -415,7 +415,7 @@ function ChatInputInner({
         (item) => item.id === settings.selectedASRProviderId,
       );
       if (!provider) {
-        toast.error("请先在设置中配置并选择 ASR 服务");
+        toast.error(t("asr.not_configured"));
         return;
       }
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -494,14 +494,14 @@ function ChatInputInner({
         };
         if (payload.type === "transcript") applyTranscript(payload.transcript ?? "");
         if (payload.type === "error") {
-          const message = payload.error || "语音识别失败";
+          const message = payload.error || t("asr.failed");
           setError(message);
           toast.error(message);
           stopAsr();
         }
       };
       socket.onerror = () => {
-        toast.error("语音识别连接失败");
+        toast.error(t("asr.connect_failed"));
         stopAsr();
       };
       socket.onclose = () => {
@@ -511,7 +511,7 @@ function ChatInputInner({
       };
       setAsrListening(true);
     } catch (asrError) {
-      const message = asrError instanceof Error ? asrError.message : "无法访问麦克风";
+      const message = asrError instanceof Error ? asrError.message : t("asr.mic_denied");
       setError(message);
       toast.error(message);
       stopAsr();
@@ -624,7 +624,7 @@ function ChatInputInner({
           onPointerUp={onResizePointerUp}
           role="separator"
           aria-orientation="horizontal"
-          aria-label="拖动调整输入框大小"
+          aria-label={t("resize_handle")}
         >
           <div className="h-1 w-10 rounded-full bg-border/70 transition-colors hover:bg-primary/50" />
         </div>
@@ -808,7 +808,7 @@ function ChatInputInner({
                       }}
                     >
                       <Scissors className="size-4" />
-                      压缩对话历史
+                      {t("compress_history")}
                     </DropdownMenuItem>
                   )}
                 </DropdownMenuContent>
@@ -832,7 +832,7 @@ function ChatInputInner({
                   "size-8 rounded-full text-muted-foreground hover:text-foreground",
                   asrListening && "text-primary shadow-sm",
                 )}
-                title={asrListening ? "停止语音识别" : "语音识别"}
+                title={asrListening ? t("asr.stop") : t("asr.start")}
                 onClick={toggleAsr}
               >
                 {asrListening ? (
@@ -858,7 +858,7 @@ function ChatInputInner({
                   void handleOptimize();
                 }}
                 className="size-8 rounded-full text-muted-foreground hover:text-foreground"
-                title="优化提示词"
+                title={t("optimize.title")}
               >
                 {optimizing ? (
                   <LoaderCircle className="size-4 animate-spin" />
@@ -872,14 +872,14 @@ function ChatInputInner({
                   variant="ghost"
                   size="sm"
                   className="h-8 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
-                  title="撤销本次优化,恢复原文"
+                  title={t("optimize.undo_title")}
                   onClick={() => {
                     onValueChange(originalBeforeOptimize);
                     setOriginalBeforeOptimize(null);
                   }}
                 >
                   <Undo2 className="size-3.5" />
-                  撤销
+                  {t("optimize.undo")}
                 </Button>
               ) : null}
               <Button

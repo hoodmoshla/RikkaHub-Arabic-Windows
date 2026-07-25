@@ -109,5 +109,25 @@
     "send_hint_enter": "Press Enter to send, Shift + Enter for newline",
     "send_hint_newline": "Press Shift + Enter to send, Enter for newline",
     "long_text_as_file": "Long text converted to file attachment"
+  },
+  "resize_handle": "Drag to resize the input box",
+  "compress_history": "Compress conversation history",
+  "optimize": {
+    "title": "Optimize prompt",
+    "slow_hint": "The optimizer model is responding slowly, waiting…",
+    "empty_result": "Optimizer returned nothing. Retry or switch the optimizer model.",
+    "success": "Prompt optimized",
+    "timeout": "Optimization timed out. Retry later or check the optimizer model.",
+    "failed": "Prompt optimization failed",
+    "undo": "Undo",
+    "undo_title": "Undo this optimization and restore the original text"
+  },
+  "asr": {
+    "not_configured": "Configure and select an ASR service in Settings first",
+    "failed": "Speech recognition failed",
+    "connect_failed": "Speech recognition connection failed",
+    "mic_denied": "Cannot access the microphone",
+    "start": "Voice input",
+    "stop": "Stop voice input"
   }
 }
