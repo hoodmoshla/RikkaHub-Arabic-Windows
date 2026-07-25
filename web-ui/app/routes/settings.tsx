@@ -2,77 +2,13 @@ import * as React from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "~/i18n";
 
-import {
-  ArrowLeft,
-  Bot,
-  Check,
-  CheckCircle2,
-  CopyPlus,
-  Database,
-  Download,
-  ExternalLink,
-  Eye,
-  EyeOff,
-  FileImage,
-  FileClock,
-  Globe,
-  Github,
-  GripVertical,
-  Heart,
-  KeyRound,
-  Loader2,
-  MessageSquareText,
-  Mic,
-  NotebookText,
-  Smartphone,
-  Plus,
-  RefreshCw,
-  Save,
-  Search,
-  Settings2,
-  Trash2,
-  Upload,
-  UserRound,
-  Volume2,
-  Square,
-  Sparkles,
-  WandSparkles,
-  Zap,
-  Brain,
-  X,
-  XCircle,
-} from "lucide-react";
+import { ArrowLeft, Bot, CheckCircle2, CopyPlus, Database, FileClock, Globe, Heart, KeyRound, Loader2, Mic, Search, Settings2, UserRound, Brain } from "lucide-react";
 import { Link } from "react-router";
 import { MemorySection } from "~/components/memory/memory-section";
 import { toast } from "sonner";
 
-import { AvatarCropper } from "~/components/avatar-cropper";
-import { FontPickerPair } from "~/components/font-picker";
-import { AIIcon } from "~/components/ui/ai-icon";
 import { Button } from "~/components/ui/button";
-import { Checkbox } from "~/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "~/components/ui/dialog";
-import { JsonTree, tryParseJson } from "~/components/ui/json-tree";
-import { Input } from "~/components/ui/input";
 import { ScrollArea } from "~/components/ui/scroll-area";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
-import { Separator } from "~/components/ui/separator";
-import { Slider } from "~/components/ui/slider";
-import { Switch } from "~/components/ui/switch";
-import { KeybindingSettings } from "~/components/keybinding-settings";
 import { AboutSection, DonateSection } from "~/components/settings/about";
 import { AssistantsSection } from "~/components/settings/assistants";
 import { McpExtensionsSection } from "~/components/settings/extensions";
@@ -85,31 +21,11 @@ import { ProxySection } from "~/components/settings/proxy";
 import { DefaultModelsSection } from "~/components/settings/default-models";
 import { SearchSection } from "~/components/settings/search";
 import { SpeechSection } from "~/components/settings/speech";
-import { clone, moveItem, numberText, PasswordInput, SectionHeader, SortableRow, textValue } from "~/components/settings/shared";
 import { StatsSection, type StatsPayload } from "~/components/settings/stats";
-import { Textarea } from "~/components/ui/textarea";
-import { UIAvatar } from "~/components/ui/ui-avatar";
 import { cn } from "~/lib/utils";
-import { openExternal } from "~/lib/external-link";
-import { getSystemInfo } from "~/lib/system-info";
-import api, { appendWebAuthQuery } from "~/services/api";
+import api from "~/services/api";
 import { useSettingsStore } from "~/stores/app-store";
-import type {
-  AsrProviderProfile,
-  AsrProviderType,
-  AssistantAvatar,
-  AssistantProfile,
-  ProviderModel,
-  ProviderProfile,
-  SearchServiceOption,
-  Settings,
-  TtsProviderProfile,
-  TtsProviderType,
-} from "~/types";
-import { ModelEditDialog } from "~/components/model-edit-dialog";
-import Markdown from "~/components/markdown/markdown";
-import { playAudio, stopAudio, useAudioPlaybackKey } from "~/lib/global-audio";
-import { UpdateDialog, type UpdateInfo } from "~/components/update-dialog";
+import type { Settings } from "~/types";
 
 type Section =
   | "general"
@@ -127,13 +43,6 @@ type Section =
   | "donate"
   | "about"
   | "plan";
-interface AssistantMemoryInfo {
-  id: number;
-  assistantId: string;
-  content: string;
-  createdAt: number;
-  updatedAt: number;
-}
 
 const navItems: Array<{
   id: Section;

@@ -2,58 +2,19 @@ import * as React from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
-import {
-  ArrowDown,
-  ArrowUp,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Clock3,
-  Copy,
-  Ellipsis,
-  Gauge,
-  GitFork,
-  Languages,
-  Pencil,
-  RefreshCw,
-  Share2,
-  Volume2,
-  VolumeX,
-  Trash2,
-  Zap,
-} from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, Clock3, Copy, Ellipsis, Gauge, GitFork, Languages, Pencil, RefreshCw, Share2, Volume2, VolumeX, Trash2, Zap } from "lucide-react";
 import { useSettingsStore } from "~/stores";
-import type {
-  AssistantProfile,
-  MessageDto,
-  MessageNodeDto,
-  ProviderProfile,
-  ProviderModel,
-  TokenUsage,
-  UIMessageAnnotation,
-  UIMessagePart,
-} from "~/types";
+import type { AssistantProfile, MessageDto, MessageNodeDto, ProviderProfile, ProviderModel, TokenUsage, UIMessageAnnotation, UIMessagePart } from "~/types";
 
 import { copyTextToClipboard } from "~/lib/clipboard";
 import { openExternal } from "~/lib/external-link";
 import { cn } from "~/lib/utils";
-import {
-  getAudioPlaybackKey,
-  playAudio,
-  playSpeechSynthesis,
-  stopAudio,
-  useAudioPlaybackKey,
-} from "~/lib/global-audio";
+import { getAudioPlaybackKey, stopAudio, useAudioPlaybackKey } from "~/lib/global-audio";
 import { ttsController, useIsTtsActiveForKey } from "~/lib/tts/tts-controller";
 import { Button } from "~/components/ui/button";
 import api from "~/services/api";
 import { useCurrentModel } from "~/hooks/use-current-model";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "~/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "~/components/ui/dropdown-menu";
 import { ChatMessageAnnotationsRow } from "./chat-message-annotations";
 import { ChatMessageAvatarRow } from "./chat-message-avatar-row";
 import { MessageParts } from "./message-part";

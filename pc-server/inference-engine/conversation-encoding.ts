@@ -3,32 +3,15 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3d），行为不变。
 
 import type { ApiMessage, Assistant, Conversation, JsonValue, Message, Model } from "../foundation/types";
-import { applyPlaceholders, cloneJson, getStringArray, isRecord, message, renderTemplate, textFromParts } from "../foundation/utils";
+import { applyPlaceholders, cloneJson, getStringArray, message, renderTemplate, textFromParts } from "../foundation/utils";
 import { state } from "../persistence/json-store";
-import {
-  activePromptInjections as activePromptInjectionsCore,
-  applyMessageTemplateToParts,
-  applyPromptInjectionsToMessages,
-  templateVariables as templateVariablesCore,
-} from "../assistants";
+import { activePromptInjections as activePromptInjectionsCore, applyMessageTemplateToParts, applyPromptInjectionsToMessages, templateVariables as templateVariablesCore } from "../assistants";
 import { buildMemoryPrompt, buildRecentChatsPrompt } from "../memory";
 import { buildSearchContext } from "../search";
 import { findModel } from "../model-providers";
 import { listSkills } from "../tools/skills";
 import { openAiLocalTools, openAiMcpTools, openAiSearchTools, openAiSkillTools } from "../tools/bound";
-import {
-  GOOGLE_SAFETY_SETTINGS,
-  apiContentFromParts,
-  apiContentText,
-  appendAssistantApiMessages,
-  googleContentsFromApiMessages,
-  googleFunctionDeclarations,
-  googleGenerationConfig,
-  hasBuiltInTool,
-  responseApiMessagesFromUiMessages,
-  supportsAbility,
-  supportsOutputModality,
-} from "./message-builder";
+import { GOOGLE_SAFETY_SETTINGS, apiContentFromParts, apiContentText, appendAssistantApiMessages, googleContentsFromApiMessages, googleFunctionDeclarations, googleGenerationConfig, hasBuiltInTool, responseApiMessagesFromUiMessages, supportsAbility, supportsOutputModality } from "./message-builder";
 import { isEmptyAssistantPlaceholder } from "./parts";
 
 export function templateVariables(messageText: string, role: string, assistant: Assistant, modelItem: Model) {

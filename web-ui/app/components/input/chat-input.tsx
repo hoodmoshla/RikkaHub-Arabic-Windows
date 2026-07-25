@@ -1,22 +1,6 @@
 import * as React from "react";
 
-import {
-  ArrowUp,
-  File,
-  FileDown,
-  Image,
-  LoaderCircle,
-  Mic,
-  Plus,
-  Scissors,
-  Send,
-  Sparkles,
-  Square,
-  Undo2,
-  Video,
-  X,
-  Zap,
-} from "lucide-react";
+import { ArrowUp, File, FileDown, Image, LoaderCircle, Mic, Plus, Scissors, Sparkles, Square, Undo2, Video, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -29,15 +13,9 @@ import { MemoryBadge } from "~/components/memory/memory-badge";
 import { ExtensionPickerButton } from "~/components/input/extension-picker";
 import { useChatInputStore, useSettingsStore } from "~/stores";
 import { Button } from "~/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "~/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "~/components/ui/dropdown-menu";
 import { Textarea } from "~/components/ui/textarea";
 import { resolveFileUrl } from "~/lib/files";
-import { normalizeImageForModelUpload } from "~/lib/image-normalize";
 import { DOCUMENT_UPLOAD_ACCEPT, uploadFilesToDraft } from "~/lib/upload";
 import { cn } from "~/lib/utils";
 import api, { appendWebAuthQuery } from "~/services/api";

@@ -2,28 +2,12 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3a），行为不变。依赖注入见 imports；不反向依赖 ../server。
 
 import { updateSettings } from "../app-config";
-import type { Assistant, JsonValue, Model, Provider } from "../foundation/types";
+import type { Assistant, Model, Provider } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { addLog } from "../api/logs";
 import { findAssistant } from "../assistants";
-import {
-  applyCustomBody,
-  findModel,
-  jsonBody,
-  modelsEndpointFor,
-  normalizeFetchedModels,
-  applyRequestHeaders,
-  providerHeaders,
-  providerTestCorePassed,
-  providerTestModel,
-  textBody,
-} from "./index";
-import {
-  hostOfProvider,
-  isModelAllowTemperature,
-  reasoningPayloadForProvider,
-  supportsAbility,
-} from "../inference-engine/message-builder";
+import { applyCustomBody, jsonBody, modelsEndpointFor, normalizeFetchedModels, applyRequestHeaders, providerHeaders, providerTestCorePassed, providerTestModel, textBody } from "./index";
+import { hostOfProvider } from "../inference-engine/message-builder";
 import { appendUsageFromRaw, deltaReasoningContent, deltaTextContent, parseSseChunks, responseEventToDelta } from "../inference-engine/providers";
 
 function getByPath(value: unknown, path: string): unknown {
