@@ -67,7 +67,6 @@ import {
   finishMessage,
   hasPendingToolApproval,
   hasResumableToolParts,
-  hasToolParts,
   toolApprovalType,
 } from "./helpers";
 import { generateSuggestionsForConversation, generateTitleForConversation, limitAuxiliaryText, modelExists, shouldAutoGenerateTitle } from "./auxiliary";
@@ -635,9 +634,6 @@ export function ensureAssistantGenerationNode(conversation: Conversation, modelI
   if (last?.messages[last.selectIndex]?.role === "ASSISTANT") {
     const msg = last.messages[last.selectIndex];
     msg.modelId = modelId;
-    if (hasToolParts(msg)) {
-      return last;
-    }
     return last;
   }
   const assistantNode: MessageNode = {

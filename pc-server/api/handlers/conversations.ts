@@ -240,6 +240,12 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     }
     if (sub === "regenerate" && request.method === "POST") {
       const body = await readJson<{ messageId?: string }>(request);
+      // 2-1:对齐 send 入口——先中止进行中的旧流。否则 generateAnswer 的 generating.set
+      // 直接顶掉旧 controller,旧流成为无主流:与新流同写一个节点,或对已摘除节点持续
+      // touchStream 广播幽灵帧。UI 虽屏蔽流式中的按钮,但 API 层必须自带守卫。
+      generating.get(conversation.id)?.abort();
+      generating.delete(conversation.id);
+      finishInterruptedPendingToolsInConversation(conversation);
       let regenerateAtNodeId: string | undefined;
       if (body.messageId) {
         const nodeIndex = conversation.messages.findIndex((n) =>
@@ -313,6 +319,12 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     const messageEdit = sub.match(/^messages\/([^/]+)\/edit$/);
     if (messageEdit && request.method === "POST") {
       const body = await readJson<{ parts?: JsonValue[] }>(request);
+      // 2-1:对齐 send 入口——先中止进行中的旧流。否则 generateAnswer 的 generating.set
+      // 直接顶掉旧 controller,旧流成为无主流:与新流同写一个节点,或对已摘除节点持续
+      // touchStream 广播幽灵帧。UI 虽屏蔽流式中的按钮,但 API 层必须自带守卫。
+      generating.get(conversation.id)?.abort();
+      generating.delete(conversation.id);
+      finishInterruptedPendingToolsInConversation(conversation);
       const messageId = decodeURIComponent(messageEdit[1]);
       const nodeIndex = conversation.messages.findIndex((node) => node.messages.some((msg) => msg.id === messageId));
       if (nodeIndex < 0) return error("Message not found", 404);
@@ -401,6 +413,12 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     }
     if (sub === "compress" && request.method === "POST") {
       const body = await readJson<{ additionalPrompt?: string; targetTokens?: number; keepRecentMessages?: number }>(request);
+      // 2-1:对齐 send 入口——先中止进行中的旧流。否则 generateAnswer 的 generating.set
+      // 直接顶掉旧 controller,旧流成为无主流:与新流同写一个节点,或对已摘除节点持续
+      // touchStream 广播幽灵帧。UI 虽屏蔽流式中的按钮,但 API 层必须自带守卫。
+      generating.get(conversation.id)?.abort();
+      generating.delete(conversation.id);
+      finishInterruptedPendingToolsInConversation(conversation);
       try {
         const summaries = await compressConversation(
           conversation,
