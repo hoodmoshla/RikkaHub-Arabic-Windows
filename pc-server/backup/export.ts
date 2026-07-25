@@ -370,6 +370,55 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>, backupName
 // messages(消息附件/工具输出图)+ generatedImages.fileId 数字引用。宁可多留不可错删:
 // 引用扫描为并集,只有任何形态都未命中的条目(孤儿:删会话不删文件、画廊截断遗留等)
 // 才不进备份。调用方需先 flushConvDirtyNow() 保证活库为最新。
+// ── 5-2 自适应压缩超时 ─────────────────────────────────────────
+// 固定 120s 在多 GB 附件库 + 机械盘上必然超时(进程被杀,导出报 "Zip creation
+// failed")。按暂存目录实际体积折算:基础 120s + 按 8 MB/s 保守压缩吞吐每 MB
+// 加 125ms,上限 30 分钟。导入侧解压本就无超时,导出侧对齐为"够用而有界"。
+export function adaptiveZipTimeoutMs(totalBytes: number): number {
+  const BASE_MS = 120_000;
+  const MS_PER_MB = 125;
+  const CAP_MS = 30 * 60_000;
+  return Math.min(BASE_MS + Math.round((totalBytes / (1024 * 1024)) * MS_PER_MB), CAP_MS);
+}
+
+function dirSizeBytes(dir: string): number {
+  let total = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) total += dirSizeBytes(p);
+    else if (entry.isFile()) total += statSync(p).size;
+  }
+  return total;
+}
+
+// ── 5-3 附件暂存失败不再静默吞 ─────────────────────────────────
+// 磁盘满/文件名含 Windows 非法字符时 writeFileSync 失败,原实现只 console.warn,
+// 用户拿到"看似成功"的不完整备份。改为计数返回,由调用方 reportError 上报
+// (与 missingSkipped 同等待遇——staging 写失败恰恰是更严重的那种)。
+export function stageUploadFilesInto(
+  uploadStage: string,
+  copies: Array<{ srcPath: string; name: string }>,
+  onProgress?: (msg: string) => void,
+): { staged: number; failed: number; firstError?: string } {
+  let staged = 0;
+  let failed = 0;
+  let firstError: string | undefined;
+  let done = 0;
+  for (const { srcPath, name } of copies) {
+    done++;
+    onProgress?.(`正在打包附件 (${done}/${copies.length})...`);
+    try {
+      writeFileSync(join(uploadStage, name), readFileSync(srcPath));
+      staged++;
+    } catch (copyErr) {
+      failed++;
+      if (!firstError) firstError = `${name}: ${copyErr}`;
+      console.warn("[backup] failed to stage upload file", srcPath, copyErr);
+    }
+  }
+  return { staged, failed, firstError };
+}
+
 function collectReferencedFileIds(): Set<number> {
   const ids = new Set<number>();
   collectPcFileRefs(safeJsonStringify(state), ids);
@@ -510,15 +559,9 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
     if (uploadPlan.copies.length > 0) {
       const uploadStage = join(stageDir, "upload");
       mkdirSync(uploadStage, { recursive: true });
-      let stagedFiles = 0;
-      for (const { srcPath, name } of uploadPlan.copies) {
-        stagedFiles++;
-        onProgress?.(`正在打包附件 (${stagedFiles}/${uploadPlan.copies.length})...`);
-        try {
-          writeFileSync(join(uploadStage, name), readFileSync(srcPath));
-        } catch (copyErr) {
-          console.warn("[backup] failed to stage upload file", srcPath, copyErr);
-        }
+      const stageResult = stageUploadFilesInto(uploadStage, uploadPlan.copies, onProgress);
+      if (stageResult.failed > 0) {
+        reportError("backup", "error", `${stageResult.failed}/${uploadPlan.copies.length} 个附件暂存失败(磁盘满或文件名含非法字符?),备份 zip 不完整。首个错误: ${stageResult.firstError}`);
       }
     }
     if (uploadPlan.missingSkipped > 0) {
@@ -543,13 +586,14 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
     }
     onProgress?.("正在压缩...");
     if (existsSync(targetZipPath)) rmSync(targetZipPath);
+    const zipTimeoutMs = adaptiveZipTimeoutMs(dirSizeBytes(stageDir));
     console.log(`[backup] creating zip from ${stageDir} → ${targetZipPath} (${readdirSync(stageDir).join(", ")})`);
     if (process.platform === "win32") {
       const script = [
         "Add-Type -AssemblyName System.IO.Compression.FileSystem",
         `[System.IO.Compression.ZipFile]::CreateFromDirectory('${stageDir.replace(/'/g, "''")}', '${targetZipPath.replace(/'/g, "''")}')`,
       ].join("; ");
-      const proc = Bun.spawnSync(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], { timeout: 120_000 });
+      const proc = Bun.spawnSync(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], { timeout: zipTimeoutMs });
       if (proc.exitCode !== 0) {
         const stderr = new TextDecoder().decode(proc.stderr ?? new Uint8Array()).slice(0, 500);
         const stdout = new TextDecoder().decode(proc.stdout ?? new Uint8Array()).slice(0, 200);
@@ -557,7 +601,7 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
         throw new Error(`Zip creation failed (exit ${proc.exitCode}): ${stderr || stdout || "unknown error"}`);
       }
     } else {
-      const proc = Bun.spawnSync(["zip", "-rq", targetZipPath, "."], { cwd: stageDir, timeout: 120_000 });
+      const proc = Bun.spawnSync(["zip", "-rq", targetZipPath, "."], { cwd: stageDir, timeout: zipTimeoutMs });
       if (proc.exitCode !== 0) {
         const stderr = new TextDecoder().decode(proc.stderr ?? new Uint8Array()).slice(0, 500);
         console.error("[backup] zip creation failed, exit:", proc.exitCode, "stderr:", stderr);
