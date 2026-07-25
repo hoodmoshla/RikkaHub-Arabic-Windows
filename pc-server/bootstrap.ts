@@ -5,12 +5,24 @@
 // 现在收敛为单一编排点:server.ts 在解析端口/Bun.serve 之前调用一次。
 
 import { applyEffectiveProxy, installProxyFetchInterceptor } from "./foundation/net";
+import { DataDirLockedError, acquireDataDirLock } from "./persistence/instance-lock";
 import { saveState, setState, state } from "./persistence/json-store";
 import { loadState } from "./persistence/state-load";
 import { initConversationsRuntime } from "./conversations";
 import { initSseWiring } from "./api/sse";
 
 export function bootstrap(): void {
+  // 0) 1-5:dataDir 单实例互斥。必须先于 loadState——另一实例持有时绝不能碰迁移链/state.json。
+  try {
+    acquireDataDirLock();
+  } catch (err) {
+    if (err instanceof DataDirLockedError) {
+      console.error(`[rikkahub-server] ${err.message}`);
+      process.exit(3);
+    }
+    throw err;
+  }
+
   // 1) 状态装载 + 一次性迁移链(SQLite 灌库、记忆拆分、附件去重、.tmp 清扫都在 loadState 内)。
   setState(loadState());
   state.launchCount += 1;

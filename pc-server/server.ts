@@ -6,6 +6,7 @@ import { asrRealtimeSessions, sendAsrAudio, startAsrRealtimeSession, stopAsrReal
 import { error, json } from "./api/request";
 import { startAnalytics } from "./app-config/analytics";
 import { bootstrap } from "./bootstrap";
+import { releaseDataDirLock } from "./persistence/instance-lock";
 import { generating } from "./conversations/generation-state";
 import { handleAuthTokenRequest, isWebAuthAuthorized, warnIfExposedWithoutAuth } from "./api/auth";
 import { routeStatic } from "./api/static";
@@ -259,6 +260,8 @@ async function flushAllStateBeforeExit(): Promise<void> {
   } catch (err) {
     console.warn("[conv-db] 关停刷库失败", err);
   }
+  // 1-5:全部刷盘完成后释放 dataDir 锁(只删自己的;崩溃残留的陈旧锁由下次启动接管)。
+  releaseDataDirLock();
 }
 
 async function shutdown() {
