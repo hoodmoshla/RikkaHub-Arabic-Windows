@@ -2,12 +2,12 @@
 // 纪律：Android 互导契约（FTS5 影子表排除、MemoryEntity、settings 合并、迁移常量）冻结，只准原样搬迁。
 // 部分辅助暂经 ../server 导入，3.5 拆 api/ 时收敛。
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import type { AssistantMemory, Conversation, JsonValue, Message, MessageNode, MessagePart, State, StoredFile } from "../foundation/types";
 import { guessMimeFromExt, isRecord, mergeById } from "../foundation/utils";
-import { dataDir, filesDir, skillsDir } from "../foundation/paths";
+import { dataDir, filesDir, skillsDir, statePath } from "../foundation/paths";
 import { tempDir } from "../foundation/platform";
 import { MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
@@ -55,6 +55,42 @@ export function customJsImportWarning(beforeSignatures: Map<string, string>, set
   return `安全提醒：本次导入包含 ${names.length} 个自定义 JS 搜索脚本（${names.join("、")}）。这类脚本会在本机执行，请确认备份来源可信；如不确定，请到 设置 → 搜索 中检查或删除对应服务。`;
 }
 
+/** 全面审查 5-6:导入前 state.json 快照(单份滚动覆盖,与会话库 pre-import.bak 对齐)。
+ *  恢复是全量替换语义,误选备份时这是设置/供应商 apiKey/文件账本的唯一本地回退点。
+ *  快照失败只告警不阻断导入(尽力而为的安全网,不是前置条件)。 */
+function snapshotStateJsonBeforeImport(): void {
+  try {
+    if (!existsSync(statePath)) return;
+    copyFileSync(statePath, `${statePath}.pre-import.bak`);
+    console.log(`[import] 导入前 state.json 快照已写入 ${statePath}.pre-import.bak`);
+  } catch (err) {
+    reportError("backup", "warn", "导入前 state.json 快照失败(导入继续,但设置层无本地回退点)", err);
+  }
+}
+
+/** 全面审查 5-1(P0):恢复时新文件 id 的安全下界——绝不重置 nextFileId。
+ *  本机现有附件的落盘命名是 filesDir/<id>.<ext>,若恢复从 1 重新分配 id,同 id 同扩展名
+ *  的新写入会直接覆写现有附件字节,不可逆。取内存 state(nextFileId 与 files 账本)与
+ *  磁盘文件名三者的最大值+1,沿现有 id 空间单调续分配,新写入天然零覆写;被替换掉的旧
+ *  附件字节成为孤儿留在磁盘,可人工找回。filesDirPath 参数化供回归测试注入临时目录。 */
+export function nextFileIdSafeFloor(filesDirPath: string = filesDir): number {
+  let floor = 1;
+  const live = state as State | undefined;
+  if (live && typeof live.nextFileId === "number" && live.nextFileId > floor) floor = live.nextFileId;
+  for (const entry of Array.isArray(live?.files) ? live.files : []) {
+    if (entry && typeof entry.id === "number" && entry.id + 1 > floor) floor = entry.id + 1;
+  }
+  try {
+    for (const name of readdirSync(filesDirPath)) {
+      const m = /^(\d+)(?:\.|$)/.exec(name);
+      if (!m) continue;
+      const candidate = Number(m[1]) + 1;
+      if (Number.isFinite(candidate) && candidate > floor) floor = candidate;
+    }
+  } catch { /* filesDir 不存在 → 以内存账本为准 */ }
+  return floor;
+}
+
 export function applyBackupPayload(body: { state?: Partial<State>; skills?: unknown; files?: unknown } & Partial<State>) {
   const incoming = body.state ?? body;
   if (!incoming || typeof incoming !== "object" || !incoming.settings) {
@@ -64,6 +100,7 @@ export function applyBackupPayload(body: { state?: Partial<State>; skills?: unkn
   // 缺失归一化成 [],而 finalize 把"数组存在"当替换基底——缺失若不删除,等于把
   // settings-only 备份当成"清空全部会话"执行。显式空数组则尊重替换语义。
   const hadConversations = Array.isArray(incoming.conversations);
+  snapshotStateJsonBeforeImport();
   setState(normalizeState(incoming));
   if (!hadConversations) delete state.conversations;
   // 记忆:整体替换语义(恢复备份 = 回到备份时的状态)。normalizeState 已把 incoming.memories
@@ -82,12 +119,17 @@ export function applyBackupPayload(body: { state?: Partial<State>; skills?: unkn
   importSkills(body.skills);
   if (Array.isArray(body.files)) {
     mkdirSync(filesDir, { recursive: true });
+    // 全面审查 5-1:老 JSON 备份按原 id 写 filesDir/<id>.<ext> 会覆写本机现有同名附件字节
+    // (备份内的 id 空间与本机磁盘既有文件无关)。落盘名加恢复批次前缀保证全新路径;
+    // 元数据 id 不变——/api/files/<id>/content 按 state.files 查 entry.path 提供内容,
+    // 与磁盘文件名解耦,引用不受影响,旧字节零破坏。
+    const restoreStamp = Date.now();
     for (const file of body.files) {
       if (!isRecord(file) || typeof file.data !== "string") continue;
       const fileId = Number(file.id);
       if (!Number.isFinite(fileId)) continue;
       const ext = extname(String(file.originalName ?? file.name ?? "")) || extname(String(file.path ?? "")) || "";
-      const target = join(filesDir, `${fileId}${ext}`);
+      const target = join(filesDir, `restored-${restoreStamp}-${fileId}${ext}`);
       writeFileSync(target, Buffer.from(file.data, "base64"));
       state.files = state.files.map((entry) => (entry.id === fileId ? { ...entry, path: target } : entry));
     }
@@ -139,7 +181,11 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
     // Wipe state.files first so we can re-add entries from upload/ with fresh IDs and paths
     // that are valid on THIS machine (the path stored in pc-backup.json points at the source
     // machine's filesystem and would be wrong here).
-    const incomingState = { ...(incoming as State), files: [], nextFileId: 1 } as State;
+    // 全面审查 5-1(P0):nextFileId 沿本机现有 id 空间续分配,绝不重置为 1——否则 re-link
+    // 从 1 起分配 id,写 filesDir/<id>.<ext> 时同 id 同扩展名的本机现有附件字节被直接覆写
+    // (settings-only 降级路径下保留的现有会话,其附件引用随即指向被覆写/悬空的内容)。
+    snapshotStateJsonBeforeImport();
+    const incomingState = { ...(incoming as State), files: [], nextFileId: nextFileIdSafeFloor() } as State;
     setState(normalizeState(incomingState));
     // 记忆:整体替换语义(PC 备份恢复)。normalizeState 把 incomingState.memories 解析到
     // state.memories;交给 memoryStore 接管(replace),然后从 state 移除。
@@ -320,6 +366,9 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
   let skillsImported = 0;
   let conversationsImported = 0;
   let dbReadError: string | null = null;
+
+  // 全面审查 5-6:安卓 zip 路径(settings 合并 + 文件注册 + 可选会话导入)同样先快照。
+  snapshotStateJsonBeforeImport();
 
   const settingsPath = join(extractDir, "settings.json");
   if (existsSync(settingsPath)) {
