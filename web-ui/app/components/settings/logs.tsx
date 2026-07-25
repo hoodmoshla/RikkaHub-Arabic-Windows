@@ -10,23 +10,9 @@ import { JsonTree, tryParseJson } from "~/components/ui/json-tree";
 import { cn } from "~/lib/utils";
 import { SectionHeader } from "~/components/settings/shared";
 
-export interface RequestLog {
-  id: string;
-  at: number;
-  providerName: string;
-  url: string;
-  ok: boolean;
-  status: number;
-  error?: string;
-  kind?: string;
-  durationMs?: number;
-  method?: string;
-  requestHeaders?: Record<string, string>;
-  requestBody?: string;
-  responseBody?: string;
-  responseHeaders?: Record<string, string>;
-  toolName?: string;
-}
+// FE-P1-2 收编:线上契约单源在后端 foundation/types(此前本地手抄漏了 providerId)。
+export type { RequestLog } from "@server/foundation/types";
+import type { RequestLog } from "@server/foundation/types";
 
 export function LogsSection({ logs, onClear }: { logs: RequestLog[]; onClear: () => void }) {
   const { t } = useTranslation();

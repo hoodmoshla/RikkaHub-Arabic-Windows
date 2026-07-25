@@ -79,6 +79,7 @@ import { ProvidersSection } from "~/components/settings/providers";
 import { DataSection } from "~/components/settings/data";
 import { GeneralSection } from "~/components/settings/general";
 import { LogsSection, type RequestLog } from "~/components/settings/logs";
+import { AppErrorsSection } from "~/components/settings/app-errors";
 import { ProxySection } from "~/components/settings/proxy";
 import { DefaultModelsSection } from "~/components/settings/default-models";
 import { SearchSection } from "~/components/settings/search";
@@ -299,7 +300,13 @@ export default function SettingsPage() {
             {section === "memory" && <MemorySection settings={settings} onSettings={updateLocal} />}
             {section === "data" && <DataSection settings={settings} onSettings={updateLocal} />}
             {section === "stats" && <StatsSection stats={stats} />}
-            {section === "logs" && <LogsSection logs={logs} onClear={clearLogs} />}
+            {section === "logs" && (
+              <>
+                <AppErrorsSection />
+                <div className="h-6" />
+                <LogsSection logs={logs} onClear={clearLogs} />
+              </>
+            )}
             {section === "proxy" && <ProxySection settings={settings} onSettings={updateLocal} />}
             {section === "donate" && <DonateSection />}
             {section === "about" && <AboutSection />}

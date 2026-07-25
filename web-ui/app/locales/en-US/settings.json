@@ -793,5 +793,16 @@
       "openImageGeneration": "Image generation",
       "zoomInOut": "Zoom in / out"
     }
+  },
+  "app_errors": {
+    "title": "App errors",
+    "subtitle": "Degradations and failures across generation, backup and persistence (cleared on restart).",
+    "empty": "No app errors yet",
+    "clear": "Clear",
+    "severity_error": "Error",
+    "severity_warn": "Warning",
+    "severity_info": "Info",
+    "merged_count": "{{count}} occurrences within 30s",
+    "no_detail": "No detail stack"
   }
 }

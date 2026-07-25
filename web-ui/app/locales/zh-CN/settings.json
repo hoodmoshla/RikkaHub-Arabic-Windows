@@ -766,5 +766,16 @@
       "openImageGeneration": "图像生成",
       "zoomInOut": "放大 / 缩小界面"
     }
+  },
+  "app_errors": {
+    "title": "应用错误",
+    "subtitle": "生成、备份、持久化等环节的降级与故障记录(重启后清空)。",
+    "empty": "暂无应用错误",
+    "clear": "清空记录",
+    "severity_error": "错误",
+    "severity_warn": "警告",
+    "severity_info": "信息",
+    "merged_count": "30 秒内发生 {{count}} 次",
+    "no_detail": "无详细堆栈"
   }
 }
