@@ -66,12 +66,31 @@ initWorkingSetSseGuard((convId) => (conversationClients.get(convId)?.size ?? 0) 
 // 应用错误通道(P2-1):errors/stream 订阅者集合 + 广播注入(通道模块不依赖 api 层)。
 export const errorClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 initAppErrorBroadcast((entry) => {
-  for (const client of errorClients) client.enqueue(sseFrame("app_error", { type: "app_error", error: entry }));
+  broadcastTo(errorClients, sseFrame("app_error", { type: "app_error", error: entry }));
 });
 const encoder = new TextEncoder();
 
 export function sseFrame(event: string, data: JsonValue | object) {
   return encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+/** 全面审查 4-1(P1):对集合内每个客户端安全 enqueue。死 controller(客户端已断开、
+ *  cancel 回调尚未摘除的窗口内)上 enqueue 会抛 "Controller is already closed"——若发生在
+ *  setTimeout 回调(33ms 节点广播)里,未捕获异常直接杀死整个 Bun 进程;发生在同步广播里
+ *  则中断遍历,后续存活客户端静默丢事件。这里统一 try/catch 并把死 controller 从集合
+ *  摘除(只吞不摘会让它永久驻留反复抛),对齐 heartbeat 既有的"抛错即清理"模式。 */
+export function broadcastTo(
+  clients: Set<ReadableStreamDefaultController<Uint8Array>> | undefined,
+  frame: Uint8Array,
+): void {
+  if (!clients) return;
+  for (const client of clients) {
+    try {
+      client.enqueue(frame);
+    } catch {
+      clients.delete(client); // Set 迭代中 delete 是安全的
+    }
+  }
 }
 
 export function openSse(
@@ -111,7 +130,7 @@ export function openSse(
 }
 
 export function broadcastSettings() {
-  for (const client of settingsClients) client.enqueue(sseFrame("update", state.settings));
+  broadcastTo(settingsClients, sseFrame("update", state.settings));
 }
 
 // memory SSE 通道(1.3.2):推送 MemorySnapshot 给前端记忆管理 UI + 待确认徽章。独立于
@@ -120,15 +139,12 @@ export function broadcastSettings() {
 export const memoryClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 
 export function broadcastMemoryUpdate() {
-  const snapshot = memoryStore.getSnapshot();
-  for (const client of memoryClients) {
-    try { client.enqueue(sseFrame("update", snapshot)); } catch { /* client gone */ }
-  }
+  broadcastTo(memoryClients, sseFrame("update", memoryStore.getSnapshot()));
 }
 
 export function broadcastList() {
   const payload: ConversationListInvalidateEventDto = { type: "invalidate", assistantId: state.settings.assistantId, timestamp: Date.now() };
-  for (const client of listClients) client.enqueue(sseFrame("invalidate", payload));
+  broadcastTo(listClients, sseFrame("invalidate", payload));
 }
 
 export function broadcastConversation(conversation: Conversation, event = "snapshot") {
@@ -138,9 +154,7 @@ export function broadcastConversation(conversation: Conversation, event = "snaps
     conversation: toConversationDto(conversation, generating.has(conversation.id)),
     serverTime: Date.now(),
   };
-  for (const client of conversationClients.get(conversation.id) ?? []) {
-    client.enqueue(sseFrame(event, payload));
-  }
+  broadcastTo(conversationClients.get(conversation.id), sseFrame(event, payload));
   broadcastList();
 }
 
@@ -156,9 +170,7 @@ function broadcastNodeUpdateNow(conversation: Conversation, node: MessageNode) {
     updateAt: conversation.updateAt,
     isGenerating: generating.has(conversation.id),
   };
-  for (const client of conversationClients.get(conversation.id) ?? []) {
-    client.enqueue(sseFrame("node_update", payload));
-  }
+  broadcastTo(conversationClients.get(conversation.id), sseFrame("node_update", payload));
   // NOTE: deliberately NOT calling broadcastList() here. This used to fire on every chunk
   // during streaming (~30 times/sec via scheduleNodeBroadcast), which made the conversation
   // list SSE issue an `invalidate` event 30x/sec, which made the frontend re-fetch
