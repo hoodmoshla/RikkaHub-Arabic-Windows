@@ -362,6 +362,13 @@ function shutdown() {
   // 确保活库数据完整落盘、下次启动读到最新。
   try {
     flushConvDirtyNow();
+    // 全面审查 2-0b:生成中的会话再做一次全量 reconcile——流式增量 flush 只补写脏节点,
+    // 结构性变更(新增节点/截断/重排)要靠 persistConversation 的"删旧节点+按序重插"
+    // 才完整落盘。生成中会话通常 0~2 个,同步全量写可承受。
+    for (const convId of generating.keys()) {
+      const conv = getConversation(convId);
+      if (conv) persistConversation(conv);
+    }
     checkpointConversationsDb();
   } catch (err) {
     console.warn("[conv-db] 关停刷库失败", err);
