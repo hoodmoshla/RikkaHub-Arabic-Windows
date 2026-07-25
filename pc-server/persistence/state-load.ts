@@ -25,7 +25,7 @@ import { GLOBAL_MEMORY_ID, memoryStore } from "../memory";
 import { NA_API_PRESET_MODELS, NA_API_PROVIDER_ID, SUNSET_PROVIDER_IDS, TENCENT_PROVIDER_ID, builtinProviderRank, enrichModel, inferModelAbilities, model } from "../model-providers";
 import { normalizeTtsProviders } from "../media/tts";
 import { normalizeAsrProviders } from "../media/asr";
-import { normalizeS3Config, normalizeWebDavConfig } from "../backup/storage";
+import { normalizeS3Config, normalizeWebDavConfig } from "../app-config/backup-config";
 import { hashFileSha256, rewritePcFileUrlsDeep } from "../backup/file-refs";
 import { rebuildFtsFromNodeTable } from "../conversations/fts";
 import { normalizeRequestStats } from "../api/logs";

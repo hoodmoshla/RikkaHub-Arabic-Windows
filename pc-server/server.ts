@@ -11,7 +11,7 @@ import { APP_VERSION } from "./updates/index";
 import { buildSearchContext, runScrapeWeb, runSearchWeb } from "./search/index";
 import { asrRealtimeSessions, normalizeAsrProviders, sendAsrAudio, startAsrRealtimeSession, stopAsrRealtimeSession } from "./media/asr";
 import { DEFAULT_SYSTEM_TTS_ID, defaultTtsProviders, normalizeTtsProviders } from "./media/tts";
-import { normalizeS3Config, normalizeWebDavConfig } from "./backup/storage";
+import { normalizeS3Config, normalizeWebDavConfig } from "./app-config/backup-config";
 import { error, json, mime } from "./api/request";
 import { startAnalytics } from "./app-config/analytics";
 import { loadState } from "./persistence/state-load";

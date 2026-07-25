@@ -5,42 +5,11 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, createHmac } from "node:crypto";
 import type { S3Config, WebDavConfig } from "../foundation/types";
-import { backupStamp, getStringArray, isRecord } from "../foundation/utils";
+import { backupStamp } from "../foundation/utils";
 import { tempDir } from "../foundation/platform";
 import { stripXmlText } from "../files/index";
 import { createSettingsBackupZipToPath } from "./export";
 import { streamResponseToTempAndRestore } from "./import";
-
-export function normalizeWebDavConfig(value: unknown): WebDavConfig {
-  const raw = isRecord(value) ? value : {};
-  const items = getStringArray(raw.items).filter((item) => item === "DATABASE" || item === "FILES");
-  return {
-    url: String(raw.url ?? ""),
-    username: String(raw.username ?? ""),
-    password: String(raw.password ?? ""),
-    path: String(raw.path ?? "rikkahub_backups") || "rikkahub_backups",
-    items: items.length ? items : ["DATABASE", "FILES"],
-  };
-}
-
-export function normalizeS3Config(value: unknown): S3Config {
-  const raw = isRecord(value) ? value : {};
-  const items = getStringArray(raw.items).filter((item) => item === "DATABASE" || item === "FILES");
-  // 对齐 APP 字段。兼容旧 PC 值:forcePathStyle → pathStyle(语义相同);prefix 已废弃(APP 用硬编码
-  // rikkahub_backups/),忽略。pathStyle/forcePathStyle 都缺失时默认 true(与 APP 默认一致)。
-  const hasPath = "pathStyle" in raw;
-  const hasForce = "forcePathStyle" in raw;
-  const pathStyle = hasPath ? raw.pathStyle === true : hasForce ? raw.forcePathStyle === true : true;
-  return {
-    endpoint: String(raw.endpoint ?? ""),
-    accessKeyId: String(raw.accessKeyId ?? ""),
-    secretAccessKey: String(raw.secretAccessKey ?? ""),
-    bucket: String(raw.bucket ?? ""),
-    region: String(raw.region ?? "auto") || "auto",
-    pathStyle,
-    items: items.length ? items : ["DATABASE", "FILES"],
-  };
-}
 
 function webDavAuthHeader(config: WebDavConfig): Record<string, string> {
   return config.username || config.password

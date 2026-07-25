@@ -13,9 +13,8 @@ import { getConversationsDb } from "../../conversations";
 import { countConversations } from "../../conversations/read-queries";
 import { createSettingsBackupZipToPath } from "../../backup/export";
 import { applyAndroidZipBackupFromPath, applyBackupPayload, customJsImportWarning, customJsScriptSignatures } from "../../backup/import";
+import { normalizeS3Config, normalizeWebDavConfig } from "../../app-config/backup-config";
 import {
-  normalizeS3Config,
-  normalizeWebDavConfig,
   s3Backup,
   s3Delete,
   s3ListBackups,
