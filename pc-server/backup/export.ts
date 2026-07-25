@@ -293,6 +293,17 @@ function insertMemoriesIntoDb(db: InstanceType<typeof Database>) {
 // 安卓对齐批6:PC 消息里的附件引用是 /api/files/<id>/content,安卓无法解析(此前 PC→APP
 // 全部裂图)。导出时反向重写成安卓自身的 upload 绝对路径 URI(与安卓消息内的原生形态一致,
 // PC 导入端 rewriteAndroidFileUrl 的 upload/<name> 正则也能精确逆回)。文件名做 JSON 转义。
+/** 安卓对齐批6(审查A P0):ToolPart.output 里的 {error}/{pending} 历史载荷没有 type 判别符,
+ *  安卓 sealed 多态解码抛 SerializationException 且读会话处无容错。对齐安卓自身写法
+ *  (GenerationHandler 把错误 JSON 包成 text part)。仅用于导出产物,PC 内部契约不动。 */
+export function wrapToolOutputEntriesForAndroid(output: unknown[]): unknown[] {
+  return output.map((entry: any) =>
+    entry && typeof entry === "object" && !Array.isArray(entry) && typeof entry.type !== "string"
+      ? { type: "text", text: JSON.stringify(entry) }
+      : entry,
+  );
+}
+
 const ANDROID_UPLOAD_URI_PREFIX = "file:///data/user/0/me.rerere.rikkahub/files/upload/";
 function rewritePcUrlsToAndroidUpload(jsonText: string, backupNameById: Map<number, string>): string {
   return jsonText.replace(/\/api\/files\/(\d+)\/content/g, (whole, idStr: string) => {
@@ -335,16 +346,9 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>, backupName
             const fixed = { ...p };
             if (fixed.createdAt) fixed.createdAt = toInstant(fixed.createdAt);
             if (fixed.finishedAt) fixed.finishedAt = toInstant(fixed.finishedAt);
-            // 安卓对齐批6(审查A P0):ToolPart.output 里的 {error}/{pending} 历史载荷没有
-            // type 判别符,安卓 sealed 多态解码抛 SerializationException 且读会话处无容错——
-            // 含失败/挂起工具调用的会话在手机上打开即崩。对齐安卓自身写法(GenerationHandler
-            // 把错误 JSON 包成 text part)。仅影响导出产物,PC 内部契约不动。
+            // 安卓对齐批6(审查A P0):无判别符工具载荷包装成 text part,详见 wrapToolOutputEntriesForAndroid。
             if (fixed.type === "tool" && Array.isArray(fixed.output)) {
-              fixed.output = fixed.output.map((entry: any) =>
-                entry && typeof entry === "object" && !Array.isArray(entry) && typeof entry.type !== "string"
-                  ? { type: "text", text: JSON.stringify(entry) }
-                  : entry,
-              );
+              fixed.output = wrapToolOutputEntriesForAndroid(fixed.output);
             }
             return fixed;
           });

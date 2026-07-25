@@ -12,6 +12,7 @@ import {
   ANDROID_AVATAR_TYPE_TO_PC,
   PC_AVATAR_TYPE_TO_ANDROID,
   rewriteAvatarsInSettings,
+  wrapToolOutputEntriesForAndroid,
 } from "./export";
 
 // ── 最小 zip 构造器（仅测试用）─────────────────────────────────────────────
@@ -101,6 +102,25 @@ describe("readZipEntries", () => {
     ]);
     const entries = readZipEntries(zip);
     expect(entries.map((entry) => entry.name)).toEqual(["good.txt"]);
+  });
+});
+
+describe("wrapToolOutputEntriesForAndroid(安卓对齐批6,审查A P0)", () => {
+  test("{error}/{pending} 无判别符载荷包成 text part,标准 part 与原始值不动", () => {
+    const out = wrapToolOutputEntriesForAndroid([
+      { error: "boom" },
+      { pending: true, questions: [] },
+      { type: "text", text: "ok" },
+      { type: "image", url: "/api/files/1/content" },
+      "raw-string",
+      null,
+    ]) as any[];
+    expect(out[0]).toEqual({ type: "text", text: JSON.stringify({ error: "boom" }) });
+    expect(out[1]).toEqual({ type: "text", text: JSON.stringify({ pending: true, questions: [] }) });
+    expect(out[2]).toEqual({ type: "text", text: "ok" });
+    expect(out[3]).toEqual({ type: "image", url: "/api/files/1/content" });
+    expect(out[4]).toBe("raw-string");
+    expect(out[5]).toBeNull();
   });
 });
 
