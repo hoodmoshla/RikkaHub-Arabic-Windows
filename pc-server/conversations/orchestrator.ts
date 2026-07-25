@@ -2,7 +2,7 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3g），行为不变。推理引擎经 GenerationEvent sink 与本层解耦。
 
 import type { ApiMessage, Assistant, Conversation, JsonValue, Message, MessageNode, Model, Provider, StreamHooks, ToolPendingOutput } from "../foundation/types";
-import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolCall, ToolExecutor, ToolResult } from "../inference-engine/events";
+import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolExecutor } from "../inference-engine/events";
 import { id, isRecord, message, textFromParts } from "../foundation/utils";
 import { classifyProxyError } from "../foundation/net";
 import { saveState, state } from "../persistence/json-store";

@@ -1,18 +1,16 @@
 // conversations/auxiliary.ts — 辅助生成（标题/建议/翻译/提示词优化/OCR/会话压缩）
 // 纪律：纯搬迁自 server.ts（阶段 5.3g），行为不变。
 
-import type { Assistant, AuxiliaryTextOptions, Conversation, JsonValue, Message, MessagePart, Model } from "../foundation/types";
+import type { Assistant, AuxiliaryTextOptions, Conversation, Message, MessagePart, Model } from "../foundation/types";
 import { applyPlaceholders, id, isRecord, localeDisplayName, message, textFromParts, uniqueStrings } from "../foundation/utils";
 import { saveState, state } from "../persistence/json-store";
-import { addLog } from "../api/logs";
 import { broadcastConversation } from "../api/sse";
-import { DEFAULT_AUTO_MODEL_ID, applyCustomBody, applyRequestHeaders, findModel, jsonBody, textBody } from "../model-providers";
+import { DEFAULT_AUTO_MODEL_ID, applyCustomBody, applyRequestHeaders, findModel } from "../model-providers";
 import { endpointFor } from "../model-providers/checks";
 import {
   auxiliaryReasoningPayloadForProvider,
   claudeThinkingPayload,
   dataUrlForMessageUrl,
-  hostOfProvider,
   isModelAllowTemperature,
   parseDataUrl,
   reasoningLevelNormalized,
@@ -34,8 +32,8 @@ import {
   SUGGESTION_CHARACTER_LIMIT,
   TITLE_CHARACTER_LIMIT,
 } from "../app-config/prompts";
-import { getConversation, persistConversation, selectedConversationMessages } from "./index";
-import { estimatePromptTokensForConversation, findAssistant, finishMessage, summaryAsText } from "./helpers";
+import { persistConversation, selectedConversationMessages } from "./index";
+import { findAssistant, summaryAsText } from "./helpers";
 
 export function cleanAuxiliaryText(text: string, fallback = "") {
   const cleaned = text.replace(/^["“”'‘’]+|["“”'‘’]+$/g, "").trim();
