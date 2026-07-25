@@ -2,7 +2,7 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3h），行为不变。迁移常量语义见 json-store.ts。
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import type { AssistantMemoryFile, Conversation, GlobalMemoryFile, JsonValue, State, StoredFile, WriteStrategy } from "../foundation/types";
 import { id, isRecord, mergeById, uniqueStrings } from "../foundation/utils";
 import { assistantMemoryPath, dataDir, filesDir, globalMemoryPath, pendingMemoryPath, skillsDir, statePath } from "../foundation/paths";
@@ -294,9 +294,34 @@ export function loadState(): State {
   // performStateSave 按标记把它继续写回 state.json,下次启动重试迁移。运行时读路径
   // 已 DB 化,本次启动会话表现为空,但数据仍在 state.json,不丢。
   migrateMemoryFilesIfNeeded(state);
+  repairRelocatedFilePaths(state);
   migrateFileDedupIfNeeded(state);
   sweepStaleStateTempFiles(); // 1-4:此刻本进程尚未开始任何原子写,清扫安全
   return state;
+}
+
+/** 全面审查 1-6:StoredFile.path 存绝对路径,便携布局(pc-data 随 exe)下用户移动安装目录/
+ *  换盘符/拷目录迁移新机后,字节都还在 files/ 里,账本却指向旧盘符——附件/生图/头像全部 404。
+ *  启动时一次性修正:原路径不存在但 files/ 下按落盘命名(basename 或 <id><ext>,上传与导入
+ *  都按 <id><ext> 命名,全局唯一)能找到 → 改写账本。修好的路径由 bootstrap 尾部 saveState 落盘。 */
+export function repairRelocatedFilePathsIn(files: StoredFile[], filesDirPath: string): number {
+  let repaired = 0;
+  for (const f of files) {
+    if (f.path && existsSync(f.path)) continue;
+    const byBasename = f.path ? join(filesDirPath, basename(f.path)) : "";
+    const ext = extname(f.fileName || "") || extname(f.path || "") || "";
+    const byId = join(filesDirPath, `${f.id}${ext}`);
+    const candidate = byBasename && existsSync(byBasename) ? byBasename : existsSync(byId) ? byId : "";
+    if (!candidate) continue; // 字节确实没了,读取侧 404 是正确行为
+    f.path = candidate;
+    repaired++;
+  }
+  if (repaired > 0) console.log(`[files] 数据目录搬家修正:${repaired} 个附件路径已改指当前 files/`);
+  return repaired;
+}
+
+export function repairRelocatedFilePaths(stateObj: State): number {
+  return repairRelocatedFilePathsIn(stateObj.files, filesDir);
 }
 
 export const FILE_DEDUP_MIGRATION = "file-dedup-2.0";
