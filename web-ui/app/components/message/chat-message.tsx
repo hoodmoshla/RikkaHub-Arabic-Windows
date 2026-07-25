@@ -973,6 +973,7 @@ export const ChatMessage = React.memo(
     selected = false,
     onToggleSelect,
   }: ChatMessageProps) => {
+    const { t } = useTranslation("message");
     const isUser = message.role === "USER";
     const providers = useSettingsStore((state) => state.settings?.providers);
     const displaySetting = useSettingsStore((state) => state.settings?.displaySetting);
@@ -1094,7 +1095,7 @@ export const ChatMessage = React.memo(
             href={modelSettingsHref}
           >
             <Zap className="size-3.5" />
-            打开模型设置
+            {t("chat_message.open_model_settings")}
           </a>
         ) : null}
 
@@ -1115,6 +1116,9 @@ export const ChatMessage = React.memo(
   },
 );
 
+// 后端在翻译流式期间往 msg.translation 写的占位哨兵值(conversations.ts),属数据协议,不随 UI 语言变。
+const TRANSLATING_SENTINEL = "正在翻译...";
+
 const TranslationBlock = React.memo(
   ({
     content,
@@ -1127,8 +1131,9 @@ const TranslationBlock = React.memo(
     onClickCitation: (citationId: string) => void;
     citationOrdinalMap?: Map<string, number>;
   }) => {
+    const { t } = useTranslation("message");
     const [collapsed, setCollapsed] = React.useState(false);
-    const isLoading = content.trim() === "" || content.trim() === "正在翻译...";
+    const isLoading = content.trim() === "" || content.trim() === TRANSLATING_SENTINEL;
 
     return (
       <div className={cn("w-full px-1", alignRight ? "text-right" : "text-left")}>
@@ -1145,15 +1150,15 @@ const TranslationBlock = React.memo(
             className="text-sm font-semibold text-primary"
             onClick={() => setCollapsed((current) => !current)}
           >
-            译文
+            {t("chat_message.translation")}
           </button>
           <Button
             type="button"
             size="icon-xs"
             variant="ghost"
             onClick={() => setCollapsed((current) => !current)}
-            aria-label={collapsed ? "展开译文" : "收起译文"}
-            title={collapsed ? "展开译文" : "收起译文"}
+            aria-label={collapsed ? t("chat_message.expand_translation") : t("chat_message.collapse_translation")}
+            title={collapsed ? t("chat_message.expand_translation") : t("chat_message.collapse_translation")}
           >
             {collapsed ? <ArrowDown className="size-3.5" /> : <ArrowUp className="size-3.5" />}
           </Button>
@@ -1166,10 +1171,10 @@ const TranslationBlock = React.memo(
             {isLoading ? (
               <div className="flex items-center gap-2 text-muted-foreground">
                 <span className="size-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
-                正在翻译...
+                {t("chat_message.translating")}...
               </div>
             ) : null}
-            {content.trim() && content.trim() !== "正在翻译..." ? (
+            {content.trim() && content.trim() !== TRANSLATING_SENTINEL ? (
               <Markdown
                 content={content}
                 className="message-markdown"
