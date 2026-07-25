@@ -437,6 +437,48 @@ export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, co
   txn();
 }
 
+/** 备份 2.0:把活库两张会话表 ATTACH 复制成独立 dump(pc_conversations.db)。
+ *  PC→PC 会话备份的权威载体,与安卓 schema 模板彻底解耦(纯 PC 用户从此有完整会话备份)。
+ *  不带 FTS(导入侧 resetConversationsDbTo 重建),纯 SQL 复制零 JS 内存开销;
+ *  pc_dump_meta 携带格式版本与导出时间,为未来格式演进留判别依据。
+ *  返回导出的会话行数;活库未打开返回 -1。 */
+export function exportPcConversationsDump(targetPath: string): number {
+  if (!conversationsDb) return -1;
+  const db = conversationsDb;
+  if (existsSync(targetPath)) unlinkSync(targetPath);
+  const escaped = targetPath.replace(/'/g, "''");
+  db.exec(`ATTACH DATABASE '${escaped}' AS pcdump`);
+  try {
+    db.exec(`
+      CREATE TABLE pcdump.pc_dump_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+      CREATE TABLE pcdump.pc_conversation (
+        id              TEXT PRIMARY KEY NOT NULL,
+        assistant_id    TEXT NOT NULL,
+        title           TEXT NOT NULL DEFAULT '',
+        system_prompt   TEXT NOT NULL DEFAULT '',
+        truncate_index  INTEGER NOT NULL DEFAULT -1,
+        suggestions     TEXT NOT NULL DEFAULT '[]',
+        is_pinned       INTEGER NOT NULL DEFAULT 0,
+        create_at       INTEGER NOT NULL,
+        update_at       INTEGER NOT NULL
+      );
+      CREATE TABLE pcdump.pc_message_node (
+        id              TEXT PRIMARY KEY NOT NULL,
+        conversation_id TEXT NOT NULL,
+        node_index      INTEGER NOT NULL,
+        messages        TEXT NOT NULL DEFAULT '[]',
+        select_index    INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO pcdump.pc_dump_meta (key, value) VALUES ('format', '1'), ('exportedAt', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+      INSERT INTO pcdump.pc_conversation SELECT id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at FROM main.pc_conversation;
+      INSERT INTO pcdump.pc_message_node SELECT id, conversation_id, node_index, messages, select_index FROM main.pc_message_node;
+    `);
+    return (db.prepare("SELECT COUNT(*) AS n FROM pcdump.pc_conversation").get() as { n: number }).n;
+  } finally {
+    db.exec("DETACH DATABASE pcdump");
+  }
+}
+
 /** 导入前安全网(收官审查 P0-1):活库非空时快照到 <活库>.pre-import.bak(单份滚动覆盖)。
  *  resetConversationsDbTo 是全表替换,备份损坏/缺库导致的导入灾难由此获得本地回退点。
  *  快照失败只告警不阻断导入(尽力而为的安全网,不是前置条件)。 */

@@ -13,7 +13,7 @@ import { reportError } from "../observability/app-errors";
 import { tempDir } from "../foundation/platform";
 import { state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
-import { DEFAULT_ASSISTANT_ID, flushConvDirtyNow, getConversationsDb, loadConversationNodesFromDb } from "../conversations";
+import { DEFAULT_ASSISTANT_ID, exportPcConversationsDump, flushConvDirtyNow, getConversationsDb, loadConversationNodesFromDb } from "../conversations";
 import { listAllConversationMetas } from "../conversations/read-queries";
 import { exportSkills } from "../tools";
 
@@ -340,6 +340,17 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
       join(stageDir, "pc-backup.json"),
       safeJsonStringify(backupPayloadMetadataOnly(sanitizedSettings)),
     );
+    // 备份 2.0:PC 原生会话 dump——PC→PC 恢复的权威载体,与安卓模板解耦。活库已打开即
+    // 无条件生成(零会话也写:恢复端以 dump 存在为准执行替换语义);安卓端导入对未知
+    // 文件容忍跳过,不影响 PC→APP 通路。失败仅告警,老的 rikka_hub.db 通路仍在兜底。
+    onProgress?.("正在导出会话数据库...");
+    try {
+      flushConvDirtyNow();
+      const dumped = exportPcConversationsDump(join(stageDir, "pc_conversations.db"));
+      if (dumped >= 0) console.log(`[backup] pc_conversations.db staged (${dumped} conversations)`);
+    } catch (dumpErr) {
+      reportError("backup", "error", "PC 会话库导出失败,zip 将缺少 pc_conversations.db(恢复将回退安卓格式库)", dumpErr);
+    }
     if ((getConversationsDb() ? listAllConversationMetas(getConversationsDb()!).length : 0) > 0 || memoryStore.exportFlat().length > 0) {
       onProgress?.("正在生成对话数据库...");
       const dbPath = join(stageDir, "rikka_hub.db");

@@ -162,8 +162,20 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
     // 导出 zip 天然无 rikka_hub.db)恢复自己的备份会被 resetConversationsDbTo([]) 清空全部会话。
     // 显式内联 conversations(老格式,含空数组)仍走替换语义,不进本分支。
     if (!Array.isArray(incoming.conversations)) {
+      const pcDumpFile = join(extractDir, "pc_conversations.db");
       const dbFile = join(extractDir, "rikka_hub.db");
-      if (existsSync(dbFile)) {
+      // 备份 2.0:优先读 PC 原生 dump(字段零丢失、与安卓模板解耦);老备份无 dump 时
+      // 回退安卓格式 rikka_hub.db。dump 读取失败不静默回退安卓库——两库内容同源,
+      // dump 坏则 zip 大概率已损坏,宁可 settings-only 降级并明确报错。
+      if (existsSync(pcDumpFile)) {
+        try {
+          conversationsImported = importPcConversationsDump(pcDumpFile);
+        } catch (dumpErr) {
+          dbReadError = dumpErr instanceof Error ? dumpErr.message : String(dumpErr);
+          delete state.conversations;
+          reportError("backup", "error", "备份内 pc_conversations.db 读取失败,已跳过会话恢复(设置已恢复,现有会话保持不变)", dumpErr);
+        }
+      } else if (existsSync(dbFile)) {
         try {
           conversationsImported = importAndroidConversations(extractDir, dbFile, new Map());
         } catch (dbErr) {
@@ -528,6 +540,20 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
  * passthroughs, ISO-string timestamps). We do shape-coercion as a defensive pass — bad rows
  * are skipped, not thrown, so a single corrupt node doesn't lose the rest of the history.
  */
+/** 备份 2.0:读 PC 原生会话 dump 进暂存(state.conversations),替换语义。
+ *  dump 两表结构与活库一致,loadAllConversationsFromDb 直读;FTS 由 finalize 的
+ *  resetConversationsDbTo 统一重建。返回会话数(0 = 备份时确实无会话,仍是替换基底)。 */
+function importPcConversationsDump(dumpPath: string): number {
+  const db = new Database(dumpPath, { readonly: true });
+  try {
+    const conversations = loadAllConversationsFromDb(db);
+    state.conversations = conversations;
+    return conversations.length;
+  } finally {
+    try { db.close(); } catch { /* best-effort:句柄随 GC 释放 */ }
+  }
+}
+
 function importAndroidConversations(extractDir: string, dbPath: string, androidFilenameToPcId: Map<string, number>): number {
   // SQLite resolves WAL siblings as `${dbfile}-wal` / `${dbfile}-shm`, but Android exports
   // them with the original (extension-less) database name `rikka_hub-wal` / `rikka_hub-shm`.
