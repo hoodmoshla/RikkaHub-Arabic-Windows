@@ -11,7 +11,8 @@ import { dataDir, filesDir, skillsDir } from "../foundation/paths";
 import { tempDir } from "../foundation/platform";
 import { MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
-import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, getConversationsDb, loadAllConversationsFromDb, resetConversationsDbTo } from "../conversations";
+import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, getConversationsDb, loadAllConversationsFromDb, resetConversationsDbTo, snapshotConversationsDbBeforeImport } from "../conversations";
+import { reportError } from "../observability/app-errors";
 import { clearWorkingSet } from "../conversations/working-set";
 import { importSkills } from "../tools";
 import { ANDROID_AVATAR_TYPE_TO_PC, copyDirRecursive, rewriteAvatarsInSettings } from "./export";
@@ -58,7 +59,12 @@ export function applyBackupPayload(body: { state?: Partial<State>; skills?: unkn
   if (!incoming || typeof incoming !== "object" || !incoming.settings) {
     throw new Error("Invalid backup file");
   }
+  // 收官审查 P0-1 同型守卫:先记录备份里是否显式携带 conversations。normalizeState 会把
+  // 缺失归一化成 [],而 finalize 把"数组存在"当替换基底——缺失若不删除,等于把
+  // settings-only 备份当成"清空全部会话"执行。显式空数组则尊重替换语义。
+  const hadConversations = Array.isArray(incoming.conversations);
   setState(normalizeState(incoming));
+  if (!hadConversations) delete state.conversations;
   // 记忆:整体替换语义(恢复备份 = 回到备份时的状态)。normalizeState 已把 incoming.memories
   // 解析到 state.memories;交给 memoryStore 接管(replace:先清空再导入),然后从 state 移除。
   // pending 一并清空(备份不含 pending,恢复即丢弃待确认队列——前端应在恢复前弹警告)。
@@ -122,6 +128,7 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
   let filesImported = 0;
   let skillsImported = 0;
   let conversationsImported = 0;
+  let dbReadError: string | null = null;
   try {
     const body = JSON.parse(readFileSync(pcBackupPath, "utf-8")) as { state?: Partial<State>; skills?: unknown; files?: unknown } & Partial<State>;
     const incoming = body.state ?? body;
@@ -149,15 +156,24 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
     if (Array.isArray(incoming.conversations)) {
       conversationsImported = incoming.conversations.length;
     }
-    // If pc-backup.json doesn't contain conversations (new format), try rikka_hub.db
-    if (!conversationsImported) {
+    // 新格式 pc-backup.json 不含 conversations,会话由 zip 内会话库承载。
+    // 收官审查 P0-1:找不到任何会话库、或读取失败时,必须降级为 settings-only 语义
+    // (delete state.conversations → finalize 不触碰活库)——否则纯 PC 用户(无安卓模板,
+    // 导出 zip 天然无 rikka_hub.db)恢复自己的备份会被 resetConversationsDbTo([]) 清空全部会话。
+    // 显式内联 conversations(老格式,含空数组)仍走替换语义,不进本分支。
+    if (!Array.isArray(incoming.conversations)) {
       const dbFile = join(extractDir, "rikka_hub.db");
       if (existsSync(dbFile)) {
         try {
           conversationsImported = importAndroidConversations(extractDir, dbFile, new Map());
         } catch (dbErr) {
-          console.warn("[import] rikka_hub.db read failed in PC restore:", dbErr);
+          dbReadError = dbErr instanceof Error ? dbErr.message : String(dbErr);
+          delete state.conversations;
+          reportError("backup", "error", "备份内 rikka_hub.db 读取失败,已跳过会话恢复(设置已恢复,现有会话保持不变)", dbErr);
         }
+      } else {
+        delete state.conversations;
+        reportError("backup", "warn", "备份 zip 不含会话数据库,已按 settings-only 恢复(现有会话保持不变)");
       }
     }
     importSkills((body as { skills?: unknown }).skills);
@@ -205,7 +221,7 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
     console.warn("[import] pc-backup.json apply failed", err);
     throw err;
   }
-  return { settingsImported, filesImported, skillsImported, conversationsImported, dbReadError: null };
+  return { settingsImported, filesImported, skillsImported, conversationsImported, dbReadError };
 }
 
 export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImported: boolean; filesImported: number; skillsImported: number; conversationsImported: number; dbReadError: string | null } {
@@ -704,6 +720,7 @@ function finalizeConversationImport(): void {
   // 有暂存才重灌:PC 备份恢复(替换语义,含"备份无会话→清空")与 Android 库合并都会建立
   // 暂存;settings-only Android zip 无暂存,不触碰活库现有会话。
   if (Array.isArray(state.conversations)) {
+    snapshotConversationsDbBeforeImport();
     resetConversationsDbTo(state.conversations);
     delete state.conversations; // 中转字段用完即清(State 类型注释有角色说明)
   }

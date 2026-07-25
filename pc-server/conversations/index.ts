@@ -11,6 +11,7 @@ import { generating } from "./generation-state";
 import type { Conversation, ConversationDto, ConversationListDto, Message, MessageNode, MessageNodeDto, PcConversationRow, PcMessageNodeRow } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { clearAllFts, deleteConversationFts, ensureMessageFtsTable, ftsRowCount, rebuildFtsFromNodeTable, replaceNodeFts } from "./fts";
+import { reportError } from "../observability/app-errors";
 
 export const DEFAULT_ASSISTANT_ID = "0950e2dc-9bd5-4801-afa3-aa887aa36b4e";
 
@@ -434,6 +435,23 @@ export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, co
     }
   });
   txn();
+}
+
+/** 导入前安全网(收官审查 P0-1):活库非空时快照到 <活库>.pre-import.bak(单份滚动覆盖)。
+ *  resetConversationsDbTo 是全表替换,备份损坏/缺库导致的导入灾难由此获得本地回退点。
+ *  快照失败只告警不阻断导入(尽力而为的安全网,不是前置条件)。 */
+export function snapshotConversationsDbBeforeImport(): void {
+  if (!conversationsDb) return;
+  try {
+    const count = (conversationsDb.prepare("SELECT COUNT(*) AS n FROM pc_conversation").get() as { n: number }).n;
+    if (count === 0) return;
+    const bakPath = `${conversationsDbPath}.pre-import.bak`;
+    if (existsSync(bakPath)) unlinkSync(bakPath);
+    conversationsDb.exec(`VACUUM INTO '${bakPath.replace(/'/g, "''")}'`);
+    console.log(`[conv-db] 导入前快照已写入 ${bakPath}(${count} 个会话)`);
+  } catch (err) {
+    reportError("backup", "warn", "导入前活库快照失败(导入继续,但本次无本地回退点)", err);
+  }
 }
 
 /** 重灌活库为给定会话集:删除所有会话行(CASCADE 带走节点)+ 单事务灌入。
