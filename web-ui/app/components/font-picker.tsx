@@ -24,29 +24,35 @@ import {
   PopoverTrigger,
 } from "~/components/ui/popover";
 import { ScrollArea } from "~/components/ui/scroll-area";
+import { useTranslation } from "react-i18next";
 
 // 通用 CSS 栈选项(无字体文件,前端固定)。id 保持稳定以兼容老用户已存的 uiFontFamily 值。
 interface GenericFontOption {
   id: string;
-  label: string;
+  labelKey: string;
+  /** 抽 i18n key 前的原中文 label。老版本可能把它存进 uiFontFamily,匹配时必须继续认。 */
+  legacyLabel: string;
   family: string;
 }
 const GENERIC_FONTS: GenericFontOption[] = [
-  { id: "__system", label: "跟随系统", family: "" },
+  { id: "__system", labelKey: "font_picker.follow_system", legacyLabel: "跟随系统", family: "" },
   {
     id: "tailwind-sans",
-    label: "无衬线（系统栈）",
+    labelKey: "font_picker.sans_stack",
+    legacyLabel: "无衬线（系统栈）",
     family:
       'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif',
   },
   {
     id: "tailwind-serif",
-    label: "衬线（系统栈）",
+    labelKey: "font_picker.serif_stack",
+    legacyLabel: "衬线（系统栈）",
     family: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif',
   },
   {
     id: "tailwind-mono",
-    label: "等宽（系统栈）",
+    labelKey: "font_picker.mono_stack",
+    legacyLabel: "等宽（系统栈）",
     family:
       'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
   },
@@ -63,15 +69,16 @@ function mergeCjkIntoFamily(enFamily: string, cjkFamily: string): string {
   return idx < 0 ? `${en}, ${cjkFamily}` : `${en.slice(0, idx)}, ${cjkFamily}${en.slice(idx)}`;
 }
 
-// 宽松匹配:容忍老版本存下来的 value(可能是 family 名、cssName 或旧 id)。
+// 宽松匹配:容忍老版本存下来的 value(可能是 family 名、cssName、旧 id 或抽 i18n key 前的中文 label)。
 function entryMatches(
-  entry: { id: string; label: string; cssName?: string },
+  entry: { id: string; label?: string; legacyLabel?: string; cssName?: string },
   value: string,
 ): boolean {
   if (!value) return false;
   return (
     entry.id === value ||
-    entry.label === value ||
+    (entry.label != null && entry.label === value) ||
+    (entry.legacyLabel != null && entry.legacyLabel === value) ||
     (entry.cssName != null && entry.cssName === value)
   );
 }
@@ -110,6 +117,7 @@ export function FontPicker({
   onChange,
   showPreview = true,
 }: FontPickerProps) {
+  const { t } = useTranslation("settings");
   const { data, isLoading } = useFontCatalog();
   const invalidate = useInvalidateFontCatalog();
   const [open, setOpen] = React.useState(false);
@@ -124,18 +132,22 @@ export function FontPicker({
     [data],
   );
 
-  const generics = GENERIC_FONTS.filter((g) => matches(g.label));
+  const genericFonts = React.useMemo(
+    () => GENERIC_FONTS.map((g) => ({ id: g.id, family: g.family, label: t(g.labelKey), legacyLabel: g.legacyLabel })),
+    [t],
+  );
+  const generics = genericFonts.filter((g) => matches(g.label));
   const builtin = (data?.builtin ?? []).filter((e) => matches(e.label) || matches(e.cssName));
   const custom = (data?.custom ?? []).filter((e) => matches(e.label) || matches(e.cssName));
   const system = (data?.system ?? []).filter((e) => matches(e.label));
 
   const selectedEntry = React.useMemo(() => {
-    const generic = GENERIC_FONTS.find((g) => entryMatches(g, value));
+    const generic = genericFonts.find((g) => entryMatches(g, value));
     if (generic) return generic;
     return allEntries.find((e) => entryMatches(e, value)) ?? null;
-  }, [allEntries, value]);
+  }, [allEntries, genericFonts, value]);
 
-  const selectedLabel = isLoading ? "加载字体…" : (selectedEntry?.label ?? "跟随系统");
+  const selectedLabel = isLoading ? t("font_picker.loading") : (selectedEntry?.label ?? t("font_picker.follow_system"));
   const previewFamily = selectedEntry ? selectedEntry.family || fallbackFamily : fallbackFamily;
 
   React.useEffect(() => {
@@ -148,9 +160,9 @@ export function FontPicker({
       fd.append("file", file);
       await api.postMultipart<{ font: FontEntry }>("fonts/upload", fd);
       await invalidate();
-      toast.success(`已添加字体：${file.name}`);
+      toast.success(t("font_picker.added_toast", { name: file.name }));
     } catch (err) {
-      toast.error(extractErrorMessage(err, "字体上传失败"));
+      toast.error(extractErrorMessage(err, t("font_picker.upload_failed")));
     }
   }
 
@@ -205,7 +217,7 @@ export function FontPicker({
         </PopoverTrigger>
         <PopoverContent align="start" className="w-[min(96vw,24rem)] gap-0 p-0">
           <PopoverHeader className="border-b px-3 py-2.5">
-            <PopoverTitle className="text-sm">选择字体</PopoverTitle>
+            <PopoverTitle className="text-sm">{t("font_picker.pick_title")}</PopoverTitle>
           </PopoverHeader>
           <div className="px-3 py-2">
             <div className="relative">
@@ -213,39 +225,39 @@ export function FontPicker({
               <Input
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
-                placeholder="搜索字体…"
+                placeholder={t("font_picker.search_placeholder")}
                 className="h-8 pl-7 text-xs"
               />
             </div>
             <div className="mt-2 h-[20rem]">
               {empty ? (
                 <div className="rounded-md border border-dashed px-3 py-8 text-center text-sm text-muted-foreground">
-                  无匹配字体
+                  {t("font_picker.no_match")}
                 </div>
               ) : (
                 <ScrollArea className="h-full">
                   <div className="space-y-0.5 pb-2 pr-2">
                     {renderSection(
-                      "通用",
+                      t("font_picker.group_generic"),
                       generics.map((g) =>
                         renderRow(g.id, g.label, g.family, entryMatches(g, value)),
                       ),
                       generics.length > 0,
                     )}
                     {renderSection(
-                      "应用自带",
+                      t("font_picker.group_builtin"),
                       builtin.map((e) =>
                         renderRow(e.id, e.label, e.family, entryMatches(e, value)),
                       ),
                       builtin.length > 0,
                     )}
                     {renderSection(
-                      "自定义",
+                      t("font_picker.group_custom"),
                       custom.map((e) => renderRow(e.id, e.label, e.family, entryMatches(e, value))),
                       custom.length > 0,
                     )}
                     {renderSection(
-                      "系统",
+                      t("font_picker.group_system"),
                       system.map((e) => renderRow(e.id, e.label, e.family, entryMatches(e, value))),
                       system.length > 0,
                     )}
@@ -266,7 +278,7 @@ export function FontPicker({
                   if (file) void handleUploadFile(file);
                 }}
               />
-              <Plus className="size-3.5" /> 添加自定义字体
+              <Plus className="size-3.5" /> {t("font_picker.add_custom")}
             </label>
             <button
               type="button"
@@ -276,7 +288,7 @@ export function FontPicker({
               }}
               className="text-xs text-muted-foreground hover:underline"
             >
-              管理字体
+              {t("font_picker.manage")}
             </button>
           </div>
         </PopoverContent>
@@ -287,7 +299,7 @@ export function FontPicker({
           className="rounded-md border bg-muted/30 px-3 py-2 text-sm"
           style={{ fontFamily: previewFamily }}
         >
-          RikkaHub 字体预览：你好，Hello 123
+          {t("font_picker.preview_sample")}
         </div>
       )}
 
@@ -307,6 +319,7 @@ interface FontManagerDialogProps {
 }
 
 export function FontManagerDialog({ open, onClose, onChanged }: FontManagerDialogProps) {
+  const { t } = useTranslation("settings");
   const { data } = useFontCatalog();
   const [uploading, setUploading] = React.useState(false);
   const [deletingName, setDeletingName] = React.useState<string | null>(null);
@@ -320,9 +333,9 @@ export function FontManagerDialog({ open, onClose, onChanged }: FontManagerDialo
       fd.append("file", file);
       await api.postMultipart<{ font: FontEntry }>("fonts/upload", fd);
       await onChanged();
-      toast.success(`已添加字体：${file.name}`);
+      toast.success(t("font_picker.added_toast", { name: file.name }));
     } catch (err) {
-      toast.error(extractErrorMessage(err, "字体上传失败"));
+      toast.error(extractErrorMessage(err, t("font_picker.upload_failed")));
     } finally {
       setUploading(false);
     }
@@ -333,9 +346,9 @@ export function FontManagerDialog({ open, onClose, onChanged }: FontManagerDialo
     try {
       await api.delete(`fonts/custom/${encodeURIComponent(fileName)}`);
       await onChanged();
-      toast.success("已删除");
+      toast.success(t("font_picker.deleted"));
     } catch (err) {
-      toast.error(extractErrorMessage(err, "删除失败"));
+      toast.error(extractErrorMessage(err, t("font_picker.delete_failed")));
     } finally {
       setDeletingName(null);
     }
@@ -350,10 +363,9 @@ export function FontManagerDialog({ open, onClose, onChanged }: FontManagerDialo
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>管理字体</DialogTitle>
+          <DialogTitle>{t("font_picker.manage")}</DialogTitle>
           <DialogDescription>
-            上传自定义字体文件（ttf / otf / woff /
-            woff2），或删除已上传的字体。系统字体与应用自带字体不可在此修改。
+            {t("font_picker.manage_desc")}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
@@ -381,14 +393,14 @@ export function FontManagerDialog({ open, onClose, onChanged }: FontManagerDialo
               ) : (
                 <Plus className="size-4" />
               )}
-              上传字体
+              {t("font_picker.upload_font")}
             </Button>
           </div>
           <div className="space-y-1.5">
-            <div className="text-xs font-medium text-muted-foreground">已上传的自定义字体</div>
+            <div className="text-xs font-medium text-muted-foreground">{t("font_picker.uploaded_custom")}</div>
             {custom.length === 0 ? (
               <div className="rounded-md border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
-                还没有自定义字体
+                {t("font_picker.no_custom")}
               </div>
             ) : (
               <ScrollArea className="max-h-72">
@@ -449,6 +461,7 @@ export function FontPickerPair({
   onChangeEn,
   onChangeCjk,
 }: FontPickerPairProps) {
+  const { t } = useTranslation("settings");
   const { data } = useFontCatalog();
   const enFamily = resolveFamilyForValue(enValue, data, fallbackFamily);
   const cjkFamily = resolveFamilyForValue(cjkValue, data, "");
@@ -457,23 +470,23 @@ export function FontPickerPair({
   // 中文行:有中文字体时用合并链(英文部分会回退,但中文行内容是纯中文,实际渲染中文字体);
   // 没设中文字体时,中文行用合并链=纯英文链,中文字形落到兜底——真实反映"不分开"的效果。
   const previewRows = [
-    { tag: "英文", text: "The quick brown fox jumps 0123456789", family: enFamily },
-    { tag: "中文", text: "山映斜阳天接水，芳草无情，更在斜阳外。", family: merged },
-    { tag: "混排", text: "Hello 你好，这是 RikkaHub 2026 年的测试 Test 测试。", family: merged },
+    { tag: t("font_picker.tag_en"), text: t("font_picker.preview_en_text"), family: enFamily },
+    { tag: t("font_picker.tag_cjk"), text: t("font_picker.preview_cjk_text"), family: merged },
+    { tag: t("font_picker.tag_mixed"), text: t("font_picker.preview_mixed_text"), family: merged },
   ];
   return (
     <div className="block space-y-2">
       <span className="text-sm font-medium">{label}</span>
       <div className="grid gap-2 sm:grid-cols-2">
         <FontPicker
-          label="英文"
+          label={t("font_picker.tag_en")}
           value={enValue}
           fallbackFamily={fallbackFamily}
           onChange={onChangeEn}
           showPreview={false}
         />
         <FontPicker
-          label="中文"
+          label={t("font_picker.tag_cjk")}
           value={cjkValue}
           fallbackFamily=""
           onChange={onChangeCjk}
