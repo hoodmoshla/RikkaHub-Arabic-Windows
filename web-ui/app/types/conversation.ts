@@ -12,7 +12,8 @@ export interface MessageNode {
 
 /**
  * A persistent conversation thread between the user and an assistant. The messages form a
- * tree via MessageNode for branching; truncateIndex caps how much history is sent upstream.
+ * tree via MessageNode for branching; nodes before truncateIndex are excluded from the
+ * upstream context ("clear context" divider, aligned with Android; <=0 means no truncation).
  */
 export interface Conversation {
   id: string;

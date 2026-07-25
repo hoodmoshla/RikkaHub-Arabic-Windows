@@ -112,12 +112,20 @@ export function buildGoogleRequestBody(messagesForApi: ApiMessage[], modelItem: 
 // content（含 reasoning）共同组成一条 assistant 消息，避免把同一个 reasoning
 // 在多次 tool flush 中提前清空——这是 DeepSeek V4 thinking 模式要求每条带
 // tool_calls 的 assistant 消息都必须携带 reasoning_content 的核心修复点。
+/** 2-2:安卓"清除上下文"语义——truncateIndex 之前的节点不进上下文,<=0 视为未截断。
+ *  此前全链路只写不读(纯装饰契约),APP→PC 导入会话的分割线被静默忽略,模型看到
+ *  全部历史。PC 前端的设置入口归前端重做;compress 后写 truncateIndex=0 自此有意义。 */
+export function applyTruncateIndex<T>(nodes: T[], truncateIndex: number): T[] {
+  return truncateIndex > 0 ? nodes.slice(truncateIndex) : nodes;
+}
+
 function conversationTransformedMessages(conversation: Conversation, assistant: Assistant) {
   const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
+  const visibleNodes = applyTruncateIndex(conversation.messages, conversation.truncateIndex);
   // 剔除尾部"正在生成"的空 ASSISTANT 占位后再按 contextMessageSize 切片,见
   // isEmptyAssistantPlaceholder 的说明(issue #16 + 工具恢复兼容)。
-  const contextNodes = conversation.messages.filter((node, index) => {
-    if (index !== conversation.messages.length - 1) return true;
+  const contextNodes = visibleNodes.filter((node, index) => {
+    if (index !== visibleNodes.length - 1) return true;
     const selected = node.messages[node.selectIndex] ?? node.messages[0];
     return !isEmptyAssistantPlaceholder(selected);
   });
