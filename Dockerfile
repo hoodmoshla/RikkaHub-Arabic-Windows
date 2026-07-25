@@ -48,7 +48,10 @@ RUN bun run build
 WORKDIR /build/pc-server
 COPY pc-server/package.json pc-server/bun.lock ./
 RUN bun install
-COPY pc-server/server.ts ./
+# 重构后 server.ts 依赖 pc-server 下数十个本地模块(收官审查 P0-3:只 COPY server.ts
+# 会让 bun build 解析 import 直接失败)。整目录复制;node_modules 由上面的 bun install
+# 在镜像内重建(.dockerignore 排除宿主 node_modules,避免 Windows 依赖覆盖 Linux 依赖)。
+COPY pc-server/ ./
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) BUN_TARGET=bun-linux-x64 ;; \
