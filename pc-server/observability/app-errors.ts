@@ -62,3 +62,19 @@ export function recentAppErrors(): AppErrorDto[] {
 export function clearAppErrors(): void {
   ring.length = 0;
 }
+
+/** 全面审查 4-2(P1):进程级兜底。定时器回调/游离 Promise(fire-and-forget)/SSE 定时
+ *  广播抛到顶层时,Bun 默认直接退出进程——多用户形态(Docker/局域网)下等于全体掉线。
+ *  捕获后上报错误中心 + console,进程继续运行。与逐点 try/catch(如 4-1 broadcastTo)
+ *  形成纵深:逐点防已知热路径,全局网兜未知。幂等:重复调用不重复注册。 */
+let safetyNetInstalled = false;
+export function installProcessSafetyNet(): void {
+  if (safetyNetInstalled) return;
+  safetyNetInstalled = true;
+  process.on("uncaughtException", (err) => {
+    reportError("internal", "error", "未捕获异常(进程已兜底,继续运行)", err);
+  });
+  process.on("unhandledRejection", (reason) => {
+    reportError("internal", "error", "未处理的 Promise 拒绝(进程已兜底,继续运行)", reason);
+  });
+}

@@ -1,7 +1,7 @@
 // 统一错误上报通道单测(P2-1 批1):环形缓冲、风暴合并、注入广播、广播故障隔离。
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 
-import { clearAppErrors, initAppErrorBroadcast, recentAppErrors, reportError } from "./app-errors";
+import { clearAppErrors, initAppErrorBroadcast, installProcessSafetyNet, recentAppErrors, reportError } from "./app-errors";
 
 afterEach(() => {
   clearAppErrors();
@@ -73,5 +73,30 @@ describe("reportError", () => {
     });
     expect(() => reportError("internal", "info", "安全")).not.toThrow();
     expect(recentAppErrors()).toHaveLength(1);
+  });
+});
+
+// 全面审查 4-2 回归:进程级兜底把顶层异常导入错误中心而非退出进程。
+// 直接调用注册的 handler 验证(在测试进程里真抛顶层异常会干扰 test runner)。
+describe("installProcessSafetyNet", () => {
+  test("注册两类 handler,handler 上报错误中心且不抛错;幂等不重复注册", () => {
+    const beforeEx = process.listeners("uncaughtException").length;
+    const beforeRej = process.listeners("unhandledRejection").length;
+    installProcessSafetyNet();
+    installProcessSafetyNet(); // 幂等
+    const exAdded = process.listeners("uncaughtException").slice(beforeEx);
+    const rejAdded = process.listeners("unhandledRejection").slice(beforeRej);
+    try {
+      expect(exAdded).toHaveLength(1);
+      expect(rejAdded).toHaveLength(1);
+      expect(() => (exAdded[0] as (e: Error) => void)(new Error("定时器炸了"))).not.toThrow();
+      expect(() => (rejAdded[0] as (r: unknown) => void)("游离 promise 拒绝")).not.toThrow();
+      const msgs = recentAppErrors().map((e) => e.message);
+      expect(msgs.some((m) => m.includes("未捕获异常"))).toBe(true);
+      expect(msgs.some((m) => m.includes("Promise 拒绝"))).toBe(true);
+    } finally {
+      for (const fn of exAdded) process.removeListener("uncaughtException", fn as never);
+      for (const fn of rejAdded) process.removeListener("unhandledRejection", fn as never);
+    }
   });
 });

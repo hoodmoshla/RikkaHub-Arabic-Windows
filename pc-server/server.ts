@@ -165,6 +165,11 @@ import {
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
+import { installProcessSafetyNet } from "./observability/app-errors";
+
+// 全面审查 4-2:进程级异常兜底必须最早安装,罩住后续启动期与运行期的一切
+// 定时器/游离 Promise 顶层抛错(SIGINT/SIGTERM 的优雅停机在文件尾另行注册)。
+installProcessSafetyNet();
 
 const args = new Set(Bun.argv.slice(1));
 const portIndex = Bun.argv.findIndex((arg) => arg === "--port");
