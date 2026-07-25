@@ -147,7 +147,7 @@ export async function fetchAuxiliaryText(modelId: string, prompt: string, kind: 
         ...(options.temperature != null ? { temperature: options.temperature } : {}),
       },
     };
-    if (stream && options.onDelta) {
+    if (stream) {
       const streamEndpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:streamGenerateContent?key=${encodeURIComponent(providerItem.apiKey)}`;
       try {
         return cleanAuxiliaryText(await fetchGoogleAuxiliaryStream(streamEndpoint, headers, applyCustomBody(body, assistant, modelItem), providerItem, pushDelta));
@@ -169,7 +169,7 @@ export async function fetchAuxiliaryText(modelId: string, prompt: string, kind: 
       // 与主路径一致：thinking + output_config，DeepSeek 走 Claude 格式时 display:"raw"
       ...(reasoningLevel ? claudeThinkingPayload(modelItem, reasoningLevel) : {}),
     };
-    if (stream && options.onDelta) {
+    if (stream) {
       try {
         return cleanAuxiliaryText(await fetchClaudeAuxiliaryStream(endpoint, headers, applyCustomBody(body, assistant, modelItem), providerItem, pushDelta));
       } catch {
@@ -199,7 +199,7 @@ export async function fetchAuxiliaryText(modelId: string, prompt: string, kind: 
         ...(options.topP != null && isModelAllowTemperature(modelItem) ? { top_p: options.topP } : {}),
         ...auxiliaryReasoningPayloadForProvider(providerItem, modelItem, reasoningLevel),
       };
-  if (stream && options.onDelta) {
+  if (stream) {
     try {
       const text = await fetchOpenAiAuxiliaryStream(endpoint, headers, applyCustomBody(body, assistant, modelItem), providerItem, pushDelta);
       if (!text || text === "(empty response)") throw new Error(`${kind} model returned empty response`);
@@ -401,6 +401,12 @@ export async function compressConversation(conversation: Conversation, additiona
   const chunks = splitMessages(messagesToCompress);
   const summaries: string[] = [];
   for (const chunk of chunks) {
+    // 2-3:进度标签只随 chunk 变化,chunk 级更新+广播一次;原先在 onDelta 里每个 token
+    // 都 persistConversation+saveState+broadcastConversation(长会话流式压缩=每秒几十次
+    // 全表重写)。标签是瞬态进度不落库,压缩结果在循环后统一 persist。
+    conversation.chatSuggestions = [`正在压缩对话历史... ${summaries.length + 1}/${chunks.length}`];
+    conversation.updateAt = Date.now();
+    broadcastConversation(conversation);
     const prompt = applyPlaceholders(state.settings.compressPrompt || DEFAULT_COMPRESS_PROMPT, {
       content: chunk.map(summaryAsText).join("\n\n"),
       target_tokens: String(targetTokens),
@@ -409,14 +415,6 @@ export async function compressConversation(conversation: Conversation, additiona
     });
     summaries.push(cleanAuxiliaryText(await fetchAuxiliaryText(state.settings.compressModelId || state.settings.chatModelId, prompt, "compression", {
       stream: true,
-      onDelta: (delta) => {
-        if (!delta) return;
-        conversation.chatSuggestions = [`正在压缩对话历史... ${Math.min(summaries.length + 1, chunks.length)}/${chunks.length}`];
-        conversation.updateAt = Date.now();
-        persistConversation(conversation);
-        saveState();
-        broadcastConversation(conversation);
-      },
     })));
   }
 

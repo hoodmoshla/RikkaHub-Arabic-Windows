@@ -363,8 +363,9 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     if (messageTranslate && request.method === "POST") {
       const body = await readJson<{ targetLanguage?: string }>(request).catch(() => ({ targetLanguage: "" }));
       const messageId = decodeURIComponent(messageTranslate[1]);
-      const msg = conversation.messages.flatMap((node) => node.messages).find((item) => item.id === messageId);
-      if (!msg) return error("Message not found", 404);
+      const node = conversation.messages.find((n) => n.messages.some((item) => item.id === messageId));
+      const msg = node?.messages.find((item) => item.id === messageId);
+      if (!node || !msg) return error("Message not found", 404);
       const sourceText = textFromParts(msg.parts).trim();
       if (!sourceText) return error("Message has no text to translate", 400);
       const targetLanguage = String(body.targetLanguage ?? "").trim() || Intl.DateTimeFormat().resolvedOptions().locale;
@@ -384,6 +385,7 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
                 target_lang: targetLanguage,
               });
           let streamedTranslation = "";
+          let lastNodeBroadcastAt = 0;
           msg.translation = await fetchAuxiliaryText(state.settings.translateModeId, prompt, "translation", {
             reasoningLevel: useQwenMt ? null : (state.settings.translateThinkingBudget ?? 0) > 0 ? "LOW" : null,
             temperature: useQwenMt ? 0.3 : null,
@@ -392,19 +394,26 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
               ? { translation_options: { source_lang: "auto", target_lang: englishLanguageName(targetLanguage) } }
               : undefined,
             stream: !useQwenMt,
+            // 2-3:onDelta 只改内存 + 33ms 节流的单节点广播。原先每个 token 都
+            // persistConversation(全表删插)+saveState(全量序列化)+broadcastConversation
+            // (全量快照帧),长会话流式翻译=每秒几十次全表重写,事件循环被持续占用。
             onDelta: (delta) => {
               streamedTranslation += delta;
               msg.translation = streamedTranslation || "正在翻译...";
-              conversation.updateAt = Date.now();
-              persistConversation(conversation);
-              saveState();
-              broadcastConversation(conversation);
+              const now = Date.now();
+              if (now - lastNodeBroadcastAt >= 33) {
+                lastNodeBroadcastAt = now;
+                broadcastNodeUpdate(conversation, node);
+              }
             },
           });
         } catch (err) {
           msg.translation = `翻译失败：${err instanceof Error ? err.message : String(err)}`;
         } finally {
+          // 2-3:落库收口到 finally 一次。同时修复原缺陷:非流式路径(Qwen-MT)与失败
+          // 路径的 translation 从未 persistConversation,重启即丢。
           conversation.updateAt = Date.now();
+          persistConversation(conversation);
           saveState();
           broadcastConversation(conversation);
         }
