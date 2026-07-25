@@ -15,7 +15,7 @@ import { loadModelsDev } from "./inference-engine/providers";
 import { checkpointConversationsDb, flushConvDirtyNow, getConversation, persistConversation } from "./conversations";
 
 import process from "node:process";
-import { installProcessSafetyNet } from "./observability/app-errors";
+import { installProcessSafetyNet, reportError } from "./observability/app-errors";
 
 // 全面审查 4-2:进程级异常兜底必须最早安装,罩住后续启动期与运行期的一切
 // 定时器/游离 Promise 顶层抛错(SIGINT/SIGTERM 的优雅停机在文件尾另行注册)。
@@ -163,6 +163,9 @@ const { server, port } = (() => {
               return await routeStatic(url);
             } catch (err) {
               console.error(err);
+              // 9-1:此前只进 stdout(Tauri release 下无处可看)。请求方拿到 500,
+              // 错误中心同步留痕,支持自查。
+              reportError("internal", "error", `API 请求处理异常:${url.pathname}`, err);
               return error(err instanceof Error ? err.message : String(err), 500);
             }
           },

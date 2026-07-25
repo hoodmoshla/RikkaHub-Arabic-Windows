@@ -4,7 +4,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { dateKey, isRecord, textFromParts } from "../foundation/utils";
+import { basename } from "node:path";
 import { globalMemoryPath, assistantMemoryPath, memoryDir, pendingMemoryPath } from "../foundation/paths";
+import { reportError } from "../observability/app-errors";
 import { getConversationsDb, peekFirstMessageParts } from "../conversations/index";
 import { recentConversationMetas } from "../conversations/read-queries";
 import { state } from "../persistence/json-store";
@@ -48,7 +50,12 @@ export const memoryStore = {
       const parsed = JSON.parse(readFileSync(filePath, "utf8"));
       return parsed && typeof parsed === "object" ? { ...fallback, ...parsed } as T : fallback;
     } catch (err) {
-      console.warn(`[memory] 文件解析失败，降级为默认（可能丢失数据）:${filePath}`, err);
+      // 9-1/6-3:此前仅 console.warn 后返回空默认,后续任何 persistAll 都会用空数据
+      // 覆写损坏原件且用户零感知("记忆全没了")。先把原件改名隔离保住原始字节,再上报。
+      try {
+        renameSync(filePath, `${filePath}.corrupt-${Date.now()}`);
+      } catch { /* 隔离失败不阻塞降级 */ }
+      reportError("persistence", "error", `记忆文件损坏,已降级为默认并隔离原件:${basename(filePath)}`, err);
       return fallback;
     }
   },
@@ -69,7 +76,7 @@ export const memoryStore = {
         try { unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
       }
     }
-    console.warn(`[memory] 同步写入失败（已重试 8 次）:${filePath}`, lastError);
+    reportError("persistence", "error", `记忆写入失败(已重试 8 次),本次变更未落盘:${basename(filePath)}`, lastError);
   },
 
   /** 异步原子 temp-rename 写（运行时用）。Bun.write + fsPromises.rename，8 次重试。 */
@@ -89,7 +96,7 @@ export const memoryStore = {
         await new Promise<void>((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
       }
     }
-    console.warn(`[memory] 异步写入失败（已重试 8 次）:${filePath}`, lastError);
+    reportError("persistence", "error", `记忆写入失败(已重试 8 次),本次变更未落盘:${basename(filePath)}`, lastError);
   },
 
   /** 把一次写任务推入串行队列。吞掉 reject 避免"一次失败永久污染队列"

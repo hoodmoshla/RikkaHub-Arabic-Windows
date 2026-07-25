@@ -435,7 +435,7 @@ function migrateFileDedupIfNeeded(stateObj: State): void {
     stateObj.appliedMigrations = [...(Array.isArray(stateObj.appliedMigrations) ? stateObj.appliedMigrations : []), FILE_DEDUP_MIGRATION];
     writeSlimStateJsonSyncForMemory(stateObj);
   } catch (err) {
-    console.error("[file-dedup] 附件去重迁移失败(本次跳过,下次启动重试)", err);
+    reportError("persistence", "warn", "附件去重迁移失败(本次跳过,下次启动重试)", err);
   }
 }
 
@@ -479,7 +479,7 @@ function migrateMemoryFilesIfNeeded(stateObj: State): void {
     try {
       copyFileSync(statePath, bakPath);
     } catch (err) {
-      console.warn("[memory] pre-memory-split 备份失败(继续迁移)", err);
+      reportError("persistence", "warn", "记忆迁移前备份失败(迁移继续,但无快照可回退)", err);
     }
   }
 
@@ -527,7 +527,7 @@ function migrateConversationsIfNeeded(parsed: Partial<State>): boolean {
     try {
       copyFileSync(statePath, preSqliteBakPath);
     } catch (err) {
-      console.warn("[conv-db] pre-sqlite 备份失败(继续迁移)", err);
+      reportError("persistence", "warn", "会话迁移前备份失败(迁移继续,但无快照可回退)", err);
     }
   }
 
@@ -539,6 +539,7 @@ function migrateConversationsIfNeeded(parsed: Partial<State>): boolean {
       console.log("[conv-db] 会话迁移完成");
     } catch (err) {
       console.error("[conv-db] 会话迁移失败,保留 state.json 原样,下次启动重试", err);
+      reportError("persistence", "error", "会话迁移到活库失败,已保留 state.json 原样,下次启动重试", err);
       return false;
     }
   }
@@ -549,7 +550,7 @@ function migrateConversationsIfNeeded(parsed: Partial<State>): boolean {
   try {
     writeSlimStateJsonSync(parsed);
   } catch (err) {
-    console.warn("[conv-db] 写瘦 state.json 失败(活库已迁移,内存继续)", err);
+    reportError("persistence", "warn", "迁移后写瘦 state.json 失败(活库已迁移,内存继续)", err);
   }
   return true;
 }
@@ -564,7 +565,7 @@ function recoverConversationsFromBak(): Conversation[] {
     const bakParsed = JSON.parse(readFileSync(bakPath, "utf8")) as Partial<State>;
     return Array.isArray(bakParsed.conversations) ? bakParsed.conversations : [];
   } catch (err) {
-    console.error("[conv-db] pre-sqlite.bak 恢复失败", err);
+    reportError("persistence", "error", "会话备份(pre-sqlite.bak)恢复失败", err);
     return [];
   }
 }
@@ -576,6 +577,7 @@ function probeConversationsDbOrRecover(): void {
     countConversations(db);
   } catch (err) {
     console.error("[conv-db] 活库读取失败,尝试从 state.json.pre-sqlite.bak 重灌", err);
+    reportError("persistence", "error", "会话活库读取失败,正在尝试从迁移备份重灌", err);
     const fromBak = recoverConversationsFromBak();
     if (fromBak.length === 0) return;
     try {
@@ -583,7 +585,7 @@ function probeConversationsDbOrRecover(): void {
       console.error(`[conv-db] 已从 pre-sqlite.bak 重灌 ${fromBak.length} 个会话`);
     } catch (err2) {
       // 读写都失败:库彻底不可用,本次会话为空;bak 原样保留,人工可救
-      console.error("[conv-db] pre-sqlite.bak 重灌失败,本次会话为空(数据在 bak 未丢)", err2);
+      reportError("persistence", "error", "会话活库重灌失败,本次启动会话列表为空(数据在 pre-sqlite.bak 未丢)", err2);
     }
   }
 }
