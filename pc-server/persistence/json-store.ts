@@ -12,7 +12,7 @@ import type { State } from "../foundation/types";
 export const CONVERSATIONS_SQLITE_MIGRATION = "conversations-sqlite-1.2.6";
 export const MEMORY_FILE_SPLIT_MIGRATION = "memory-file-split-1.3.2";
 
-// 全局状态对象。由 server.ts 在启动时通过 loadState() 初始化并赋值。
+// 全局状态对象。由 bootstrap() 在启动时通过 setState(loadState()) 初始化并赋值。
 export let state!: State;
 export function setState(next: State) { state = next; }
 

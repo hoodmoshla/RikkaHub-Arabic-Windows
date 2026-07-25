@@ -6,13 +6,11 @@ import { extname, join } from "node:path";
 import type { AssistantMemoryFile, Conversation, GlobalMemoryFile, JsonValue, State, StoredFile, WriteStrategy } from "../foundation/types";
 import { id, isRecord, mergeById, uniqueStrings } from "../foundation/utils";
 import { assistantMemoryPath, dataDir, filesDir, globalMemoryPath, pendingMemoryPath, skillsDir, statePath } from "../foundation/paths";
-import { applyEffectiveProxy, installProxyFetchInterceptor, normalizeProxyConfig } from "../foundation/net";
-import { normalizePreferredPort } from "../foundation/net";
+import { normalizeProxyConfig, normalizePreferredPort } from "../foundation/net";
 import {
   CONVERSATIONS_SQLITE_MIGRATION,
   MEMORY_FILE_SPLIT_MIGRATION,
   recoverStateFromBackups,
-  setState,
   state,
   sweepStaleStateTempFiles,
   writeSlimStateJsonSync,
@@ -475,39 +473,10 @@ function migrateMemoryFilesIfNeeded(stateObj: State): void {
   console.log("[memory] 记忆迁移完成");
 }
 
-/** 同步 temp+rename 写瘦 state.json,记忆迁移后立即落盘用(S2-b)。
- *  排除 logs(始终内存态)、conversations(会话已迁移则不写,未迁移则保留——按标记判断)、
- *  memories/nextMemoryId(调用前已 delete,不出现)。 */
-
-// Streaming path throttles disk writes: token deltas can arrive 30-50/s for fast providers, and
-// serializing+writing the full state on every chunk turns smooth streams into stutter. We coalesce
-// writes inside `touchStream` to ~5/s while still broadcasting every chunk to SSE clients in real
-// time. A final saveState() at end-of-generation makes the persisted state authoritative.
-
-setState(loadState());
-state.launchCount += 1;
-
-// 必须在首次 fetch 之前安装（Bun.serve 接受请求之前），否则首个请求触发 env 快照锁定。
-// 清空 env（非容器）+ 拦截 globalThis.fetch，per-request 按当前代理状态显式传 proxy。
-// 清空 env (非容器) + 拦截 globalThis.fetch, per-request 按当前代理状态显式传 proxy。
-installProxyFetchInterceptor(() => state.settings.proxyConfig);
-applyEffectiveProxy(state.settings.proxyConfig);
-
-// Async write queue — serializes saves so two callers can't race the temp-file rename
-// dance, but each write is non-blocking on the event loop so other HTTP handlers (image
-// fetches, conversation GETs, streaming SSE) can continue while disk I/O is in flight.
-// Before this change, `saveState()` was fully synchronous (writeFileSync + busy-wait retry
-// + pretty-printed JSON.stringify of the entire state). On a state.json grown into the
-// 100+ MB range after an Android backup import, a single save would block the event loop
-// for seconds — every concurrent request queued behind it, eventually tripping ky's 30 s
-// timeout. The user-visible symptom: a streaming reply freezes, then ALL conversation
-// GETs fail with "Request timed out" and the app becomes unusable until restart.
-
-/** Used by graceful shutdown paths to ensure the final write completes on disk. */
-
-// 顶层启动写盘：必须放在 activeSaveStatePromise / coalescedSaveRequested 这些 let
-// 声明之后调用，否则会撞 TDZ 触发模块加载时的 ReferenceError，导致服务直接起不来。
-
+// 0-3/8-4:本模块曾在顶层执行 setState(loadState())+代理拦截器安装(import 副作用),
+// 启动顺序全靠 server.ts 的 import 顺序隐式保证,且任何脚本/测试 import 到本模块就会
+// 触发真实磁盘迁移。已收敛到 bootstrap.ts 显式编排;此处原有的三段搬迁遗留无主注释
+// (描述 json-store 写队列/TDZ 约束)一并清除。
 
 function migrateConversationsIfNeeded(parsed: Partial<State>): boolean {
   const appliedMigrations = Array.isArray(parsed.appliedMigrations) ? parsed.appliedMigrations : [];

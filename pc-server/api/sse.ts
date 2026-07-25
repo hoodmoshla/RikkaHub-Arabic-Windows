@@ -59,15 +59,19 @@ function clearNodeBroadcast(conversation: Conversation, node: MessageNode) {
 export const settingsClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 export const listClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 export const conversationClients = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
-// working set 的 SSE 驻留判据:某会话有打开的 SSE 流(用户界面正开着)时不清扫。
-// 在此注入而非 conversations/index 直接 import,避免 index→sse→index 循环导入。
-initWorkingSetSseGuard((convId) => (conversationClients.get(convId)?.size ?? 0) > 0);
-
-// 应用错误通道(P2-1):errors/stream 订阅者集合 + 广播注入(通道模块不依赖 api 层)。
+// 应用错误通道(P2-1):errors/stream 订阅者集合。
 export const errorClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-initAppErrorBroadcast((entry) => {
-  broadcastTo(errorClients, sseFrame("app_error", { type: "app_error", error: entry }));
-});
+
+// 0-3:两处回调注入由 bootstrap() 显式接线,不再是 import 副作用。
+// - working set 驻留判据:某会话有打开的 SSE 流(界面正开着)时不清扫。在此注入而非
+//   conversations/index 直接 import sse,避免 index→sse→index 循环导入。
+// - 错误中心广播:通道模块(observability)不依赖 api 层,由这里把 SSE 出口喂给它。
+export function initSseWiring(): void {
+  initWorkingSetSseGuard((convId) => (conversationClients.get(convId)?.size ?? 0) > 0);
+  initAppErrorBroadcast((entry) => {
+    broadcastTo(errorClients, sseFrame("app_error", { type: "app_error", error: entry }));
+  });
+}
 const encoder = new TextEncoder();
 
 export function sseFrame(event: string, data: JsonValue | object) {

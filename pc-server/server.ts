@@ -14,7 +14,7 @@ import { DEFAULT_SYSTEM_TTS_ID, defaultTtsProviders, normalizeTtsProviders } fro
 import { normalizeS3Config, normalizeWebDavConfig } from "./app-config/backup-config";
 import { error, json, mime } from "./api/request";
 import { startAnalytics } from "./app-config/analytics";
-import { loadState } from "./persistence/state-load";
+import { bootstrap } from "./bootstrap";
 import { DEFAULT_COMPRESS_PROMPT, DEFAULT_OCR_PROMPT, DEFAULT_PROMPT_OPTIMIZE_PROMPT, DEFAULT_SUGGESTION_PROMPT, DEFAULT_TITLE_PROMPT, DEFAULT_TRANSLATION_PROMPT } from "./app-config/prompts";
 import { attachOcrToImageParts, compressConversation, fetchAuxiliaryText, generateTitleForConversation, markOcrPendingParts } from "./conversations/auxiliary";
 import { generateAnswer, resumeApprovedToolParts } from "./conversations/orchestrator";
@@ -170,6 +170,10 @@ import { installProcessSafetyNet } from "./observability/app-errors";
 // 全面审查 4-2:进程级异常兜底必须最早安装,罩住后续启动期与运行期的一切
 // 定时器/游离 Promise 顶层抛错(SIGINT/SIGTERM 的优雅停机在文件尾另行注册)。
 installProcessSafetyNet();
+
+// 全面审查 0-3/8-4/1-8:显式启动编排(状态装载+迁移链→代理拦截→会话运行时→SSE 接线
+// →启动落盘)。必须在 resolvePreferredPort()(读 state.settings)与 Bun.serve 之前。
+bootstrap();
 
 const args = new Set(Bun.argv.slice(1));
 const portIndex = Bun.argv.findIndex((arg) => arg === "--port");

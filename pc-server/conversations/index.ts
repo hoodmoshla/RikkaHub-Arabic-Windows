@@ -190,13 +190,18 @@ export function initWorkingSetSseGuard(hasSseClients: (convId: string) => boolea
   hasSseClientsGuard = hasSseClients;
 }
 
-configureWorkingSet({
-  loadConversation: loadConversationForWorkingSet,
-  isGenerating: (convId) => generating.has(convId),
-  hasSseClients: (convId) => hasSseClientsGuard(convId),
-  hasDirty: hasConvDirtyState,
-});
-startWorkingSetSweep();
+// 0-3:接线与清扫定时器由 bootstrap() 显式启动,不再是 import 副作用——
+// 单测/工具脚本 import 本模块不会再拉起 30s 定时器;需要 working set 的测试
+// 自行 configureWorkingSet(注入假判据)或调用本函数。
+export function initConversationsRuntime(): void {
+  configureWorkingSet({
+    loadConversation: loadConversationForWorkingSet,
+    isGenerating: (convId) => generating.has(convId),
+    hasSseClients: (convId) => hasSseClientsGuard(convId),
+    hasDirty: hasConvDirtyState,
+  });
+  startWorkingSetSweep();
+}
 
 /** 标题兜底专用:取第一个节点的第一条消息 parts。working set 命中读实例(含未 flush
  *  的最新数据),否则只读活库单行,不触发整树加载、不驻留。 */
