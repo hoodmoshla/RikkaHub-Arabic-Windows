@@ -4,6 +4,7 @@
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { dataDir, statePath } from "../foundation/paths";
+import { reportError } from "../observability/app-errors";
 import type { State } from "../foundation/types";
 
 // 迁移常量：诞生版本档案，不可改。从 server.ts 迁出以便 persistence 层自包含。
@@ -85,7 +86,8 @@ async function performStateSave(): Promise<void> {
     await Bun.write(statePath, content);
   } catch {
     try { await Bun.write(`${statePath}.recovery-${Date.now()}.json`, content); } catch { /* last-ditch */ }
-    console.warn("Failed to save state", lastError);
+    // P2-1:静默丢配置是最高危的一类故障,用户必须知道(通道镜像到 console,原 warn 移除)
+    reportError("persistence", "error", "state.json 落盘失败(已另存 recovery 文件,重启后自动恢复)", lastError);
   }
 }
 
@@ -159,7 +161,7 @@ export function writeSlimStateJsonSyncForMemory(data: State): void {
     renameSync(tempPath, statePath);
   } catch (err) {
     try { unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
-    console.warn("[memory] 写瘦 state.json 失败（内存已迁移，下次启动重试）", err);
+    reportError("persistence", "warn", "写瘦 state.json 失败(内存已迁移,下次启动重试)", err);
   }
 }
 

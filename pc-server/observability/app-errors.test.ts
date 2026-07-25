@@ -1,0 +1,77 @@
+// 统一错误上报通道单测(P2-1 批1):环形缓冲、风暴合并、注入广播、广播故障隔离。
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
+
+import { clearAppErrors, initAppErrorBroadcast, recentAppErrors, reportError } from "./app-errors";
+
+afterEach(() => {
+  clearAppErrors();
+  initAppErrorBroadcast(() => {});
+  setSystemTime();
+});
+
+describe("reportError", () => {
+  test("条目进入快照,新→旧排序,detail 取 Error stack", () => {
+    const err = new Error("boom");
+    reportError("backup", "warn", "第一条");
+    reportError("provider", "error", "第二条", err);
+    const recent = recentAppErrors();
+    expect(recent.map((e) => e.message)).toEqual(["第二条", "第一条"]);
+    expect(recent[0]!.severity).toBe("error");
+    expect(recent[0]!.domain).toBe("provider");
+    expect(recent[0]!.count).toBe(1);
+    expect(recent[0]!.detail).toContain("boom");
+  });
+
+  test("30s 窗口内同 domain+message 合并计数,不新增条目、不重复广播", () => {
+    const broadcasts: string[] = [];
+    initAppErrorBroadcast((entry) => broadcasts.push(entry.message));
+    setSystemTime(new Date(1_000_000));
+    reportError("network", "warn", "抖动");
+    setSystemTime(new Date(1_000_000 + 10_000));
+    reportError("network", "warn", "抖动");
+    reportError("network", "warn", "抖动");
+    const recent = recentAppErrors();
+    expect(recent).toHaveLength(1);
+    expect(recent[0]!.count).toBe(3);
+    expect(recent[0]!.at).toBe(1_000_000 + 10_000);
+    expect(broadcasts).toEqual(["抖动"]);
+  });
+
+  test("窗口过期后同 message 生成新条目并再次广播", () => {
+    const broadcasts: string[] = [];
+    initAppErrorBroadcast((entry) => broadcasts.push(entry.message));
+    setSystemTime(new Date(1_000_000));
+    reportError("network", "warn", "抖动");
+    setSystemTime(new Date(1_000_000 + 31_000));
+    reportError("network", "warn", "抖动");
+    expect(recentAppErrors()).toHaveLength(2);
+    expect(broadcasts).toEqual(["抖动", "抖动"]);
+  });
+
+  test("同 message 不同 domain 不合并", () => {
+    setSystemTime(new Date(1_000_000));
+    reportError("network", "warn", "失败");
+    reportError("backup", "warn", "失败");
+    expect(recentAppErrors()).toHaveLength(2);
+  });
+
+  test("环形缓冲上限 200 条,溢出丢最旧", () => {
+    setSystemTime(new Date(1_000_000));
+    for (let i = 0; i < 205; i++) {
+      // 每条 message 不同避免合并;时间推进避免窗口影响
+      reportError("internal", "info", `条目${i}`);
+    }
+    const recent = recentAppErrors();
+    expect(recent).toHaveLength(200);
+    expect(recent[0]!.message).toBe("条目204");
+    expect(recent[199]!.message).toBe("条目5");
+  });
+
+  test("广播回调抛错不污染上报路径", () => {
+    initAppErrorBroadcast(() => {
+      throw new Error("坏客户端");
+    });
+    expect(() => reportError("internal", "info", "安全")).not.toThrow();
+    expect(recentAppErrors()).toHaveLength(1);
+  });
+});

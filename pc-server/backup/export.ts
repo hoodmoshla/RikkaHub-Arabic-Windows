@@ -9,6 +9,7 @@ import type { JsonValue } from "../foundation/types";
 import type { Settings } from "../foundation/types/settings";
 import { isRecord, safeJsonStringify } from "../foundation/utils";
 import { dataDir, filesDir, skillsDir } from "../foundation/paths";
+import { reportError } from "../observability/app-errors";
 import { tempDir } from "../foundation/platform";
 import { state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
@@ -200,7 +201,7 @@ function generateRikkaHubDb(dbPath: string): boolean {
   if (!existsSync(cachedDbPath)) {
     // 模板在成功导入一次安卓备份后才存在。缺失时导出 zip 静默不含 rikka_hub.db,
     // 安卓端导入后会话为空——至少留条日志,别让用户以为导出是完整的(DB-first 批1 验证时记录的遗留项)。
-    console.warn("[backup] rikka_hub_cached.db 模板缺失,导出 zip 将不含 rikka_hub.db(安卓端导入无会话)");
+    reportError("backup", "warn", "rikka_hub_cached.db 模板缺失,导出 zip 将不含 rikka_hub.db(安卓端导入无会话)");
     return false;
   }
   try {
@@ -395,7 +396,7 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
         }
       }
       if (skippedFiles > 0) {
-        console.warn(`[backup] ⚠️ ${skippedFiles}/${totalFiles} attachment(s) skipped — source file missing (path invalid or file deleted). They will NOT be in the backup.`);
+        reportError("backup", "warn", `${skippedFiles}/${totalFiles} 个附件源文件缺失(路径失效或已删除),未包含在备份中`);
       }
     }
     if (existsSync(skillsDir)) {

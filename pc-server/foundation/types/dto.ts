@@ -91,6 +91,35 @@ export type UploadFilesResponseDto = {
   files: UploadedFileDto[];
 };
 
+// ── 应用错误通道(P2-1) ─────────────────────────────────────────────
+
+/** 严重度:error=用户必须知道(toast),warn=可感知降级,info=仅进错误中心。 */
+export type AppErrorSeverity = "info" | "warn" | "error";
+
+/** 错误所属域(决定用户视角的归因文案与错误中心分组)。 */
+export type AppErrorDomain =
+  | "provider"
+  | "persistence"
+  | "backup"
+  | "network"
+  | "tool"
+  | "media"
+  | "update"
+  | "internal";
+
+/** 应用级错误条目:errors/recent 快照元素与 errors/stream SSE 载荷。 */
+export type AppErrorDto = {
+  id: string;
+  /** 最近一次发生时间(风暴合并时更新)。 */
+  at: number;
+  /** 30s 窗口内同 domain+message 的合并计数。 */
+  count: number;
+  severity: AppErrorSeverity;
+  domain: AppErrorDomain;
+  message: string;
+  detail?: string;
+};
+
 // ── SSE 事件载荷 ───────────────────────────────────────────────────
 
 /** 会话列表 SSE:invalidate 事件(前端收到后重拉列表)。 */

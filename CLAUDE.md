@@ -101,6 +101,11 @@ the runtime will.
   `{{locale}}`, `{{timezone}}`, `{{user}}`) — they're resolved by the input transformer pipeline.
 - **Never write user API keys** anywhere in version control. `pc-data/` is gitignored;
   the smoke tests use mock providers.
+- **No bare `catch {}` without intent** (P2-1 discipline): every catch must either call
+  `reportError(domain, severity, message, cause)` from `observability/app-errors.ts`, or
+  carry a comment explaining why swallowing is safe (parse fallback / best-effort cleanup).
+  Severity guide: `error` = user must know (global toast), `warn` = perceivable degradation,
+  `info` = error-center record only.
 
 ## Common tasks
 

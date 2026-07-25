@@ -57,6 +57,7 @@ import { TITLE_CHARACTER_LIMIT } from "../app-config/prompts";
 import { flushConvDirtyNow, getConversation, getConversationsDb, markMessageNodeDirty, persistConversation, scheduleThrottledConvFlush } from "./index";
 import { checkoutConversation, releaseConversation } from "./working-set";
 import { conversationExistsInDb } from "./read-queries";
+import { reportError } from "../observability/app-errors";
 import { generating } from "./generation-state";
 import {
   appendTextPart,
@@ -379,6 +380,7 @@ async function runPostGenerationTasks(conversationId: string, snapshot: Conversa
         kind: "aux:title",
         error: titleError instanceof Error ? titleError.message : String(titleError),
       });
+      reportError("provider", "warn", "标题自动生成失败,已回退首条消息文本", titleError);
       // Title generation failed → fall back to first user message text (Android parity).
       const live = liveConversation();
       if (live && shouldAutoGenerateTitle(live)) {
@@ -415,8 +417,9 @@ async function runPostGenerationTasks(conversationId: string, snapshot: Conversa
         persistConversation(live);
         broadcastConversation(live);
       }
-    } catch {
+    } catch (suggestionError) {
       // Suggestions are auxiliary;正文生成状态不应受影响。
+      reportError("provider", "warn", "会话建议自动生成失败", suggestionError);
     }
   }
 }
@@ -601,6 +604,9 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
     const rawContent = err instanceof Error ? err.message : String(err);
     const proxyHint = classifyProxyError(err, state.settings.proxyConfig);
     const failureText = proxyHint ?? `请求失败：${rawContent}`;
+    // P2-1(N-7 归宿):失败文本除了写进会话消息(仅会话 SSE 可见),还上报全局通道——
+    // 用户不在该会话页时也能收到通知(批2 接前端 toast)。
+    reportError("provider", "error", failureText, err);
     finalizeOutcome(() => {
       if (currentMessage.parts.length === 0) {
         finishMessage(currentMessage, [{ type: "text", text: failureText }]);
