@@ -2057,6 +2057,44 @@ async function runEpubStatsLogsSmoke() {
   return { epubTextLength: uploaded.extractedTextLength, requestGroups: groupNames, logCount: logs.length };
 }
 
+// P0-2 回归防线:纯文本(无工具)会话必须在流式期间收到"中间态"node_update 帧。
+// mock 的"慢慢回答"分支输出 第一段/第二段/第三段(500ms 间隔);若 applyEvent 的
+// text_delta 丢失 touchStream(5.3g 曾发生),则只剩开场占位帧与收尾整段帧,不存在
+// 携带部分文本的中间帧——本断言直接命中该回归。工具场景覆盖不到 text 路径(收官审查教训)。
+async function runPlainTextStreamingSmoke() {
+  const conversationId = `smoke-plain-text-${Date.now()}`;
+  // 订阅前先把会话建出来(与 runConversation 同法):/stream 对不存在的会话返回 404。
+  await api(`/api/conversations/${conversationId}/system-prompt`, {
+    method: "POST",
+    body: JSON.stringify({ systemPrompt: "Plain text smoke prompt" }),
+  }).catch((): undefined => undefined);
+  const streamEventsPromise = collectConversationEvents(
+    conversationId,
+    (events) => events.some((event) => {
+      if (event.event !== "snapshot") return false;
+      const conversation = event.data?.conversation;
+      return conversation?.isGenerating === false && selectedMessages(conversation).some((msg: AnyRecord) => textFromParts(msg.parts ?? []).includes("第三段"));
+    }),
+  );
+  await Bun.sleep(50);
+  await api(`/api/conversations/${conversationId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ parts: [{ type: "text", text: "请慢慢回答这个问题。" }] }),
+  });
+  const streamEvents = await streamEventsPromise;
+  const nodeTexts = streamEvents
+    .filter((item) => item.event === "node_update")
+    .map((item) => {
+      const node = item.data?.node;
+      const msg = node?.messages?.[node?.selectIndex ?? 0] ?? node?.messages?.[0];
+      return textFromParts(msg?.parts ?? []);
+    });
+  assert(
+    nodeTexts.some((text) => text.includes("第一段") && !text.includes("第三段")),
+    `plain-text streaming emitted no incremental node_update frames (P0-2 regression): ${JSON.stringify(nodeTexts)}`,
+  );
+  return nodeTexts.length;
+}
 async function main() {
   rmSync(tempDir, { recursive: true, force: true });
   mkdirSync(tempDir, { recursive: true });
@@ -2069,6 +2107,8 @@ async function main() {
     await waitForHealth();
     const chat = await runConversation(false);
     const response = await runConversation(true);
+    const plainTextFrames = await runPlainTextStreamingSmoke();
+    assert(plainTextFrames >= 2, "plain-text streaming produced fewer than 2 node_update frames");
     const injections = await runInjectionChainSmoke();
     const skill = await runSkillChainSmoke();
     const templateTimeAndSettings = await runTemplateTimeAndSettingsSmoke();

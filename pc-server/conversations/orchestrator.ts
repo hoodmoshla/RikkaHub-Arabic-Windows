@@ -518,14 +518,20 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
     const applyEvent = (event: GenerationEvent) => {
       const streamHooks: StreamHooks = { message: currentMessage, conversation, node: assistantNode };
       switch (event.kind) {
+        // 文本/思维链/图片增量写入内存后必须 touchStream(标脏 + 200ms 节流落库 + 33ms 节流
+        // 广播),与下方三个 tool case 对齐。5.3g 搬迁时该调用曾丢失(收官审查 P0-2):无工具
+        // 会话全程无增量帧、无增量落库,流式中崩溃丢整段回答。
         case "text_delta":
           addStreamText(streamHooks, event.text);
+          touchStream(streamHooks as StreamHooksWithSink);
           break;
         case "reasoning_delta":
           appendReasoningDelta(streamHooks as StreamHooksWithSink, event.text, event.metadata);
+          touchStream(streamHooks as StreamHooksWithSink);
           break;
         case "image_delta":
           addStreamImage(streamHooks, event.url, event.metadata);
+          touchStream(streamHooks as StreamHooksWithSink);
           break;
         case "tool_call_created":
           finishReasoningParts(currentMessage);
