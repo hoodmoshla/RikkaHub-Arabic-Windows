@@ -5,6 +5,7 @@
 import { error } from "./request";
 import { handleConversationRoutes } from "./handlers/conversations";
 import { handleDataRoutes } from "./handlers/data";
+import { handleErrorRoutes } from "./handlers/errors";
 import { handleFileRoutes } from "./handlers/files";
 import { handleMediaRoutes } from "./handlers/media";
 import { handleMemoryRoutes } from "./handlers/memory";
@@ -23,6 +24,7 @@ const handlers = [
   handleDataRoutes,
   handleUpdateRoutes,
   handleMediaRoutes,
+  handleErrorRoutes,
 ] as const;
 
 export async function routeApi(request: Request, url: URL) {

@@ -4,6 +4,7 @@
 
 import type { StreamHooksWithSink } from "../inference-engine/events";
 import { initWorkingSetSseGuard, markConversationRowDirty, markMessageNodeDirty, scheduleThrottledConvFlush } from "../conversations";
+import { initAppErrorBroadcast } from "../observability/app-errors";
 import type { Conversation, ConversationListInvalidateEventDto, ConversationNodeUpdateEventDto, ConversationSnapshotEventDto, JsonValue, MessageNode } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { toConversationDto, toMessageNodeDtos } from "../conversations";
@@ -61,6 +62,12 @@ export const conversationClients = new Map<string, Set<ReadableStreamDefaultCont
 // working set 的 SSE 驻留判据:某会话有打开的 SSE 流(用户界面正开着)时不清扫。
 // 在此注入而非 conversations/index 直接 import,避免 index→sse→index 循环导入。
 initWorkingSetSseGuard((convId) => (conversationClients.get(convId)?.size ?? 0) > 0);
+
+// 应用错误通道(P2-1):errors/stream 订阅者集合 + 广播注入(通道模块不依赖 api 层)。
+export const errorClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+initAppErrorBroadcast((entry) => {
+  for (const client of errorClients) client.enqueue(sseFrame("app_error", { type: "app_error", error: entry }));
+});
 const encoder = new TextEncoder();
 
 export function sseFrame(event: string, data: JsonValue | object) {

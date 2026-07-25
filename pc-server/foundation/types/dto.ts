@@ -120,6 +120,18 @@ export type AppErrorDto = {
   detail?: string;
 };
 
+/** errors/stream SSE:连接快照(前端只入 store 不弹 toast)。 */
+export type AppErrorSnapshotEventDto = {
+  type: "snapshot";
+  errors: AppErrorDto[];
+};
+
+/** errors/stream SSE:增量条目(前端按 severity 路由 toast)。 */
+export type AppErrorPushEventDto = {
+  type: "app_error";
+  error: AppErrorDto;
+};
+
 // ── SSE 事件载荷 ───────────────────────────────────────────────────
 
 /** 会话列表 SSE:invalidate 事件(前端收到后重拉列表)。 */

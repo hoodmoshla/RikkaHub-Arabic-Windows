@@ -2,6 +2,9 @@
 // pc-server/foundation/types/dto.ts(后端 DTO 生成函数已标注返回类型做编译期契约校验)。
 // 字段增删属冻结契约变更,必须两端同评审。
 export type {
+  AppErrorDto,
+  AppErrorPushEventDto,
+  AppErrorSnapshotEventDto,
   ConversationDto,
   ConversationErrorEventDto,
   ConversationListDto,
