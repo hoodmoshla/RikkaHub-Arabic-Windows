@@ -1,7 +1,8 @@
 // persistence/json-store.ts — state.json 读写与状态对象
 // 纪律：负责 state 对象的持久化和共享，不依赖业务逻辑（阶段 2/3 逐步解耦 normalizeState）。
 
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { dataDir, statePath } from "../foundation/paths";
 import { reportError } from "../observability/app-errors";
@@ -72,6 +73,7 @@ async function performStateSave(): Promise<void> {
       // fs.promises.rename is also non-blocking. The atomic temp-then-rename pattern
       // protects against torn writes if the process is killed mid-save.
       await fsPromises.rename(tempPath, statePath);
+      maybeWriteDailyBackup(content);
       return;
     } catch (errorValue) {
       lastError = errorValue;
@@ -82,13 +84,88 @@ async function performStateSave(): Promise<void> {
       await new Promise<void>((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
     }
   }
+  // 全面审查 1-2:原先这里还有一步"非原子直写 state.json"的兜底——中途被杀即撕裂主文件,
+  // 下次启动只能走损坏回退。删除该步:直接写 recovery 旁文件(全新文件,绝不撕裂既有数据),
+  // loadState 的损坏回退链会优先采用最新 recovery(见 recoverStateFromBackups)。
+  // P2-1:静默丢配置是最高危的一类故障,用户必须知道(通道镜像到 console)。
   try {
-    await Bun.write(statePath, content);
-  } catch {
-    try { await Bun.write(`${statePath}.recovery-${Date.now()}.json`, content); } catch { /* last-ditch */ }
-    // P2-1:静默丢配置是最高危的一类故障,用户必须知道(通道镜像到 console,原 warn 移除)
+    await Bun.write(`${statePath}.recovery-${Date.now()}.json`, content);
     reportError("persistence", "error", "state.json 落盘失败(已另存 recovery 文件,重启后自动恢复)", lastError);
+  } catch (recErr) {
+    reportError("persistence", "error", "state.json 落盘失败,recovery 文件也写不出——本次变更未持久化", lastError ?? recErr);
   }
+}
+
+// ----- 全面审查 1-3:state.json 滚动每日备份(单代)-----
+// 会话有活库+WAL+导入前快照,设置层(供应商 apiKey/助手/记忆配置)此前只有一次性迁移
+// 时代的化石快照。每天首次成功落盘后顺手写一份 state.json.daily.bak,与 recovery 链
+// 组成完整恢复梯队(recovery=最后一笔 → daily.bak=最多回退一天 → pre-sqlite.bak=化石)。
+
+let dailyBackupDoneForDay: string | null = null;
+
+/** 参数化实现,回归测试直连;返回是否真的写了备份。失败只告警——备份是增强,不阻塞主写。 */
+export function maybeWriteDailyBackupTo(bakPath: string, content: string, now = new Date()): boolean {
+  const today = now.toISOString().slice(0, 10);
+  if (dailyBackupDoneForDay === today) return false;
+  try {
+    try {
+      // 跨进程重启同日不重复写:以备份文件 mtime 的日期为准
+      if (new Date(statSync(bakPath).mtimeMs).toISOString().slice(0, 10) === today) {
+        dailyBackupDoneForDay = today;
+        return false;
+      }
+    } catch { /* 不存在 → 写 */ }
+    const tempPath = `${bakPath}.${process.pid}.tmp`;
+    writeFileSync(tempPath, content);
+    renameSync(tempPath, bakPath);
+    dailyBackupDoneForDay = today;
+    return true;
+  } catch (err) {
+    dailyBackupDoneForDay = today; // 当天不再反复尝试/告警
+    reportError("persistence", "warn", "state.json 每日滚动备份写入失败(主写不受影响)", err);
+    return false;
+  }
+}
+
+function maybeWriteDailyBackup(content: string): void {
+  maybeWriteDailyBackupTo(`${statePath}.daily.bak`, content);
+}
+
+/** 全面审查 1-2:state.json 损坏时的回退链(loadState 解析失败后调用)。原先只认
+ *  pre-sqlite.bak(1.2.6 迁移时代化石,老用户可能落后数月),而 performStateSave 八连败
+ *  写出的 recovery-*.json 从来无人读——磁盘上躺着最新完整状态却回滚到远古设置。
+ *  按新鲜度依次尝试:① 最新 recovery-*.json(坏则逐个回退)→ ② 每日滚动备份 →
+ *  ③ pre-sqlite.bak → ④ null(调用方回默认)。用过的 recovery 归档改名 .applied-<ts>,
+ *  防下次启动误用陈旧 recovery 覆盖更新的状态。 */
+export function recoverStateFromBackups(dataDirPath: string, statePathValue: string): Partial<State> | null {
+  try {
+    const names = readdirSync(dataDirPath)
+      .filter((n) => n.startsWith("state.json.recovery-") && n.endsWith(".json"))
+      .sort() // Date.now() 毫秒时间戳同位数,字典序即时间序
+      .reverse();
+    for (const name of names) {
+      const candidate = join(dataDirPath, name);
+      try {
+        const parsed = JSON.parse(readFileSync(candidate, "utf8")) as Partial<State>;
+        console.error(`[loadState] 已从 recovery 文件恢复:${name}`);
+        try { renameSync(candidate, `${candidate}.applied-${Date.now()}`); } catch { /* 归档尽力而为 */ }
+        return parsed;
+      } catch { /* 该 recovery 也坏 → 试更早的 */ }
+    }
+  } catch { /* readdir 失败 → 继续下一级 */ }
+  try {
+    const daily = `${statePathValue}.daily.bak`;
+    const parsed = JSON.parse(readFileSync(daily, "utf8")) as Partial<State>;
+    console.error("[loadState] 已从每日滚动备份恢复(最多回退一天)");
+    return parsed;
+  } catch { /* 不存在/损坏 → 继续 */ }
+  try {
+    const bak = join(dataDirPath, "state.json.pre-sqlite.bak");
+    const parsed = JSON.parse(readFileSync(bak, "utf8")) as Partial<State>;
+    console.error("[loadState] 已从 pre-sqlite.bak 恢复(迁移时代快照,可能显著过时)");
+    return parsed;
+  } catch { /* 不存在/损坏 */ }
+  return null;
 }
 
 export function saveState(): void {

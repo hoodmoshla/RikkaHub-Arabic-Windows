@@ -11,11 +11,13 @@ import { normalizePreferredPort } from "../foundation/net";
 import {
   CONVERSATIONS_SQLITE_MIGRATION,
   MEMORY_FILE_SPLIT_MIGRATION,
+  recoverStateFromBackups,
   setState,
   state,
   writeSlimStateJsonSync,
   writeSlimStateJsonSyncForMemory,
 } from "./json-store";
+import { reportError } from "../observability/app-errors";
 import { getConversationsDb, loadAllConversationsFromDb, migrateConversationsIntoDb, openConversationsDb, resetConversationsDbTo } from "../conversations";
 import { countConversations } from "../conversations/read-queries";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory";
@@ -262,15 +264,16 @@ export function loadState(): State {
     try {
       parsed = JSON.parse(readFileSync(statePath, "utf8")) as Partial<State>;
     } catch (err) {
-      // state.json 损坏:尝试 pre-sqlite 备份;都没有则默认状态。
-      console.error("[loadState] state.json 解析失败,尝试 pre-sqlite.bak", err);
-      const bakPath = join(dataDir, "state.json.pre-sqlite.bak");
-      try {
-        parsed = existsSync(bakPath)
-          ? (JSON.parse(readFileSync(bakPath, "utf8")) as Partial<State>)
-          : defaultState();
-      } catch (err2) {
-        console.error("[loadState] pre-sqlite.bak 也失败,用默认状态", err2);
+      // 全面审查 1-2:state.json 损坏 → 按新鲜度走恢复链(recovery-*.json → daily.bak
+      // → pre-sqlite.bak),全部失败才回默认。原先只认化石 pre-sqlite.bak,磁盘上躺着
+      // performStateSave 兜底写出的最新 recovery 却从来无人读。
+      console.error("[loadState] state.json 解析失败,按恢复链回退", err);
+      const recovered = recoverStateFromBackups(dataDir, statePath);
+      if (recovered) {
+        reportError("persistence", "warn", "state.json 损坏,已从备份恢复——请核对设置是否为最新", err);
+        parsed = recovered;
+      } else {
+        reportError("persistence", "error", "state.json 损坏且无任何可用备份,已回退默认状态", err);
         parsed = defaultState();
       }
     }
