@@ -139,7 +139,9 @@ describe("rewriteAvatarsInSettings（to-android 导出方向）", () => {
     expect(assistant.reasoningLevel).toBe("auto");
     expect(assistant.presetMessages[0].role).toBe("user");
     expect(assistant.mcpToolOverrides).toBeUndefined();
-    expect(assistant.allowConversationSystemPrompt).toBeUndefined();
+    // 安卓对齐批6:allowConversationSystemPrompt 已是安卓正式字段(Assistant.kt),必须存活——
+    // 此前误 strip 导致 PC→APP 后所有助手的会话级系统提示词开关归 false。
+    expect(assistant.allowConversationSystemPrompt).toBe(true);
     expect(out.modeInjections[0].role).toBe("user");
     expect(out.displaySetting.userAvatar.type).toBe("me.rerere.rikkahub.data.model.Avatar.Image");
     expect(out.displaySetting.chatFontFamilyCss).toBeUndefined();

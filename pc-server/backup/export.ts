@@ -146,9 +146,10 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
             isRecord(pm) && typeof pm.role === "string" ? { ...pm, role: pm.role.toLowerCase() } : pm,
           );
         }
-        // Strip PC-only assistant fields that Android doesn't have
+        // Strip PC-only assistant fields that Android doesn't have.
+        // 安卓对齐批6:allowConversationSystemPrompt 已是安卓正式字段(Assistant.kt),
+        // 不再 strip——此前误删导致 PC→APP 后所有助手的会话级系统提示词开关归 false。
         delete fixed.mcpToolOverrides;
-        delete fixed.allowConversationSystemPrompt;
       }
       return fixed;
     });
@@ -166,12 +167,18 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
     }
     if (stripPcOnly) {
       // Strip PC-only displaySetting fields that Android can't deserialize:
-      // - chatFontFamily: PC uses "" (empty string) which isn't a valid Android enum value
       // - chatFontFamilyCss: PC-only CSS field
       // - uiFontSize / chatFontSize: PC-only font size fields
-      const pcOnlyDisplayFields = ["chatFontFamily", "chatFontFamilyCss", "uiFontSize", "chatFontSize", "chatInputHeight"];
+      const pcOnlyDisplayFields = ["chatFontFamilyCss", "uiFontSize", "chatFontSize", "chatInputHeight"];
       for (const field of pcOnlyDisplayFields) {
         if (field in displaySetting) delete displaySetting[field];
+      }
+      // 安卓对齐批6:chatFontFamily 只对安卓枚举外的值(PC 自由字体名/空串)strip;
+      // 合法枚举(PreferencesStore.kt ChatFontFamily 的 SerialName)原样保留,
+      // APP 用户的 serif/monospace 选择经 PC 往返不再退回 default。
+      const androidChatFontFamilies = new Set(["default", "serif", "monospace", "custom"]);
+      if ("chatFontFamily" in displaySetting && !androidChatFontFamilies.has(String(displaySetting.chatFontFamily))) {
+        delete displaySetting.chatFontFamily;
       }
     }
     copy.displaySetting = displaySetting;
@@ -195,7 +202,7 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
 /** Generate a Room-compatible SQLite database from PC's conversation data so Android can
  *  restore chat history from a PC-origin backup zip. The schema matches Android's
  *  rikka_hub.db exactly (ConversationEntity + message_node + room_master_table). */
-function generateRikkaHubDb(dbPath: string): boolean {
+function generateRikkaHubDb(dbPath: string, backupNameById?: Map<number, string>): boolean {
   const cachedDbPath = join(dataDir, "rikka_hub_cached.db");
   if (!existsSync(cachedDbPath)) {
     // 模板在成功导入一次安卓备份后才存在。缺失时导出 zip 静默不含 rikka_hub.db,
@@ -240,7 +247,7 @@ function generateRikkaHubDb(dbPath: string): boolean {
       if (row.name && isFtsShadowTable(row.name)) continue;
       try { db.exec(row.sql); } catch { /* */ }
     }
-    insertConversationsIntoDb(db);
+    insertConversationsIntoDb(db, backupNameById);
     insertMemoriesIntoDb(db);
     writeFileSync(dbPath, db.serialize());
     db.close();
@@ -283,8 +290,26 @@ function insertMemoriesIntoDb(db: InstanceType<typeof Database>) {
 //   ③ 写瘦 state.json(删 conversations + 加迁移标记,temp+rename 原子)
 // 崩在 ①②:state.json 未变,重跑幂等;崩在 ③:temp 未 rename,重跑。无数据丢失。
 
-function insertConversationsIntoDb(db: InstanceType<typeof Database>) {
-  const insertConv = db.prepare("INSERT OR REPLACE INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, suggestions, is_pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+// 安卓对齐批6:PC 消息里的附件引用是 /api/files/<id>/content,安卓无法解析(此前 PC→APP
+// 全部裂图)。导出时反向重写成安卓自身的 upload 绝对路径 URI(与安卓消息内的原生形态一致,
+// PC 导入端 rewriteAndroidFileUrl 的 upload/<name> 正则也能精确逆回)。文件名做 JSON 转义。
+const ANDROID_UPLOAD_URI_PREFIX = "file:///data/user/0/me.rerere.rikkahub/files/upload/";
+function rewritePcUrlsToAndroidUpload(jsonText: string, backupNameById: Map<number, string>): string {
+  return jsonText.replace(/\/api\/files\/(\d+)\/content/g, (whole, idStr: string) => {
+    const name = backupNameById.get(Number(idStr));
+    if (name === undefined) return whole;
+    return `${ANDROID_UPLOAD_URI_PREFIX}${JSON.stringify(name).slice(1, -1)}`;
+  });
+}
+
+function insertConversationsIntoDb(db: InstanceType<typeof Database>, backupNameById?: Map<number, string>) {
+  // 安卓对齐批6:模板列存在时回写 custom_system_prompt(会话级系统提示词),按 PRAGMA
+  // 判该列可否为 null。模板较老没有该列时保持 8 列写入,不破坏旧模板兼容。
+  const convCols = db.prepare("PRAGMA table_info(ConversationEntity)").all() as { name: string; notnull: number }[];
+  const cspCol = convCols.find((c) => c.name === "custom_system_prompt");
+  const insertConv = cspCol
+    ? db.prepare("INSERT OR REPLACE INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, suggestions, is_pinned, custom_system_prompt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    : db.prepare("INSERT OR REPLACE INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, suggestions, is_pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
   const insertNode = db.prepare("INSERT OR REPLACE INTO message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)");
   // DB-first 批1:导出全走活库(先 flush 对齐脏数据),逐会话瞬时读,峰值内存=单会话。
   flushConvDirtyNow();
@@ -293,7 +318,12 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>) {
   const txn = db.transaction(() => {
     for (const conv of exportMetas) {
       try {
-        insertConv.run(conv.id, conv.assistantId || DEFAULT_ASSISTANT_ID, conv.title || "", "[]", conv.createAt || Date.now(), conv.updateAt || Date.now(), JSON.stringify(conv.chatSuggestions || []), conv.isPinned ? 1 : 0);
+        const baseVals = [conv.id, conv.assistantId || DEFAULT_ASSISTANT_ID, conv.title || "", "[]", conv.createAt || Date.now(), conv.updateAt || Date.now(), JSON.stringify(conv.chatSuggestions || []), conv.isPinned ? 1 : 0] as const;
+        if (cspCol) {
+          insertConv.run(...baseVals, conv.systemPrompt ? conv.systemPrompt : (cspCol.notnull ? "" : null));
+        } else {
+          insertConv.run(...baseVals);
+        }
         const convNodes = liveDb ? loadConversationNodesFromDb(liveDb, conv.id) : [];
         for (let i = 0; i < convNodes.length; i++) {
           const node = convNodes[i];
@@ -305,10 +335,22 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>) {
             const fixed = { ...p };
             if (fixed.createdAt) fixed.createdAt = toInstant(fixed.createdAt);
             if (fixed.finishedAt) fixed.finishedAt = toInstant(fixed.finishedAt);
+            // 安卓对齐批6(审查A P0):ToolPart.output 里的 {error}/{pending} 历史载荷没有
+            // type 判别符,安卓 sealed 多态解码抛 SerializationException 且读会话处无容错——
+            // 含失败/挂起工具调用的会话在手机上打开即崩。对齐安卓自身写法(GenerationHandler
+            // 把错误 JSON 包成 text part)。仅影响导出产物,PC 内部契约不动。
+            if (fixed.type === "tool" && Array.isArray(fixed.output)) {
+              fixed.output = fixed.output.map((entry: any) =>
+                entry && typeof entry === "object" && !Array.isArray(entry) && typeof entry.type !== "string"
+                  ? { type: "text", text: JSON.stringify(entry) }
+                  : entry,
+              );
+            }
             return fixed;
           });
           const msgs = (node.messages || []).map((m: any) => ({ id: m.id || null, role: String(m.role || "user").toLowerCase(), parts: fixParts(m.parts || []), annotations: m.annotations || [], createdAt: toLocalDt(m.createdAt), finishedAt: toLocalDt(m.finishedAt), modelId: m.modelId || null, usage: m.usage || null, translation: m.translation || null }));
-          insertNode.run(node.id, conv.id, i, JSON.stringify(msgs), node.selectIndex ?? 0);
+          const nodeJson = JSON.stringify(msgs);
+          insertNode.run(node.id, conv.id, i, backupNameById ? rewritePcUrlsToAndroidUpload(nodeJson, backupNameById) : nodeJson, node.selectIndex ?? 0);
         }
       } catch (err) { console.warn(`[backup] skipping conversation ${conv.id}: ${err}`); }
     }
@@ -445,7 +487,7 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
       onProgress?.("正在生成对话数据库...");
       const dbPath = join(stageDir, "rikka_hub.db");
       try {
-        const ok = generateRikkaHubDb(dbPath);
+        const ok = generateRikkaHubDb(dbPath, uploadPlan.backupNameById);
         if (ok) {
           for (const suffix of ["-wal", "-shm", "-journal"]) {
             const p = dbPath + suffix;
@@ -486,6 +528,14 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
       const skillsStage = join(stageDir, "skills");
       mkdirSync(skillsStage, { recursive: true });
       copyDirRecursive(skillsDir, skillsStage);
+    }
+    // 安卓对齐批6:fonts/ 透传(安卓 2.4.2 新增自定义聊天字体)。PC 不消费,仅忠实搬运,
+    // 保证 APP→PC→APP 往返不丢字体文件(导入侧对应 importFontsDirIfPresent)。
+    const fontsDir = join(dataDir, "fonts");
+    if (existsSync(fontsDir)) {
+      const fontsStage = join(stageDir, "fonts");
+      mkdirSync(fontsStage, { recursive: true });
+      copyDirRecursive(fontsDir, fontsStage);
     }
     onProgress?.("正在压缩...");
     if (existsSync(targetZipPath)) rmSync(targetZipPath);

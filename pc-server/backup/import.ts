@@ -190,6 +190,7 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
       }
     }
     importSkills((body as { skills?: unknown }).skills);
+    importFontsDirIfPresent(extractDir);
     // 批5:re-link 改为元数据驱动。旧实现按目录字母序重编号且不改写引用(id>9 时
     // '10.png'<'2.png',字母序≠id 序),恢复后消息附件/头像/画廊全面错位。现在:每条元数据
     // 用 backupName(导出端 zip 内实际文件名;老备份无此字段时退回 fileName)定位字节,
@@ -571,6 +572,7 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
       console.log(`[import] upload 去重:${dedupedFiles} 个文件与现有内容一致,复用原条目`);
     }
   }
+  importFontsDirIfPresent(extractDir);
 
   // Conversation history: Android stores them in a Room SQLite db (`rikka_hub.db`) with two
   // tables — ConversationEntity for metadata + message_node for the per-node messages array.
@@ -641,6 +643,21 @@ function importPcConversationsDump(dumpPath: string): number {
     return conversations.length;
   } finally {
     try { db.close(); } catch { /* best-effort:句柄随 GC 释放 */ }
+  }
+}
+
+/** 安卓对齐批6:安卓 2.4.2 起备份 zip 含 fonts/(自定义聊天字体)。PC 不消费,只作忠实
+ *  透传:导入落到 dataDir/fonts,导出原样打包,保证 APP→PC→APP 往返不丢。失败仅告警。 */
+function importFontsDirIfPresent(extractDir: string): void {
+  const src = join(extractDir, "fonts");
+  if (!existsSync(src)) return;
+  try {
+    const dest = join(dataDir, "fonts");
+    mkdirSync(dest, { recursive: true });
+    const copied = copyDirRecursive(src, dest);
+    console.log(`[import] fonts/ 透传 ${copied} 个文件`);
+  } catch (err) {
+    console.warn("[import] fonts/ 透传失败(不影响其他数据)", err);
   }
 }
 
