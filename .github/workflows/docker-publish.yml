@@ -2,7 +2,9 @@ name: Docker
 
 on:
   push:
-    branches: ['*']
+    # 8-12:此前 branches ['*'] 任意实验分支推送都会向 ghcr 发布可拉取镜像(tag=分支名),
+    # 收敛到 main+版本 tag。PR 仍构建但不推送(push 条件在下方 build-push 步骤)。
+    branches: [main]
     tags: ['v*.*.*']
   pull_request:
     branches: ["main"]
