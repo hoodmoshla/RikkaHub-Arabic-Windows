@@ -1,9 +1,9 @@
 // persistence/state-load.ts — state.json 装载、规范化与一次性迁移（会话入 SQLite、记忆拆文件）
 // 纪律：纯搬迁自 server.ts（阶段 5.3h），行为不变。迁移常量语义见 json-store.ts。
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import type { AssistantMemoryFile, Conversation, GlobalMemoryFile, JsonValue, State, WriteStrategy } from "../foundation/types";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { extname, join } from "node:path";
+import type { AssistantMemoryFile, Conversation, GlobalMemoryFile, JsonValue, State, StoredFile, WriteStrategy } from "../foundation/types";
 import { id, isRecord, mergeById, uniqueStrings } from "../foundation/utils";
 import { assistantMemoryPath, dataDir, filesDir, globalMemoryPath, pendingMemoryPath, skillsDir, statePath } from "../foundation/paths";
 import { applyEffectiveProxy, installProxyFetchInterceptor, normalizeProxyConfig } from "../foundation/net";
@@ -23,6 +23,8 @@ import { NA_API_PRESET_MODELS, NA_API_PROVIDER_ID, SUNSET_PROVIDER_IDS, TENCENT_
 import { normalizeTtsProviders } from "../media/tts";
 import { normalizeAsrProviders } from "../media/asr";
 import { normalizeS3Config, normalizeWebDavConfig } from "../backup/storage";
+import { hashFileSha256, rewritePcFileUrlsDeep } from "../backup/file-refs";
+import { rebuildFtsFromNodeTable } from "../conversations/fts";
 import { normalizeRequestStats } from "../api/logs";
 import { SUNSET_TTS_PROVIDER_IDS, defaultSettings, defaultState } from "../app-config/defaults";
 import {
@@ -291,7 +293,123 @@ export function loadState(): State {
   // performStateSave 按标记把它继续写回 state.json,下次启动重试迁移。运行时读路径
   // 已 DB 化,本次启动会话表现为空,但数据仍在 state.json,不丢。
   migrateMemoryFilesIfNeeded(state);
+  migrateFileDedupIfNeeded(state);
   return state;
+}
+
+export const FILE_DEDUP_MIGRATION = "file-dedup-2.0";
+
+/** 备份 2.0 批5b:一次性归并 state.files 中内容重复的条目。历史上安卓 zip 导入对 upload/
+ *  零去重(旧条目仍被消息引用删不得),每次 PC↔APP 往返附件翻倍(用户实测 4 份 = 两轮)。
+ *  流程:尺寸碰撞组内 sha256 分组 → 每组保留最小 id → 改写活库全部节点 messages 与
+ *  settings/generatedImages 中的 /api/files/<dup>/content 引用 → 删除重复条目与其物理文件
+ *  (仅当该路径不再被任何保留条目使用)。改写先于删除:任意点崩溃后重跑,分组与映射由
+ *  当前内容重新推导,天然幂等。活库未打开、或会话仍在 state.json(SQLite 迁移未完成)时
+ *  本次跳过且不写标记,下次启动重试。 */
+function migrateFileDedupIfNeeded(stateObj: State): void {
+  const appliedMigrations = Array.isArray(stateObj.appliedMigrations) ? stateObj.appliedMigrations : [];
+  if (appliedMigrations.includes(FILE_DEDUP_MIGRATION)) return;
+  if (Array.isArray(stateObj.conversations)) return;
+  const db = getConversationsDb();
+  if (!db) return;
+  try {
+    const bySize = new Map<number, { f: StoredFile; path: string }[]>();
+    for (const f of stateObj.files) {
+      let p = f.path && existsSync(f.path) ? f.path : "";
+      if (!p) {
+        const ext = extname(f.fileName || "") || extname(f.path || "") || "";
+        const fallback = join(filesDir, `${f.id}${ext}`);
+        p = existsSync(fallback) ? fallback : "";
+      }
+      if (!p) continue;
+      const size = statSync(p).size;
+      const list = bySize.get(size) ?? [];
+      list.push({ f, path: p });
+      bySize.set(size, list);
+    }
+    const idMap = new Map<number, number>();
+    const dupItems: { f: StoredFile; path: string }[] = [];
+    for (const group of bySize.values()) {
+      if (group.length < 2) continue;
+      const byHash = new Map<string, { f: StoredFile; path: string }[]>();
+      for (const item of group) {
+        const h = hashFileSha256(item.path);
+        if (!h) continue;
+        const list = byHash.get(h) ?? [];
+        list.push(item);
+        byHash.set(h, list);
+      }
+      for (const same of byHash.values()) {
+        if (same.length < 2) continue;
+        same.sort((a, b) => a.f.id - b.f.id);
+        const kept = same[0]!;
+        for (const dup of same.slice(1)) {
+          idMap.set(dup.f.id, kept.f.id);
+          dupItems.push(dup);
+        }
+      }
+    }
+    if (idMap.size > 0) {
+      // 改写活库节点(单事务);URL 引用形态全系统唯一,直接对节点 JSON 文本做正则替换。
+      const rows = db.prepare("SELECT id, messages FROM pc_message_node").all() as { id: string; messages: string }[];
+      const update = db.prepare("UPDATE pc_message_node SET messages = ? WHERE id = ?");
+      let changedNodes = 0;
+      db.exec("BEGIN");
+      try {
+        for (const row of rows) {
+          const rewritten = rewritePcFileUrlsDeep(row.messages, idMap) as string;
+          if (rewritten !== row.messages) {
+            update.run(rewritten, row.id);
+            changedNodes++;
+          }
+        }
+        db.exec("COMMIT");
+      } catch (txErr) {
+        db.exec("ROLLBACK");
+        throw txErr;
+      }
+      if (changedNodes > 0) rebuildFtsFromNodeTable(db);
+      stateObj.settings = rewritePcFileUrlsDeep(
+        stateObj.settings as unknown as JsonValue,
+        idMap,
+      ) as unknown as typeof stateObj.settings;
+      if (Array.isArray(stateObj.generatedImages)) {
+        const rewritten = rewritePcFileUrlsDeep(
+          stateObj.generatedImages as unknown as JsonValue,
+          idMap,
+        ) as unknown as typeof stateObj.generatedImages;
+        stateObj.generatedImages = rewritten.map((img) =>
+          typeof img.fileId === "number" && idMap.has(img.fileId)
+            ? { ...img, fileId: idMap.get(img.fileId)! }
+            : img,
+        );
+      }
+      const dupIds = new Set(idMap.keys());
+      stateObj.files = stateObj.files.filter((f) => !dupIds.has(f.id));
+      // 物理清理:保留条目仍在用的路径绝不删(同路径多条目的防御)。
+      const keptPaths = new Set<string>();
+      for (const group of bySize.values()) {
+        for (const item of group) {
+          if (!dupIds.has(item.f.id)) keptPaths.add(item.path);
+        }
+      }
+      let removedFiles = 0;
+      for (const dup of dupItems) {
+        if (keptPaths.has(dup.path)) continue;
+        try {
+          unlinkSync(dup.path);
+          removedFiles++;
+        } catch (rmErr) {
+          console.warn("[file-dedup] 物理文件删除失败(条目已归并,不影响正确性)", dup.path, rmErr);
+        }
+      }
+      console.log(`[file-dedup] 归并 ${idMap.size} 个重复附件条目,改写 ${changedNodes} 个消息节点,清理 ${removedFiles} 个物理文件`);
+    }
+    stateObj.appliedMigrations = [...(Array.isArray(stateObj.appliedMigrations) ? stateObj.appliedMigrations : []), FILE_DEDUP_MIGRATION];
+    writeSlimStateJsonSyncForMemory(stateObj);
+  } catch (err) {
+    console.error("[file-dedup] 附件去重迁移失败(本次跳过,下次启动重试)", err);
+  }
 }
 
 /** 1.3.2 记忆迁移:把 state.memories 搬到 pc-data/memory/ 目录(三个 JSON 文件)。
