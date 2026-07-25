@@ -34,7 +34,7 @@ export class UpstreamStreamError extends Error {}
 
 // models.dev 开源模型目录缓存 —— 用于查询模型的最大上下文窗口,显示在对话统计行
 // (分子 = 当前上下文 = promptTokens,分母 = 模型 contextLimit)。
-// 数据源 https://models.dev/api.json,缓存到 pc-data,7 天 TTL,fetch 失败降级为空(不报错)。
+// 数据源 https://models.dev/api.json,缓存到 pc-data,1 天 TTL,fetch 失败降级为空(不报错)。
 // 策略参考 opencode 的 models-dev.ts:磁盘缓存 + 原子写(tmp→rename)+ 失败用旧缓存。
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_TTL_MS = 24 * 60 * 60 * 1000; // 1 天

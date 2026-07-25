@@ -51,12 +51,12 @@ function timeReminderContent(current: Message, previous?: Message) {
   const timeText = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(currentTime);
   if (!previous) return `<time_reminder>Current time: ${weekday}, ${timeText}</time_reminder>`;
   const gapSeconds = Math.floor((Date.parse(current.createdAt) - Date.parse(previous.createdAt)) / 1000);
-  if (gapSeconds <= 3600) return "";
-  const gapText = gapSeconds < 3600
-    ? `${Math.floor(gapSeconds / 60)} min`
-    : gapSeconds < 86400
-      ? `${Math.floor(gapSeconds / 3600)} h`
-      : `${Math.floor(gapSeconds / 86400)} d`;
+  // createdAt 不可解析时 gapSeconds 为 NaN(NaN<=3600 为 false),原实现会输出 "NaN d",
+  // 用否定式条件一并挡掉;间隔 <=1h 不提醒,故不存在分钟级分支。
+  if (!(gapSeconds > 3600)) return "";
+  const gapText = gapSeconds < 86400
+    ? `${Math.floor(gapSeconds / 3600)} h`
+    : `${Math.floor(gapSeconds / 86400)} d`;
   return `<time_reminder>Current time: ${weekday}, ${timeText} (${gapText} since last message)</time_reminder>`;
 }
 

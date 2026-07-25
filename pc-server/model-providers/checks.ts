@@ -270,7 +270,7 @@ async function readProviderTestStream(response: Response, providerItem: Provider
       return await Promise.race([
         reader.read(),
         new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("流式测试超时：10 分钟内没有收到供应商的 SSE 数据")), timeoutMs);
+          timeout = setTimeout(() => reject(new Error("流式测试超时：2 分钟内没有收到供应商的 SSE 数据")), timeoutMs);
         }),
       ]);
     } finally {
