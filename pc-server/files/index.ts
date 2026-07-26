@@ -1,7 +1,7 @@
 // files/index.ts — 文件上传、OCR、文档解析
 // 纪律：负责文档解析与文件元数据读取，不直接修改业务状态。
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { StoredFile, XmlToken, MupdfModule } from "../foundation/types";
@@ -424,8 +424,54 @@ export function extractStoredFileTextSync(entry: StoredFile): string {
   return "";
 }
 
-// Full async version, used only by the upload endpoint. Adds PDF handling on top of the
-// sync formats. Run once at upload time and cache into entry.extractedText.
+// ── 1-7:抽取全文旁车缓存(files/<id>.extracted.txt)──────────────
+// 抽取全文此前永久驻留 state.json(state.files[].extractedText):几十个大 PDF 即可把
+// 账本推到几十 MB,而流式期间仍有 200ms 节流全量重写——"100MB state.json 事故"的
+// 结构性残余。现在全文落旁车文件惰性读取,账本零携带;缓存可再生,丢了就重抽。
+
+export function extractedTextPath(fileId: number): string {
+  return join(filesDir, `${fileId}.extracted.txt`);
+}
+
+/** 读抽取缓存:旁车文件优先;老内存条目(迁移窗口内)兜底。无缓存返回 ""。 */
+export function readExtractedTextSync(entry: StoredFile): string {
+  try {
+    const sidecar = extractedTextPath(entry.id);
+    if (existsSync(sidecar)) return readFileSync(sidecar, "utf8");
+  } catch { /* 读失败按未缓存处理,走降级/后台补抽 */ }
+  return String(entry.extractedText ?? "");
+}
+
+export function writeExtractedTextSidecar(fileId: number, text: string): void {
+  if (!text) return;
+  mkdirSync(filesDir, { recursive: true });
+  const target = extractedTextPath(fileId);
+  const temp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, text);
+    renameSync(temp, target);
+  } catch (err) {
+    console.warn(`[document] 抽取缓存写入失败(下次发送重抽):${target}`, err);
+    try { unlinkSync(temp); } catch { /* 清理尽力 */ }
+  }
+}
+
+/** 3-4:后台补抽。编码热路径未命中缓存时调用——不再同步解析大文件阻塞事件环,
+ *  本次请求降级 fallbackDocumentText,抽取完写旁车,下次发送生效。in-flight 去重。 */
+const inflightExtractions = new Set<number>();
+export function ensureExtractedTextAsync(entry: StoredFile): void {
+  if (inflightExtractions.has(entry.id)) return;
+  inflightExtractions.add(entry.id);
+  void extractStoredFileText(entry)
+    .then((text) => {
+      if (text) writeExtractedTextSidecar(entry.id, text);
+    })
+    .catch((err) => console.warn(`[document] 后台抽取失败 ${entry.fileName}:`, err))
+    .finally(() => inflightExtractions.delete(entry.id));
+}
+
+// Full async version, used by the upload endpoint and background back-fill. Adds PDF
+// handling on top of the sync formats; result is cached into the sidecar file.
 export async function extractStoredFileText(entry: StoredFile): Promise<string> {
   const name = entry.fileName.toLowerCase();
   const mimeValue = entry.mime.toLowerCase();

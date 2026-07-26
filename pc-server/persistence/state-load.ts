@@ -24,6 +24,7 @@ import { normalizeTtsProviders } from "../media/tts";
 import { normalizeAsrProviders } from "../media/asr";
 import { normalizeS3Config, normalizeWebDavConfig } from "../app-config/backup-config";
 import { hashFileSha256, rewritePcFileUrlsDeep } from "../backup/file-refs";
+import { writeExtractedTextSidecar } from "../files/index";
 import { rebuildFtsFromNodeTable } from "../conversations/fts";
 import { normalizeRequestStats } from "../api/logs";
 import { SUNSET_TTS_PROVIDER_IDS, defaultSettings, defaultState } from "../app-config/defaults";
@@ -295,6 +296,7 @@ export function loadState(): State {
   // 已 DB 化,本次启动会话表现为空,但数据仍在 state.json,不丢。
   migrateMemoryFilesIfNeeded(state);
   repairRelocatedFilePaths(state);
+  migrateExtractedTextToSidecars(state);
   migrateFileDedupIfNeeded(state);
   sweepStaleStateTempFiles(); // 1-4:此刻本进程尚未开始任何原子写,清扫安全
   return state;
@@ -322,6 +324,22 @@ export function repairRelocatedFilePathsIn(files: StoredFile[], filesDirPath: st
 
 function repairRelocatedFilePaths(stateObj: State): number {
   return repairRelocatedFilePathsIn(stateObj.files, filesDir);
+}
+
+/** 1-7:存量账本里的抽取全文迁到旁车文件。幂等(迁完字段即删,重跑零工作量),
+ *  无需迁移标记;bootstrap 尾部 saveState 落盘瘦身结果。extractedAt 一并清除(已废弃)。 */
+function migrateExtractedTextToSidecars(stateObj: State): void {
+  let moved = 0;
+  for (const f of stateObj.files) {
+    const legacy = f as StoredFile & { extractedAt?: number };
+    if (typeof legacy.extractedText === "string" && legacy.extractedText) {
+      writeExtractedTextSidecar(f.id, legacy.extractedText);
+      moved++;
+    }
+    delete legacy.extractedText;
+    delete legacy.extractedAt;
+  }
+  if (moved > 0) console.log(`[files] 抽取全文迁出账本:${moved} 条已落旁车缓存`);
 }
 
 export const FILE_DEDUP_MIGRATION = "file-dedup-2.0";

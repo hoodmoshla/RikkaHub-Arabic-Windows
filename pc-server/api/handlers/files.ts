@@ -8,7 +8,7 @@ import { extname, join } from "node:path";
 import type { StoredFile } from "../../foundation/types";
 import { filesDir } from "../../foundation/paths";
 import { saveState, state } from "../../persistence/json-store";
-import { extractStoredFileText } from "../../files/index";
+import { extractStoredFileText, writeExtractedTextSidecar } from "../../files/index";
 import { error, json, mime } from "../request";
 
 export async function handleFileRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
@@ -21,11 +21,9 @@ export async function handleFileRoutes(request: Request, _url: URL, path: string
         await Bun.write(target, file);
         const entry: StoredFile = { id: fileId, path: target, fileName: file.name, mime: file.type || "application/octet-stream", size: file.size };
         const t0 = Date.now();
+        // 1-7:抽取全文写旁车文件而非 state 条目,state.json 不再随大文档膨胀。
         const extractedText = await extractStoredFileText(entry);
-        if (extractedText) {
-          entry.extractedText = extractedText;
-          entry.extractedAt = Date.now();
-        }
+        if (extractedText) writeExtractedTextSidecar(fileId, extractedText);
         console.log(`[upload] ${entry.fileName} (${(file.size / 1024).toFixed(1)} KB) extracted ${extractedText.length} chars in ${Date.now() - t0}ms`);
         state.files.push(entry);
         return {
@@ -34,7 +32,7 @@ export async function handleFileRoutes(request: Request, _url: URL, path: string
           fileName: entry.fileName,
           mime: entry.mime,
           size: entry.size,
-          extractedTextLength: entry.extractedText?.length ?? 0,
+          extractedTextLength: extractedText.length,
         };
       }),
     );

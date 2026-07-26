@@ -5,9 +5,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { ApiMessage, Assistant, JsonValue, Message, MessagePart, Model, Provider, ToolOutputEntry } from "../foundation/types";
 import { id, isRecord } from "../foundation/utils";
-import { extractStoredFileTextSync, fallbackDocumentText } from "../files/index";
+import { ensureExtractedTextAsync, fallbackDocumentText, readExtractedTextSync } from "../files/index";
 import { parseToolInput, resolvedToolOutput } from "../tools/format";
-import { scheduleThrottledSaveState, state } from "../persistence/json-store";
+import { state } from "../persistence/json-store";
 
 export function fileEntryFromApiUrl(url: string) {
   const match = url.match(/^\/api\/files\/(\d+)\/content(?:\?.*)?$/) ?? url.match(/^\/files\/(\d+)\/content(?:\?.*)?$/);
@@ -73,19 +73,10 @@ export function contentPartsForApi(parts: MessagePart[], targetModel?: Model) {
       const fileName = String(part.fileName ?? "document");
       const url = String(part.url ?? "");
       const entry = fileEntryFromApiUrl(url);
-      // Match Android's DocumentAsPromptTransformer: extract text on demand if not cached.
-      let extractedText = String(entry?.extractedText ?? "").trim();
-      if (!extractedText && entry) {
-        const fresh = extractStoredFileTextSync(entry);
-        if (fresh) {
-          extractedText = fresh;
-          // Cache for future requests (matches Android reading file on each send,
-          // but avoids re-parsing the same file repeatedly).
-          entry.extractedText = fresh;
-          entry.extractedAt = Date.now();
-          scheduleThrottledSaveState();
-        }
-      }
+      // 3-4:只读旁车缓存,未命中降级 fallback 并后台补抽(此前同步解析大 PDF
+      // 会把整个后端阻塞数秒,其他会话的流式一起冻结)。
+      const extractedText = entry ? readExtractedTextSync(entry).trim() : "";
+      if (!extractedText && entry) ensureExtractedTextAsync(entry);
       result.push({
         type: "text",
         text: extractedText
@@ -175,16 +166,9 @@ export function claudeBlocksFromUiParts(parts: ToolOutputEntry[]) {
       const fileName = String(part.fileName ?? "document");
       const url = String(part.url ?? "");
       const entry = fileEntryFromApiUrl(url);
-      let extractedText = String(entry?.extractedText ?? "").trim();
-      if (!extractedText && entry) {
-        const fresh = extractStoredFileTextSync(entry);
-        if (fresh) {
-          extractedText = fresh;
-          entry.extractedText = fresh;
-          entry.extractedAt = Date.now();
-          scheduleThrottledSaveState();
-        }
-      }
+      // 3-4:同上,只读缓存+后台补抽。
+      const extractedText = entry ? readExtractedTextSync(entry).trim() : "";
+      if (!extractedText && entry) ensureExtractedTextAsync(entry);
       blocks.push({
         type: "text",
         text: extractedText
@@ -801,16 +785,9 @@ export function responseApiDocumentPart(part: Record<string, JsonValue>) {
   const fileName = String(part.fileName ?? "document");
   const url = String(part.url ?? "");
   const entry = fileEntryFromApiUrl(url);
-  let extractedText = String(entry?.extractedText ?? "").trim();
-  if (!extractedText && entry) {
-    const fresh = extractStoredFileTextSync(entry);
-    if (fresh) {
-      extractedText = fresh;
-      entry.extractedText = fresh;
-      entry.extractedAt = Date.now();
-      scheduleThrottledSaveState();
-    }
-  }
+  // 3-4:同上,只读缓存+后台补抽。
+  const extractedText = entry ? readExtractedTextSync(entry).trim() : "";
+  if (!extractedText && entry) ensureExtractedTextAsync(entry);
   return responseApiTextPart(
     extractedText ? documentPromptText(fileName, extractedText) : fallbackDocumentText({ fileName, url, entry: entry ?? null }),
     "user",

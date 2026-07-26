@@ -3,6 +3,7 @@
 // 部分辅助暂经 ../server 导入，3.5 拆 api/ 时收敛。
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { writeExtractedTextSidecar } from "../files/index";
 import { dirname, extname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import type { AssistantMemory, Conversation, JsonValue, Message, MessageNode, MessagePart, State, StoredFile } from "../foundation/types";
@@ -259,8 +260,12 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
           fileName: meta?.fileName ?? entry,
           mime: meta?.mime ?? guessMimeFromExt(ext),
           size: meta?.size ?? statSync(srcPath).size,
-          extractedText: meta?.extractedText,
         });
+        // 1-7:老备份元数据携带的抽取全文落旁车缓存,不进账本;新备份不含此字段,
+        // 恢复后按需后台重抽。
+        if (typeof meta?.extractedText === "string" && meta.extractedText) {
+          writeExtractedTextSidecar(newId, meta.extractedText);
+        }
         filesImported += 1;
         return newId;
       };

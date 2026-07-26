@@ -260,8 +260,9 @@ export interface StoredFile {
   fileName: string;
   mime: string;
   size: number;
+  /** 1-7:仅出现在老备份 zip 元数据与迁移窗口内;运行时 state 不携带,
+   *  抽取全文在 files/<id>.extracted.txt 旁车缓存(可再生)。 */
   extractedText?: string;
-  extractedAt?: number;
   /** 仅存在于备份 zip 的元数据里:zip 内 upload/ 的实际文件名(导出端去重/重名规避后),
    *  恢复端据此把字节精确回链到本条目的原 id。运行时 state 中不携带。 */
   backupName?: string;
