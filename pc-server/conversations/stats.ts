@@ -7,7 +7,10 @@ import { state } from "../persistence/json-store";
 import { flushConvDirtyNow, getConversationsDb, loadConversationNodesFromDb } from "./index";
 import { listAllConversationMetas } from "./read-queries";
 
-export function computeStats() {
+// 2-4:此前同步遍历全部会话×全部节点(JSON.parse 每行),5k 会话级别的库单次请求
+// 阻塞事件循环数秒,期间所有流式冻结。改 async 分片:每 50 个会话 await 让出一次,
+// 统计口径不变(SQL 侧聚合需在 SQL 里复刻 textFromParts 的 parts 解析,脆弱不取)。
+export async function computeStats() {
   const daily = new Map<string, DailyStat>();
   let userMessages = 0;
   let assistantMessages = 0;
@@ -32,7 +35,9 @@ export function computeStats() {
   flushConvDirtyNow();
   const statsDb = getConversationsDb();
   const statsMetas = statsDb ? listAllConversationMetas(statsDb) : [];
+  let processed = 0;
   for (const conversation of statsMetas) {
+    if (++processed % 50 === 0) await Bun.sleep(0);
     const conversationDate = dateKey(conversation.createAt);
     const row = daily.get(conversationDate) ?? { date: conversationDate, messages: 0, conversations: 0, characters: 0 };
     row.conversations += 1;
