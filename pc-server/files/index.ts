@@ -377,10 +377,9 @@ export function extractEpubFallback(entries: Array<{ name: string; data: Buffer 
     .join("\n\n");
 }
 
-// Synchronous text extraction for the non-PDF formats. The three on-demand call sites
-// (contentPartsForApi / Claude blocks / responses) stay sync and use this to back-fill
-// extractedText for legacy entries; PDFs there fall back to a "[Document]" prompt.
-export function extractStoredFileTextSync(entry: StoredFile): string {
+// 非 PDF 格式的同步抽取,仅供 extractStoredFileText(上传路径)与 ensureExtractedTextAsync
+// (后台补抽)内部使用;编码热路径只读旁车缓存,不再直接调它(1-7/3-4)。
+function extractStoredFileTextSync(entry: StoredFile): string {
   const name = entry.fileName.toLowerCase();
   const mimeValue = entry.mime.toLowerCase();
   const size = getStoredFileSize(entry);

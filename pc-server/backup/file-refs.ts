@@ -9,10 +9,6 @@ import type { JsonValue } from "../foundation/types";
 
 const PC_FILE_URL_RE = /\/api\/files\/(\d+)\/content/g;
 
-export function hashBytesSha256(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 // 5-7:分块流式哈希。此前 readFileSync 整读,单附件 >2GiB 撞 Node Buffer 上限直接抛错。
 export function hashFileSha256(path: string): string | null {
   try {
