@@ -80,10 +80,9 @@ export function DonateSection() {
 
 export function AboutSection() {
   const { t } = useTranslation();
-  // Hard-coded current version — must match pc-server/server.ts:APP_VERSION and
-  // web-ui/src-tauri/tauri.conf.json:version. The update checker compares this against
-  // the latest GitHub release.
-  const APP_VERSION = "1.4.1";
+  // 版本号由 pc-server/scripts/bump-version.ts 统一改写(四处之一),
+  // 勿手改;CI 的 check-version-sync.ts 校验四处一致。
+  const APP_VERSION = "1.5.0";
 
   const [checking, setChecking] = React.useState(false);
   const [updateInfo, setUpdateInfo] = React.useState<UpdateInfo | null>(null);

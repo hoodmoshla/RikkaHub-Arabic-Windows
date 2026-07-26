@@ -1,12 +1,13 @@
 // scripts/bump-version.ts — 版本号单一修改入口（N-6）
 // 用法：bun run version:bump 1.5.0（在 pc-server/ 下）
 //
-// 版本号需要出现在三处（各有硬性理由，无法在构建/运行时互相派生）：
-//   - pc-server/updates/index.ts APP_VERSION：更新检查与关于页，编译进单 exe；
+// 版本号需要出现在四处（各有硬性理由，无法在构建/运行时互相派生）：
+//   - pc-server/updates/index.ts APP_VERSION：更新检查接口，编译进单 exe；
 //     Docker 构建只 COPY pc-server/，无法跨包 import web-ui 侧文件。
 //   - web-ui/src-tauri/tauri.conf.json：Tauri 安装包版本。
 //   - web-ui/src-tauri/Cargo.toml：Rust crate 版本（Tauri 构建元数据）。
-// 本脚本把"三处人工同步"收敛为"一条命令"；漏跑脚本手改单处时，
+//   - web-ui/app/components/settings/about.tsx：关于页展示的前端版本号。
+// 本脚本把"四处人工同步"收敛为"一条命令"；漏跑脚本手改单处时，
 // CI 的 check-version-sync.ts 会红灯拦截。
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -34,6 +35,13 @@ const targets: Array<{ file: string; pattern: RegExp; replacement: string }> = [
     file: join(root, "web-ui", "src-tauri", "Cargo.toml"),
     pattern: /^version = "[^"]+"$/m,
     replacement: `version = "${newVersion}"`,
+  },
+  {
+    // 关于页展示的前端版本号。SPA 与 pc-server 分属两个包,构建期无法互相 import,
+    // 运行时从 /api/health 取又引入异步闪烁,故同样收敛到本脚本统一改写。
+    file: join(root, "web-ui", "app", "components", "settings", "about.tsx"),
+    pattern: /const APP_VERSION = "[^"]+";/,
+    replacement: `const APP_VERSION = "${newVersion}";`,
   },
 ];
 

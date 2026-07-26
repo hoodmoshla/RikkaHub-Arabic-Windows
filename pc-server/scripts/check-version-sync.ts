@@ -1,6 +1,7 @@
 // scripts/check-version-sync.ts — 版本一致性检查（N-6）
-// 三处版本号必须一致：pc-server/updates/index.ts 的 APP_VERSION、
-// web-ui/src-tauri/tauri.conf.json、web-ui/src-tauri/Cargo.toml。
+// 四处版本号必须一致：pc-server/updates/index.ts 的 APP_VERSION、
+// web-ui/src-tauri/tauri.conf.json、web-ui/src-tauri/Cargo.toml、
+// web-ui/app/components/settings/about.tsx（关于页展示值）。
 // 更新检查用 APP_VERSION 对比 GitHub release，Tauri 安装包版本取自 tauri.conf.json/Cargo.toml，
 // 任何一处漏改都会导致更新提示错乱或安装包版本标错。CI 中运行，漏改直接红灯。
 import { readFileSync } from "node:fs";
@@ -16,10 +17,14 @@ const tauriVersion = (JSON.parse(readFileSync(join(root, "web-ui", "src-tauri", 
 const cargoSource = readFileSync(join(root, "web-ui", "src-tauri", "Cargo.toml"), "utf8");
 const cargoVersion = cargoSource.match(/^version = "([^"]+)"/m)?.[1];
 
+const aboutSource = readFileSync(join(root, "web-ui", "app", "components", "settings", "about.tsx"), "utf8");
+const aboutVersion = aboutSource.match(/const APP_VERSION = "([^"]+)"/)?.[1];
+
 const versions: Record<string, string | undefined> = {
   "pc-server/updates/index.ts APP_VERSION": appVersion,
   "web-ui/src-tauri/tauri.conf.json": tauriVersion,
   "web-ui/src-tauri/Cargo.toml": cargoVersion,
+  "web-ui/app/components/settings/about.tsx": aboutVersion,
 };
 
 const values = Object.values(versions);
