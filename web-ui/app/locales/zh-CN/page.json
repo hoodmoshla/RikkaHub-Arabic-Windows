@@ -28,6 +28,9 @@
       "no_message_description": "当前会话还没有消息"
     },
     "welcome_prompt": "有什么可以帮助你的？",
+    "context_cleared": "上下文已清除",
+    "context_cleared_restore": "点击恢复上下文",
+    "clear_context_failed": "清除上下文失败",
     "share": {
       "cancel": "取消选择",
       "select_all": "全选 / 取消全选",

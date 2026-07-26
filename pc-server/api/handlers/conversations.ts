@@ -7,6 +7,7 @@ import { applyPlaceholders, id, message, textFromParts } from "../../foundation/
 import { saveState, state } from "../../persistence/json-store";
 import {
   getConversation,
+  nextTruncateIndex,
   persistConversation,
   toConversationDto,
   toListDto,
@@ -168,6 +169,18 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       saveState();
       broadcastConversation(conversation);
       return json({ status: "updated" });
+    }
+    // 产品决策①(2-2):"清除上下文"落地。对齐安卓切换语义:无显式 index 时,已截到
+    // 末尾 → 撤销(-1),否则截到当前节点数(之前的历史不进上下文,编码侧 applyTruncateIndex
+    // 消费)。body.index 显式指定(-1=撤销)供前端分割线点击恢复用。快照广播回流刷新分割线。
+    if (sub === "truncate" && request.method === "POST") {
+      const body = await readJson<{ index?: number }>(request);
+      conversation.truncateIndex = nextTruncateIndex(conversation.truncateIndex, conversation.messages.length, body.index);
+      conversation.updateAt = Date.now();
+      persistConversation(conversation);
+      saveState();
+      broadcastConversation(conversation);
+      return json({ status: "updated", truncateIndex: conversation.truncateIndex });
     }
     if (sub === "title" && request.method === "POST") {
       const body = await readJson<{ title: string }>(request);

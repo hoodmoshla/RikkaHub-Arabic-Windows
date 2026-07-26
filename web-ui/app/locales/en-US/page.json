@@ -27,6 +27,9 @@
       "no_message_title": "No messages yet",
       "no_message_description": "This conversation does not have any messages yet"
     },
+    "context_cleared": "Context cleared",
+    "context_cleared_restore": "Click to restore context",
+    "clear_context_failed": "Failed to clear context",
     "welcome_prompt": "How can I help you?",
     "share": {
       "cancel": "Cancel selection",

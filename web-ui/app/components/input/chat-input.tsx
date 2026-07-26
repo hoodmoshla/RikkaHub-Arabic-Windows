@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { ArrowUp, File, FileDown, Image, LoaderCircle, Mic, Plus, Scissors, Sparkles, Square, Undo2, Video, X, Zap } from "lucide-react";
+import { ArrowUp, Eraser, File, FileDown, Image, LoaderCircle, Mic, Plus, Scissors, Sparkles, Square, Undo2, Video, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -39,6 +39,8 @@ export interface ChatInputProps {
   onSuggestionClick?: (suggestion: string) => void;
   onExportConversation?: (includeReasoning: boolean) => void;
   onCompressConversation?: () => void;
+  /** 产品决策①:安卓"清除上下文"对齐(切换语义,再点一次撤销)。 */
+  onClearContext?: () => void;
   // 提示词优化时,返回最近几轮对话的纯文本作为上下文(让优化模型理解模糊指代)。
   // 无对话(首条消息)时返回空串。只在用户点击"优化提示词"时调用。
   getOptimizeContext?: () => string;
@@ -136,6 +138,7 @@ function ChatInputInner({
   onSuggestionClick,
   onExportConversation,
   onCompressConversation,
+  onClearContext,
   getOptimizeContext,
   className,
 }: ChatInputProps) {
@@ -787,6 +790,16 @@ function ChatInputInner({
                     >
                       <Scissors className="size-4" />
                       {t("compress_history")}
+                    </DropdownMenuItem>
+                  )}
+                  {onClearContext && (
+                    <DropdownMenuItem
+                      onClick={() => {
+                        onClearContext();
+                      }}
+                    >
+                      <Eraser className="size-4" />
+                      {t("clear_context")}
                     </DropdownMenuItem>
                   )}
                 </DropdownMenuContent>

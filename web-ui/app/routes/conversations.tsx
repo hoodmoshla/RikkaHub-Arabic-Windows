@@ -680,6 +680,7 @@ interface ChatInputAreaProps {
   onStop?: () => Promise<void> | void;
   onExportConversation?: (includeReasoning: boolean) => void;
   onCompressConversation?: () => void;
+  onClearContext?: () => void;
   getOptimizeContext?: () => string;
 }
 
@@ -696,6 +697,7 @@ const ChatInputArea = React.memo(function ChatInputArea({
   onStop,
   onExportConversation,
   onCompressConversation,
+  onClearContext,
   getOptimizeContext,
 }: ChatInputAreaProps) {
   const setText = useChatInputStore((state) => state.setText);
@@ -748,10 +750,30 @@ const ChatInputArea = React.memo(function ChatInputArea({
       onStop={onStop}
       onExportConversation={onExportConversation}
       onCompressConversation={onCompressConversation}
+      onClearContext={onClearContext}
       getOptimizeContext={getOptimizeContext}
     />
   );
 });
+
+/** 产品决策①:"上下文已清除"分割线。点击 = 恢复上下文(truncateIndex 置 -1)。 */
+function ClearContextDivider({ onRestore, className }: { onRestore: () => void; className?: string }) {
+  const { t } = useTranslation("page");
+  return (
+    <button
+      type="button"
+      onClick={onRestore}
+      title={t("conversations.context_cleared_restore")}
+      className={cn("group mx-auto flex w-full max-w-3xl items-center gap-3 px-4 py-1", className)}
+    >
+      <span className="h-px flex-1 bg-border transition-colors group-hover:bg-primary/40" />
+      <span className="text-xs text-muted-foreground transition-colors group-hover:text-foreground">
+        {t("conversations.context_cleared")}
+      </span>
+      <span className="h-px flex-1 bg-border transition-colors group-hover:bg-primary/40" />
+    </button>
+  );
+}
 
 const ConversationTimeline = React.memo(
   ({
@@ -765,6 +787,8 @@ const ConversationTimeline = React.memo(
     conversationAssistantId,
     conversationTitle,
     contentClassName,
+    truncateIndex,
+    onRestoreContext,
     onEdit,
     onDelete,
     onFork,
@@ -783,6 +807,9 @@ const ConversationTimeline = React.memo(
     conversationAssistantId: string | null;
     conversationTitle?: string;
     contentClassName?: string;
+    /** 产品决策①:该下标之前的节点不进上下文;<=0 视为未截断。 */
+    truncateIndex: number;
+    onRestoreContext: () => void;
     onEdit: (message: MessageDto) => void | Promise<void>;
     onDelete: (messageId: string) => Promise<void>;
     onFork: (messageId: string) => Promise<void>;
@@ -1008,7 +1035,12 @@ const ConversationTimeline = React.memo(
             increaseViewportBy={800}
             components={{
               Header: () => <div className="h-4" />,
-              Footer: () => <div className="h-4" />,
+              Footer: () =>
+                truncateIndex >= selectedNodeMessages.length && truncateIndex > 0 ? (
+                  <ClearContextDivider onRestore={onRestoreContext} className="pb-4" />
+                ) : (
+                  <div className="h-4" />
+                ),
             }}
             itemContent={(index, { node, message }) => {
               const model = message.modelId
@@ -1023,6 +1055,9 @@ const ConversationTimeline = React.memo(
                     !knownMessageIds.has(message.id) && "rikkahub-animate-fade-in-up",
                   )}
                 >
+                  {index === truncateIndex && truncateIndex > 0 ? (
+                    <ClearContextDivider onRestore={onRestoreContext} className="pb-3" />
+                  ) : null}
                   <ChatMessage
                     node={node}
                     message={message}
@@ -1520,6 +1555,26 @@ function ConversationsPageInner() {
     setCompressDialogOpen(true);
   }, [activeId]);
 
+  // 产品决策①:清除上下文(安卓切换语义,再点一次撤销);分割线点击 = 显式恢复(-1)。
+  // 后端广播会话快照,SSE 回流刷新 detail.truncateIndex 与分割线,无需本地乐观更新。
+  const handleClearContext = React.useCallback(async () => {
+    if (!activeId) return;
+    try {
+      await api.post(`conversations/${encodeURIComponent(activeId)}/truncate`, {});
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("conversations.clear_context_failed"));
+    }
+  }, [activeId, t]);
+
+  const handleRestoreContext = React.useCallback(async () => {
+    if (!activeId) return;
+    try {
+      await api.post(`conversations/${encodeURIComponent(activeId)}/truncate`, { index: -1 });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("conversations.clear_context_failed"));
+    }
+  }, [activeId, t]);
+
   // 提示词优化时提取最近 3 轮对话(6 条消息)的纯文本,让优化模型理解"那个""上次的"等指代。
   // 只取 text part —— 图片(image)、文件(document)、工具调用(tool)、思维链(reasoning)全部被
   // filter 排除,不会发给优化模型。截断到 4000 字符避免吃掉 token 预算。首条消息时返回空。
@@ -1716,6 +1771,8 @@ function ConversationsPageInner() {
               settings={settings}
               conversationAssistantId={detail?.assistantId ?? null}
               conversationTitle={detail?.title ?? ""}
+              truncateIndex={detail?.truncateIndex ?? -1}
+              onRestoreContext={handleRestoreContext}
               onEdit={handleStartEdit}
               onDelete={handleDeleteMessage}
               onFork={handleForkMessage}
@@ -1766,6 +1823,9 @@ function ConversationsPageInner() {
           }
           onCompressConversation={
             detail && detail.messages.length > 0 ? handleCompressConversation : undefined
+          }
+          onClearContext={
+            detail && detail.messages.length > 0 ? () => void handleClearContext() : undefined
           }
           getOptimizeContext={getOptimizeContext}
         />

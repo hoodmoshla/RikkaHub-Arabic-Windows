@@ -560,6 +560,15 @@ export function toMessageNodeDtos(nodes: MessageNode[]): MessageNodeDto[] {
 }
 
 /** 把 Conversation 转成含生成状态快照的 DTO。 */
+/** 产品决策①(2-2):truncate 端点的下一状态。显式 index 时钳制到 [-1, nodeCount];
+ *  否则安卓切换语义:已截到末尾 → 撤销(-1),否则截到当前节点数。 */
+export function nextTruncateIndex(current: number, nodeCount: number, explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) {
+    return Math.max(-1, Math.min(nodeCount, Math.trunc(explicit)));
+  }
+  return current === nodeCount ? -1 : nodeCount;
+}
+
 export function toConversationDto(conversation: Conversation, isGenerating: boolean): ConversationDto {
   return { ...conversation, messages: toMessageNodeDtos(conversation.messages), isGenerating };
 }

@@ -116,7 +116,7 @@ describe("安卓独有字段透传(产品决策②)", () => {
       const importRes = await fetch(`${base}/api/data/import`, {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream", "X-Filename": "backup_android.zip" },
-        body: zip,
+        body: new Uint8Array(zip),
       });
       expect(importRes.status).toBe(200);
 
