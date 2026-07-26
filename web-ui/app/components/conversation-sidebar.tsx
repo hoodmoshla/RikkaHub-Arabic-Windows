@@ -82,6 +82,7 @@ import { getAssistantDisplayName } from "~/lib/display";
 import { cn } from "~/lib/utils";
 import { refreshSettingsStore } from "~/lib/settings-sync";
 import { clearWebAuthToken } from "~/services/api";
+import { confirmDialog } from "~/stores/confirm-store";
 import api from "~/services/api";
 import type { AssistantAvatar, AssistantProfile, AssistantTag, ConversationListDto } from "~/types";
 
@@ -483,9 +484,9 @@ const ConversationListRow = React.memo(
                     <DropdownMenuItem
                       variant="destructive"
                       disabled={pendingAction !== null}
-                      onSelect={(event) => {
+                      onSelect={async (event) => {
                         event.preventDefault();
-                        if (!window.confirm(t("conversation_sidebar.delete_confirm"))) {
+                        if (!(await confirmDialog({ title: t("conversation_sidebar.delete_confirm"), danger: true }))) {
                           return;
                         }
                         void runAction(
@@ -766,9 +767,10 @@ export const ConversationSidebar = React.memo(
     const handleBatchDelete = React.useCallback(async () => {
       if (!onDeleteMany || selectedConversationIds.length === 0) return;
       if (
-        !window.confirm(
-          t("conversation_sidebar.batch_delete_confirm", { count: selectedConversationIds.length }),
-        )
+        !(await confirmDialog({
+          title: t("conversation_sidebar.batch_delete_confirm", { count: selectedConversationIds.length }),
+          danger: true,
+        }))
       )
         return;
       setBatchDeleting(true);

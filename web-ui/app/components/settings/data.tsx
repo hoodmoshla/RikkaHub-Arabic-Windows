@@ -22,6 +22,7 @@ import { Separator } from "~/components/ui/separator";
 import { Switch } from "~/components/ui/switch";
 import { cn } from "~/lib/utils";
 import api, { appendWebAuthQuery } from "~/services/api";
+import { confirmDialog } from "~/stores/confirm-store";
 import type { Settings } from "~/types";
 import { SectionHeader } from "~/components/settings/shared";
 
@@ -221,6 +222,9 @@ export function DataSection({
         timeout: false,
       });
       setWebDavItems(result.items);
+    } catch (error) {
+      // 7-3:与 refreshS3List 对齐,失败不再静默
+      toast.error(error instanceof Error ? error.message : t("settings:data.webdav_list_failed"));
     } finally {
       setWebDavBusy("");
     }
@@ -273,7 +277,7 @@ export function DataSection({
   };
 
   const restoreWebDav = async (item: WebDavBackupItem) => {
-    if (!window.confirm(t("settings:data.restore_confirm", { name: item.displayName }))) return;
+    if (!(await confirmDialog({ title: t("settings:data.restore_confirm", { name: item.displayName }), danger: true }))) return;
     setWebDavBusy(`restore:${item.displayName}`);
     setWebDavBackupProgress({ message: t("settings:data.preparing"), percent: 0 });
     try {
@@ -297,7 +301,7 @@ export function DataSection({
   };
 
   const deleteWebDav = async (item: WebDavBackupItem) => {
-    if (!window.confirm(t("settings:data.delete_confirm", { name: item.displayName }))) return;
+    if (!(await confirmDialog({ title: t("settings:data.delete_confirm", { name: item.displayName }), danger: true }))) return;
     setWebDavBusy(`delete:${item.displayName}`);
     try {
       const result = await api.post<{ items: WebDavBackupItem[] }>(
@@ -393,7 +397,7 @@ export function DataSection({
     }
   };
   const restoreS3 = async (item: S3BackupItem) => {
-    if (!window.confirm(t("settings:data.s3_restore_confirm", { name: item.displayName }))) return;
+    if (!(await confirmDialog({ title: t("settings:data.s3_restore_confirm", { name: item.displayName }), danger: true }))) return;
     setS3Busy(`restore:${item.displayName}`);
     setS3BackupProgress({ message: t("settings:data.preparing"), percent: 0 });
     try {
@@ -414,7 +418,7 @@ export function DataSection({
     }
   };
   const deleteS3 = async (item: S3BackupItem) => {
-    if (!window.confirm(t("settings:data.delete_confirm", { name: item.displayName }))) return;
+    if (!(await confirmDialog({ title: t("settings:data.delete_confirm", { name: item.displayName }), danger: true }))) return;
     setS3Busy(`delete:${item.displayName}`);
     try {
       const result = await api.post<{ items: S3BackupItem[] }>(
@@ -547,7 +551,7 @@ export function DataSection({
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    if (!window.confirm(t("settings:data.import_confirm"))) return;
+    if (!(await confirmDialog({ title: t("settings:data.import_confirm"), danger: true }))) return;
 
     setImporting(true);
     setImportPhase("uploading");

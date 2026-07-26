@@ -14,6 +14,7 @@
     "copy_tool": "工具",
     "regenerate_from_user_confirm": "将从这条用户消息重新生成，确认继续吗？",
     "delete_confirm": "确认删除这条消息吗？",
+    "action_failed": "操作失败，请稍后重试",
     "copy_message": "复制消息",
     "copy": "复制",
     "copied": "已复制",

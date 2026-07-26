@@ -25,6 +25,7 @@ import { StatsSection, type StatsPayload } from "~/components/settings/stats";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
 import { useSettingsStore } from "~/stores/app-store";
+import { confirmDialog } from "~/stores/confirm-store";
 import type { Settings } from "~/types";
 
 type Section =
@@ -108,7 +109,7 @@ export default function SettingsPage() {
   }, [section]);
 
   const clearLogs = React.useCallback(async () => {
-    if (!window.confirm(t("settings:logs.clear_confirm"))) return;
+    if (!(await confirmDialog({ title: t("settings:logs.clear_confirm"), danger: true }))) return;
     try {
       await api.delete("logs");
       setLogs([]);

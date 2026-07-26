@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~
 import { Textarea } from "~/components/ui/textarea";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
+import { confirmDialog } from "~/stores/confirm-store";
 import type { SearchServiceOption, Settings } from "~/types";
 import {
   clone,
@@ -394,11 +395,12 @@ export function SearchSection({
   };
   const remove = async () => {
     if (
-      !window.confirm(
-        t("settings:search.delete_confirm", {
+      !(await confirmDialog({
+        title: t("settings:search.delete_confirm", {
           name: textValue(draft.name) || textValue(draft.type),
         }),
-      )
+        danger: true,
+      }))
     )
       return;
     await api.delete(`settings/search/service/${encodeURIComponent(String(draft.id))}`);

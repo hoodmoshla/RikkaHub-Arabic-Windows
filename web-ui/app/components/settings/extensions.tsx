@@ -24,6 +24,7 @@ import { Textarea } from "~/components/ui/textarea";
 import Markdown from "~/components/markdown/markdown";
 import { cn } from "~/lib/utils";
 import api, { appendWebAuthQuery } from "~/services/api";
+import { confirmDialog } from "~/stores/confirm-store";
 import type { AssistantProfile, Settings } from "~/types";
 import {
   clone,
@@ -389,7 +390,8 @@ function McpServerEditor({
     return () => window.clearTimeout(timer);
   }, [draft, headersText, toolsText]);
   const remove = async () => {
-    if (!selected.id || !window.confirm(t("settings:mcp.server.delete_confirm"))) return;
+    if (!selected.id) return;
+    if (!(await confirmDialog({ title: t("settings:mcp.server.delete_confirm"), danger: true }))) return;
     await api.delete(`settings/mcp-server/${encodeURIComponent(String(selected.id))}`);
     setSelectedId("");
     await pullSettings(onSettings);
@@ -1658,7 +1660,8 @@ function SkillsEditor({
     return () => window.clearTimeout(timer);
   }, [content, save]);
   const remove = async () => {
-    if (!selected || !window.confirm(t("settings:mcp.delete_skill_confirm"))) return;
+    if (!selected) return;
+    if (!(await confirmDialog({ title: t("settings:mcp.delete_skill_confirm"), danger: true }))) return;
     await api.delete(`skills/${encodeURIComponent(selected)}`);
     setSelected("");
     setContent("");

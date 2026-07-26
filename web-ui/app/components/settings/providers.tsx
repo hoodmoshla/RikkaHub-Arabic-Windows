@@ -26,6 +26,7 @@ import { ModelEditDialog } from "~/components/model-edit-dialog";
 import { cn } from "~/lib/utils";
 import { openExternal } from "~/lib/external-link";
 import api, { appendWebAuthQuery } from "~/services/api";
+import { confirmDialog } from "~/stores/confirm-store";
 import type { ProviderModel, ProviderProfile, Settings } from "~/types";
 import {
   clone,
@@ -1193,7 +1194,7 @@ export function ProvidersSection({
                 <Button
                   variant="outline"
                   onClick={async () => {
-                    if (!window.confirm(t("settings:providers.delete_confirm", { name: draft.name }))) return;
+                    if (!(await confirmDialog({ title: t("settings:providers.delete_confirm", { name: draft.name }), danger: true }))) return;
                     await api.delete(`settings/provider/${encodeURIComponent(draft.id)}`);
                     const providers = settings.providers.filter((item) => item.id !== draft.id);
                     onSettings({ ...settings, providers });

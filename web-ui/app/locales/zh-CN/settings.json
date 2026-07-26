@@ -705,6 +705,7 @@
     "s3_saved": "S3 配置已保存",
     "s3_autosave_failed": "自动保存 S3 失败",
     "s3_list_failed": "S3 列表失败",
+    "webdav_list_failed": "WebDAV 列表失败",
     "s3_conn_ok": "S3 连接成功",
     "s3_conn_failed": "S3 连接失败",
     "s3_backup_done": "S3 备份完成",

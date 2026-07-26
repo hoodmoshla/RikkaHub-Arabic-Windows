@@ -23,6 +23,7 @@ import { Switch } from "~/components/ui/switch";
 import { Textarea } from "~/components/ui/textarea";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { cn } from "~/lib/utils";
+import { confirmDialog } from "~/stores/confirm-store";
 import type {
   BuiltInTool,
   BuiltInToolType,
@@ -326,8 +327,8 @@ export function ModelEditDialog({
               type="button"
               variant="outline"
               className="text-destructive hover:bg-destructive/10"
-              onClick={() => {
-                if (window.confirm(t("model_edit.delete_confirm", { name: draft.displayName || draft.modelId }))) {
+              onClick={async () => {
+                if (await confirmDialog({ title: t("model_edit.delete_confirm", { name: draft.displayName || draft.modelId }), danger: true })) {
                   onDelete();
                   onOpenChange(false);
                 }

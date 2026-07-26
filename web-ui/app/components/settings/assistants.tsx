@@ -15,6 +15,7 @@ import { Switch } from "~/components/ui/switch";
 import { Textarea } from "~/components/ui/textarea";
 import { UIAvatar } from "~/components/ui/ui-avatar";
 import api from "~/services/api";
+import { confirmDialog } from "~/stores/confirm-store";
 import type { AssistantProfile, ProviderModel, Settings } from "~/types";
 import {
   clone,
@@ -162,11 +163,11 @@ export function AssistantsSection({
     } catch { /* 记忆查询失败按 0 处理 */ }
     let deleteMemories = false;
     if (memoryCount > 0) {
-      if (!window.confirm(t("settings:assistants.delete_confirm_with_memories", { name: nameLabel, n: memoryCount }))) return;
+      if (!(await confirmDialog({ title: t("settings:assistants.delete_confirm_with_memories", { name: nameLabel, n: memoryCount }), danger: true }))) return;
       // 第二步:确定=同时删记忆,取消=保留为孤儿(记忆板块可管理)
-      deleteMemories = window.confirm(t("settings:assistants.delete_memories_confirm", { n: memoryCount }));
+      deleteMemories = await confirmDialog({ title: t("settings:assistants.delete_memories_confirm", { n: memoryCount }), danger: true });
     } else {
-      if (!window.confirm(t("settings:assistants.delete_confirm", { name: nameLabel }))) return;
+      if (!(await confirmDialog({ title: t("settings:assistants.delete_confirm", { name: nameLabel }), danger: true }))) return;
     }
     await api.delete(`settings/assistant/${encodeURIComponent(draft.id)}${deleteMemories ? "?deleteMemories=true" : ""}`);
     const assistants = settings.assistants.filter((item) => item.id !== draft.id);

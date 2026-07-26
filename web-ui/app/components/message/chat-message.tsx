@@ -19,6 +19,8 @@ import { ChatMessageAnnotationsRow } from "./chat-message-annotations";
 import { ChatMessageAvatarRow } from "./chat-message-avatar-row";
 import { MessageParts } from "./message-part";
 import Markdown from "~/components/markdown/markdown";
+import { toast } from "sonner";
+import { confirmDialog } from "~/stores/confirm-store";
 
 interface ChatMessageProps {
   node: MessageNodeDto;
@@ -565,13 +567,16 @@ const ChatMessageActionsRow = React.memo(
       if (!onRegenerate) return;
 
       if (message.role === "USER") {
-        const confirmed = window.confirm(t("chat_message.regenerate_from_user_confirm"));
+        const confirmed = await confirmDialog({ title: t("chat_message.regenerate_from_user_confirm") });
         if (!confirmed) return;
       }
 
       setRegenerating(true);
       try {
         await onRegenerate(message.id);
+      } catch {
+        // 7-3:后端不可达/报错时此前静默复原,用户以为点了没反应
+        toast.error(t("chat_message.action_failed"));
       } finally {
         setRegenerating(false);
       }
@@ -586,22 +591,26 @@ const ChatMessageActionsRow = React.memo(
         setSwitchingBranch(true);
         try {
           await onSelectBranch(node.id, selectIndex);
+        } catch {
+          toast.error(t("chat_message.action_failed"));
         } finally {
           setSwitchingBranch(false);
         }
       },
-      [node.id, node.messages.length, node.selectIndex, onSelectBranch],
+      [node.id, node.messages.length, node.selectIndex, onSelectBranch, t],
     );
 
     const handleDelete = React.useCallback(async () => {
       if (!onDelete) return;
 
-      const confirmed = window.confirm(t("chat_message.delete_confirm"));
+      const confirmed = await confirmDialog({ title: t("chat_message.delete_confirm"), danger: true });
       if (!confirmed) return;
 
       setDeleting(true);
       try {
         await onDelete(message.id);
+      } catch {
+        toast.error(t("chat_message.action_failed"));
       } finally {
         setDeleting(false);
       }
@@ -613,10 +622,12 @@ const ChatMessageActionsRow = React.memo(
       setForking(true);
       try {
         await onFork(message.id);
+      } catch {
+        toast.error(t("chat_message.action_failed"));
       } finally {
         setForking(false);
       }
-    }, [message.id, onFork]);
+    }, [message.id, onFork, t]);
 
     // When THIS row unmounts, only stop playback if WE were the active speaker. With a
     // virtualized list this fires whenever the message scrolls out of view; calling

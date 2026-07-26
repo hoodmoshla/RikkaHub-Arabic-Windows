@@ -24,6 +24,9 @@ import { UpdateDialog, type UpdateInfo } from "./components/update-dialog";
 import { WebAuthGate } from "./components/web-auth-gate";
 import { FontFaceInjector } from "./components/font-face-injector";
 import { openExternal } from "./lib/external-link";
+import { toast } from "sonner";
+import { GlobalConfirmDialog } from "./components/global-confirm-dialog";
+import { useAppErrorsStore } from "./stores/app-errors-store";
 import api from "~/services/api";
 
 const queryClient = new QueryClient();
@@ -200,6 +203,26 @@ function AppContent() {
     return () => document.removeEventListener("click", handler);
   }, []);
 
+  // 7-3:未捕获的 Promise 拒绝一网兜底——toast 提示 + 进错误中心(仅本地聚合)。
+  // 各消息动作已有就地 catch,这里兜的是漏网之鱼,避免"点了没反应"的静默失败。
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (event: PromiseRejectionEvent) => {
+      const message = event.reason instanceof Error ? event.reason.message : String(event.reason);
+      toast.error(message);
+      useAppErrorsStore.getState().reportLocalError({
+        id: crypto.randomUUID(),
+        at: Date.now(),
+        count: 1,
+        severity: "error",
+        domain: "internal",
+        message,
+      });
+    };
+    window.addEventListener("unhandledrejection", handler);
+    return () => window.removeEventListener("unhandledrejection", handler);
+  }, []);
+
   return (
     <ThemeProvider defaultTheme="light">
       <TitleBar />
@@ -209,6 +232,7 @@ function AppContent() {
       <WebAuthGate />
       <FontFaceInjector />
       <Toaster position="top-center" />
+      <GlobalConfirmDialog />
       <SilentUpdateChecker />
     </ThemeProvider>
   );

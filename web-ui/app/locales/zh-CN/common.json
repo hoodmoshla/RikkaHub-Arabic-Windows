@@ -1,4 +1,8 @@
 {
+  "confirm_dialog": {
+    "confirm": "确认",
+    "cancel": "取消"
+  },
   "conversation_sidebar": {
     "today": "今天",
     "yesterday": "昨天",

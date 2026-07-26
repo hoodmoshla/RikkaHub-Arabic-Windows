@@ -20,6 +20,7 @@ import {
 import { Brain, Globe, Bot, X, Check, Loader2 } from "lucide-react";
 import { Textarea } from "~/components/ui/textarea";
 import api from "~/services/api";
+import { confirmDialog } from "~/stores/confirm-store";
 import { toast } from "sonner";
 
 /** 待确认记忆徽章 + 确认弹窗。挂载在输入框卡片右上角(memory/stream SSE 推送的 snapshot)。
@@ -29,7 +30,7 @@ import { toast } from "sonner";
  *  - 顶部三个批量按钮(顺序与单条一致:全局-助手-丢弃)仅对选中项生效;
  *    selected 为空时按钮 disabled —— 强制用户显式选择,防误操作
  *  - 单条卡片同样三个按钮,只作用于该条
- *  - 任何"丢弃"操作(单条或批量)执行前都弹 window.confirm 二次确认(不可逆)
+ *  - 任何"丢弃"操作(单条或批量)执行前都弹全局确认框二次确认(不可逆)
  *  - 保存为助手记忆时,若来源助手已被删除,按钮 disabled + tooltip
  *  - 处理成功后该条从 SSE 推送的 snapshot 中自然消失;selected 会被 useEffect 清理 */
 export function MemoryBadge() {
@@ -82,7 +83,7 @@ export function MemoryBadge() {
     action: "global" | "assistant" | "discard",
     content: string,
   ) => {
-    if (action === "discard" && !window.confirm(t("memory.discard_confirm", { n: 1 }))) return;
+    if (action === "discard" && !(await confirmDialog({ title: t("memory.discard_confirm", { n: 1 }), danger: true }))) return;
     setSaving(pendingId);
     try {
       await api.post(`memory/pending/${encodeURIComponent(pendingId)}`, { action, content });
@@ -104,7 +105,7 @@ export function MemoryBadge() {
   // 批量处理选中项。discard 前二次确认(带选中数)。成功后关弹窗 + 清空 selected。
   const handleBatchSave = async (action: "global" | "assistant" | "discard") => {
     if (selected.size === 0) return;
-    if (action === "discard" && !window.confirm(t("memory.discard_confirm", { n: selected.size }))) return;
+    if (action === "discard" && !(await confirmDialog({ title: t("memory.discard_confirm", { n: selected.size }), danger: true }))) return;
     setSaving("batch");
     try {
       const items = snapshot.pending

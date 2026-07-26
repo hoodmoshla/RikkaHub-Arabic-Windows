@@ -18,6 +18,7 @@ import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { Input } from "~/components/ui/input";
+import { confirmDialog } from "~/stores/confirm-store";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "~/components/ui/dialog";
 
 // 单条记忆:展示 + 行内编辑/删除。变更后后端 broadcast memory SSE,store 自动刷新(无需回调)。
@@ -132,7 +133,7 @@ export function MemorySection({
       setBatchError(t("settings:memory.batch_json_error", { msg: e instanceof Error ? e.message : String(e) }));
       return;
     }
-    if (!window.confirm(t("settings:memory.batch_confirm"))) return;
+    if (!(await confirmDialog({ title: t("settings:memory.batch_confirm"), danger: true }))) return;
     const batchPath = batchTarget === "global" ? "memory/batch/global" : "memory/batch/assistant";
     const body = batchTarget === "global" ? { memories: parsed } : { assistants: parsed };
     try {

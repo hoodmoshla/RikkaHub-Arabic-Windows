@@ -1,4 +1,8 @@
 {
+  "confirm_dialog": {
+    "confirm": "Confirm",
+    "cancel": "Cancel"
+  },
   "conversation_sidebar": {
     "today": "Today",
     "yesterday": "Yesterday",
