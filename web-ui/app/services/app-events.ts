@@ -45,7 +45,15 @@ function dispatch(event: string, data: unknown): void {
   if (REPLAY_EVENTS.has(name)) lastSnapshot.set(name, data);
   const set = listeners.get(name);
   if (!set) return;
-  for (const listener of set) (listener as (d: unknown) => void)(data);
+  for (const listener of set) {
+    // 故障隔离:单个订阅方抛错不得外溢——异常若传进 sse() 读循环会被当作连接错误,
+    // 触发整条共享通道重连,一个域的 bug 连累四个域抖动。
+    try {
+      (listener as (d: unknown) => void)(data);
+    } catch (error) {
+      console.error(`App event listener error (${name}):`, error);
+    }
+  }
 }
 
 /** 建立通道(幂等)。重连由 sse() 内建,连接即重推全部快照 = 状态自动补偿。 */
