@@ -116,6 +116,17 @@ export function clearWebAuthToken(): void {
   window.localStorage.removeItem(WEB_AUTH_STORAGE_KEY);
 }
 
+/** SharedWorker 事件通道用:worker 里没有 localStorage,由页面读出 token 随 hello 传入。 */
+export function getWebAuthToken(): string | null {
+  return getValidWebAuthToken();
+}
+
+/** SharedWorker 事件通道用:worker 收到 401 时由页面代为清 token 并触发密码闸门事件。 */
+export function notifyWebAuthRequired(detail: WebAuthRequiredEventDetail): void {
+  clearWebAuthToken();
+  dispatchWebAuthRequired(detail);
+}
+
 export function onWebAuthRequired(
   listener: (detail: WebAuthRequiredEventDetail) => void,
 ): () => void {
