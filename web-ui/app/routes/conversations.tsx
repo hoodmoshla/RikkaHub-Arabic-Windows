@@ -51,7 +51,7 @@ import {
 } from "~/lib/export-markdown";
 import { refreshSettingsStore } from "~/lib/settings-sync";
 import { cn } from "~/lib/utils";
-import api, { sse } from "~/services/api";
+import api, { ApiError, sse } from "~/services/api";
 import { useChatInputStore, useAppStore } from "~/stores";
 import { WorkbenchHost } from "~/components/workbench/workbench-host";
 import {
@@ -410,74 +410,67 @@ function buildEditedParts(session: EditingSession, draftParts: UIMessagePart[]):
 }
 
 
+// ===== 会话详情内存缓存:切换零加载态的根基 =====
+// 成熟聊天应用切换会话必须瞬时。回访会话首帧直接画缓存内容(不经任何加载态),
+// SSE 连接首帧的全量快照随即静默校正——所有数据写入点 write-through,缓存最多
+// 落后正在别处生成的增量,且在快照到达的一帧内自愈。LRU 上限 20 防内存驻留;
+// 删除会话时显式清除;导入/恢复等换库场景的短暂陈旧同样由快照自愈。
+const detailCache = new Map<string, ConversationDto>();
+const DETAIL_CACHE_MAX = 20;
+
+function rememberDetail(dto: ConversationDto): void {
+  detailCache.delete(dto.id);
+  detailCache.set(dto.id, dto);
+  if (detailCache.size > DETAIL_CACHE_MAX) {
+    const oldest = detailCache.keys().next().value;
+    if (oldest !== undefined) detailCache.delete(oldest);
+  }
+}
+
 function useConversationDetail(activeId: string | null, updateSummary: ConversationSummaryUpdater) {
   const { t } = useTranslation("page");
   const [detail, setDetail] = React.useState<ConversationDto | null>(null);
-  const [detailLoading, setDetailLoading] = React.useState(false);
+  /** SSE 订阅建立中(快照未到)。对外暴露的 detailLoading 只在"且无内容可画"时为真。 */
+  const [subscribing, setSubscribing] = React.useState(false);
   const [detailError, setDetailError] = React.useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = React.useState(0);
+
+  // 切换会话在【render 阶段】同步换内容(React 官方 derived-state 模式):缓存命中则
+  // 首帧就是新会话的完整消息;未命中置 null 等快照。若放到 effect 里,旧会话内容会
+  // 多提交一帧——下游"已知消息集"随之锁错,新会话历史消息整屏误播入场动画。
+  const [renderedForId, setRenderedForId] = React.useState<string | null>(null);
+  if (renderedForId !== activeId) {
+    setRenderedForId(activeId);
+    setDetail(activeId ? (detailCache.get(activeId) ?? null) : null);
+    setDetailError(null);
+  }
 
   const resetDetail = React.useCallback(() => {
     setDetail(null);
     setDetailError(null);
-    setDetailLoading(false);
+    setSubscribing(false);
   }, []);
 
   const refreshDetail = React.useCallback(() => {
     setRefreshNonce((current) => current + 1);
   }, []);
 
-  // 切换会话时旧会话的 detail 必须立即失效:否则加载窗口内 selectedNodeMessages
-  // 仍是旧会话的消息,下游"已知消息集"会被锁成旧会话 id,新会话数据到达后全部
-  // 历史消息被误判为新消息、整屏播入场动画(视觉上就是一次大闪动)。
-  // refreshNonce 触发的同会话重载不清——清了会闪空一帧。
-  const loadedIdRef = React.useRef<string | null>(null);
-
   React.useEffect(() => {
     if (!activeId) {
-      loadedIdRef.current = null;
       resetDetail();
       return;
     }
 
     let mounted = true;
-    if (loadedIdRef.current !== activeId) {
-      loadedIdRef.current = activeId;
-      setDetail(null);
-    }
-    setDetailLoading(true);
+    setSubscribing(true);
     setDetailError(null);
 
     const abortController = new AbortController();
 
-    api
-      .get<ConversationDto>(`conversations/${activeId}`)
-      .then((data) => {
-        if (!mounted) return;
-        setDetail(data);
-        updateSummary(toConversationSummaryUpdate(data));
-      })
-      .catch((err: Error & { status?: number }) => {
-        if (!mounted) return;
-        // Treat 404 as "no conversation yet" rather than a hard error. This commonly happens
-        // right after creating a new conversation on the home page: setActiveId is set before
-        // the first POST /messages completes, so the immediate GET races and 404s.
-        const status =
-          (err as { status?: number }).status ??
-          (err as { response?: { status?: number } }).response?.status;
-        if (status === 404 || /Conversation not found/i.test(err.message ?? "")) {
-          setDetail(null);
-          setDetailError(null);
-          return;
-        }
-        setDetailError(err.message || t("conversations.errors.load_detail_failed"));
-        setDetail(null);
-      })
-      .finally(() => {
-        if (!mounted) return;
-        setDetailLoading(false);
-      });
-
+    // 唯一数据路径:SSE 连接首帧即全量快照(服务端 openSse 保证)。此前还并行发一个
+    // GET /conversations/<id>——与快照完全同义的冗余请求,却多占一个连接名额:本应用
+    // 常驻 5 条 SSE 长连接,叠加它正好顶满 WebView2 对同源 HTTP/1.1 的 6 连接上限,
+    // 切换时新请求在连接池边缘排队,小会话也随机延迟数百 ms("加载中"闪现的真根源)。
     void sse<ConversationStreamEvent>(
       `conversations/${activeId}/stream`,
       {
@@ -491,10 +484,11 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
 
           if (event === "snapshot" && data.type === "snapshot") {
             useAppStore.getState().setClockOffset(data.serverTime);
+            rememberDetail(data.conversation);
             setDetail(data.conversation);
             updateSummary(toConversationSummaryUpdate(data.conversation));
             setDetailError(null);
-            setDetailLoading(false);
+            setSubscribing(false);
             return;
           }
 
@@ -508,14 +502,33 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
             }
             const next = applyNodeUpdate(prev, data);
             if (next === prev) return prev;
+            rememberDetail(next); // updater 内写 Map:幂等,StrictMode 双调无害
             updateSummary(toConversationSummaryUpdate(next));
             return next;
           });
           setDetailError(null);
-          setDetailLoading(false);
+          setSubscribing(false);
         },
         onError: (streamError) => {
           if (!mounted) return;
+          // sse() 对 4xx(除 408/429)停止重连:404 = 会话尚不存在,按"暂无会话"处理;
+          // 其余致命 4xx 呈现错误(此前只 console,断流后界面永远停在加载态)。
+          // 可自愈的网络错/5xx 由 sse() 内建重连兜底,不打扰用户。
+          const fatal =
+            streamError instanceof ApiError &&
+            streamError.code >= 400 &&
+            streamError.code < 500 &&
+            streamError.code !== 408 &&
+            streamError.code !== 429;
+          if (fatal && streamError instanceof ApiError && streamError.code === 404) {
+            setSubscribing(false);
+            return;
+          }
+          if (fatal) {
+            setDetailError(streamError.message || t("conversations.errors.load_detail_failed"));
+            setSubscribing(false);
+            return;
+          }
           console.error("Conversation detail SSE error:", streamError);
         },
       },
@@ -556,7 +569,10 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
             accepted = true;
             return data;
           });
-          if (accepted) updateSummary(toConversationSummaryUpdate(data));
+          if (accepted) {
+            rememberDetail(data);
+            updateSummary(toConversationSummaryUpdate(data));
+          }
         })
         .catch(() => {
           // SSE remains the primary path; polling is only a recovery path for missed stream frames.
@@ -575,7 +591,8 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
 
   return {
     detail,
-    detailLoading,
+    // 缓存命中时即使订阅尚未建立也不进加载态——内容已在屏上,快照到达后静默校正
+    detailLoading: subscribing && detail === null,
     detailError,
     selectedNodeMessages,
     resetDetail,
@@ -1560,6 +1577,7 @@ function ConversationsPageInner() {
       await api.delete<Record<string, never>>(`conversations/${conversationId}`, {
         parseJson: (raw) => (raw ? JSON.parse(raw) : {}),
       });
+      detailCache.delete(conversationId);
       if (conversationId === activeId) {
         setActiveId(null);
         resetDetail();
@@ -1578,6 +1596,7 @@ function ConversationsPageInner() {
       await api.post<{ status: string; deleted: number }>("conversations/batch-delete", {
         ids: conversationIds,
       });
+      for (const id of conversationIds) detailCache.delete(id);
       if (activeId && conversationIds.includes(activeId)) {
         setActiveId(null);
         resetDetail();
