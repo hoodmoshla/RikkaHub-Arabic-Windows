@@ -110,8 +110,11 @@ export async function callImageGeneration(input: {
   numberOfImages: number;
   aspectRatio: string;
   referenceFileIds?: number[];
+  /** 4-4:显式模型覆盖(provider 测试用)。缺省走全局设置;禁止调用方为复用管线
+   *  临时改写全局 state——并发窗口内其他生图请求会读到串味模型。 */
+  overrideModelUuid?: string;
 }) {
-  const picked = findModel(state.settings.imageGenerationModelId);
+  const picked = findModel(input.overrideModelUuid || state.settings.imageGenerationModelId);
   const providerItem = picked.provider;
   const modelItem = picked.model;
   const selectedModel = modelItem.modelId === "auto" ? "gpt-image-2" : modelItem.modelId;

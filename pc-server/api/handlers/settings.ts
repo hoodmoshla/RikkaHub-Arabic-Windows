@@ -714,13 +714,11 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
       ?? (providerItem.models ?? []).find((item) => (item.type as string) === "IMAGE")
       ?? null;
     if (!modelItem) return error("No image model available for this provider", 400);
-    // Borrow the existing image-generation pipeline by temporarily swapping the
-    // imageGenerationModelId so callImageGeneration picks our target model.
-    const previousImageId = state.settings.imageGenerationModelId;
-    state.settings.imageGenerationModelId = modelItem.id;
+    // 4-4:显式 modelId 覆盖复用生图管线;此前临时改写全局 imageGenerationModelId
+    // 再 finally 还原,测试期间的真实生图/并发的另一个测试会读到被测模型(多标签页下必现)。
     try {
       const prompt = String(body.prompt ?? "A red apple on a white background").trim() || "A red apple on a white background";
-      const images = await callImageGeneration({ prompt, numberOfImages: 1, aspectRatio: "square" });
+      const images = await callImageGeneration({ prompt, numberOfImages: 1, aspectRatio: "square", overrideModelUuid: modelItem.id });
       const generated = images[0];
       if (!generated) return error("Image generation returned no images", 502);
       return json({
@@ -730,8 +728,6 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
       });
     } catch (err) {
       return error(friendlyRequestError(err, state.settings.proxyConfig), 502);
-    } finally {
-      state.settings.imageGenerationModelId = previousImageId;
     }
   }
 
