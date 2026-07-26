@@ -427,13 +427,24 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
     setRefreshNonce((current) => current + 1);
   }, []);
 
+  // 切换会话时旧会话的 detail 必须立即失效:否则加载窗口内 selectedNodeMessages
+  // 仍是旧会话的消息,下游"已知消息集"会被锁成旧会话 id,新会话数据到达后全部
+  // 历史消息被误判为新消息、整屏播入场动画(视觉上就是一次大闪动)。
+  // refreshNonce 触发的同会话重载不清——清了会闪空一帧。
+  const loadedIdRef = React.useRef<string | null>(null);
+
   React.useEffect(() => {
     if (!activeId) {
+      loadedIdRef.current = null;
       resetDetail();
       return;
     }
 
     let mounted = true;
+    if (loadedIdRef.current !== activeId) {
+      loadedIdRef.current = activeId;
+      setDetail(null);
+    }
     setDetailLoading(true);
     setDetailError(null);
 
@@ -947,6 +958,18 @@ const ConversationTimeline = React.memo(
     const [searchParams] = useSearchParams();
     const focusMessageId = searchParams.get("msg");
 
+    // 加载指示延迟出现:本地请求通常几十 ms 内返回,"加载中"只闪一帧反而像故障。
+    // 250ms 内完成则全程只见空白→内容;真慢(远端大会话)才浮现文案。
+    const [showLoadingHint, setShowLoadingHint] = React.useState(false);
+    React.useEffect(() => {
+      if (!detailLoading) {
+        setShowLoadingHint(false);
+        return;
+      }
+      const timer = window.setTimeout(() => setShowLoadingHint(true), 250);
+      return () => window.clearTimeout(timer);
+    }, [detailLoading]);
+
     React.useEffect(() => {
       if (!activeId || detailLoading || detailError || selectedNodeMessages.length === 0) {
         return;
@@ -988,6 +1011,21 @@ const ConversationTimeline = React.memo(
       };
     }, [activeId, detailError, detailLoading, focusMessageId, selectedNodeMessages]);
 
+    // 首帧定位:Virtuoso 缺省从 index 0 开始渲染,挂载后再 scrollToIndex 会先画出
+    // 列表中部、布局稳定后又跳一次(用户看到"中间→闪→末尾")。initialTopMostItemIndex
+    // 让首帧就渲染在目标处,不产生滚动动作;上面的 scrollToIndex effect 保留,作为
+    // 图片/代码块异步撑高后的兜底修正(同位置重滚不可见)。
+    const initialLocation = React.useMemo(() => {
+      if (focusMessageId) {
+        const idx = selectedNodeMessages.findIndex((item) =>
+          item.node.messages.some((m) => m.id === focusMessageId),
+        );
+        if (idx >= 0) return { index: idx, align: "start" as const };
+      }
+      return { index: Math.max(0, selectedNodeMessages.length - 1), align: "end" as const };
+      // 仅挂载时被 Virtuoso 读取(key=activeId 保证每次切会话重挂载),依赖变化无副作用
+    }, [focusMessageId, selectedNodeMessages]);
+
     return (
       <div className="relative flex-1 min-h-0">
         {!activeId && !isHomeRoute ? (
@@ -997,10 +1035,12 @@ const ConversationTimeline = React.memo(
             description={t("conversations.empty_state.select_description")}
           />
         ) : detailLoading ? (
-          <ConversationEmptyState
-            title={t("conversations.empty_state.loading_title")}
-            description={t("conversations.empty_state.loading_description")}
-          />
+          showLoadingHint ? (
+            <ConversationEmptyState
+              title={t("conversations.empty_state.loading_title")}
+              description={t("conversations.empty_state.loading_description")}
+            />
+          ) : null
         ) : detailError ? (
           <ConversationEmptyState
             title={t("conversations.empty_state.error_title")}
@@ -1024,6 +1064,7 @@ const ConversationTimeline = React.memo(
             ref={virtuosoRef}
             className="h-full"
             data={selectedNodeMessages}
+            initialTopMostItemIndex={initialLocation}
             computeItemKey={(_, item) => item.message.id}
             followOutput={(atBottom) => (focusMessageId ? false : atBottom ? "smooth" : false)}
             atBottomStateChange={setIsAtBottom}
