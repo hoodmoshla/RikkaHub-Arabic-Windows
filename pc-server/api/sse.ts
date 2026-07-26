@@ -56,11 +56,15 @@ function clearNodeBroadcast(conversation: Conversation, node: MessageNode) {
   pendingBroadcasts.delete(key);
 }
 
-export const settingsClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-export const listClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+// ===== 连接预算纪律(1.5.0) =====
+// WebView2 对同源 HTTP/1.1 仅 6 并发连接,常驻长连接每多一条,图片/上传/API 的可用
+// 名额就少一个。1.0.4 前的"连接池饥饿"(多图会话/多路流式轻易打满)在重构新增
+// 错误/记忆/设置三条流后复活(5 常驻 + 1 请求 = 顶满)。因此设置/记忆/错误/列表失效
+// 四个应用级域合并为单一 /api/events 通道(事件名命名空间化:settings/memory/
+// app_error/invalidate),全应用常驻连接固定为 2:events + 当前会话流。
+// 【纪律】新增服务端推送一律并入本通道,禁止再开新的常驻 SSE 端点。
+export const appClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 export const conversationClients = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
-// 应用错误通道(P2-1):errors/stream 订阅者集合。
-export const errorClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 
 // 0-3:两处回调注入由 bootstrap() 显式接线,不再是 import 副作用。
 // - working set 驻留判据:某会话有打开的 SSE 流(界面正开着)时不清扫。在此注入而非
@@ -69,7 +73,7 @@ export const errorClients = new Set<ReadableStreamDefaultController<Uint8Array>>
 export function initSseWiring(): void {
   initWorkingSetSseGuard((convId) => (conversationClients.get(convId)?.size ?? 0) > 0);
   initAppErrorBroadcast((entry) => {
-    broadcastTo(errorClients, sseFrame("app_error", { type: "app_error", error: entry }));
+    broadcastTo(appClients, sseFrame("app_error", { type: "app_error", error: entry }));
   });
 }
 const encoder = new TextEncoder();
@@ -145,21 +149,19 @@ export function openSse(
 }
 
 export function broadcastSettings() {
-  broadcastTo(settingsClients, sseFrame("update", state.settings));
+  broadcastTo(appClients, sseFrame("settings", state.settings));
 }
 
-// memory SSE 通道(1.3.2):推送 MemorySnapshot 给前端记忆管理 UI + 待确认徽章。独立于
-// settings SSE——记忆运行时数据(pending 队列)不属于配置,混在一起会让每次记忆变化触发
-// 全量 settings 重渲染(§10.3)。触发时机:任何记忆增删改 / pending 入队/解决。
-export const memoryClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-
+// memory 事件(1.3.2):推送 MemorySnapshot 给前端记忆管理 UI + 待确认徽章。与 settings
+// 事件分开(记忆运行时数据不属于配置,混在一起会让每次记忆变化触发全量 settings 重渲染,
+// §10.3)。触发时机:任何记忆增删改 / pending 入队/解决。
 export function broadcastMemoryUpdate() {
-  broadcastTo(memoryClients, sseFrame("update", memoryStore.getSnapshot()));
+  broadcastTo(appClients, sseFrame("memory", memoryStore.getSnapshot()));
 }
 
 export function broadcastList() {
   const payload: ConversationListInvalidateEventDto = { type: "invalidate", assistantId: state.settings.assistantId, timestamp: Date.now() };
-  broadcastTo(listClients, sseFrame("invalidate", payload));
+  broadcastTo(appClients, sseFrame("invalidate", payload));
 }
 
 export function broadcastConversation(conversation: Conversation, event = "snapshot") {

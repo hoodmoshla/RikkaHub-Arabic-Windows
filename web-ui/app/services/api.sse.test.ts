@@ -54,7 +54,7 @@ describe("sse reconnect", () => {
     let closes = 0;
 
     const done = sse<{ n: number }>(
-      "memory/stream",
+      "events",
       {
         onMessage: ({ data }) => {
           messages.push(data.n);
@@ -108,7 +108,7 @@ describe("sse reconnect", () => {
     }) as typeof fetch;
 
     const abort = new AbortController();
-    const done = sse("memory/stream", { onMessage: () => {} }, { signal: abort.signal });
+    const done = sse("events", { onMessage: () => {} }, { signal: abort.signal });
     // 首连立即被服务端关闭（空流）→ 进入 1s 退避；50ms 后 abort 应立刻返回
     await new Promise((resolve) => setTimeout(resolve, 50));
     abort.abort();

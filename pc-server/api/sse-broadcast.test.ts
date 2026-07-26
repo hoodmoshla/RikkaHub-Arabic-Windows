@@ -8,7 +8,7 @@ import {
   broadcastList,
   broadcastNodeUpdate,
   conversationClients,
-  listClients,
+  appClients,
 } from "./sse";
 import { setState, state } from "../persistence/json-store";
 import type { Conversation, MessageNode, State } from "../foundation/types";
@@ -59,17 +59,17 @@ describe("4-1 缺陷复现:死 controller 上裸 enqueue 抛错", () => {
 
 describe("broadcastTo 语义(经公开广播函数验证)", () => {
   test("broadcastList:死连接不抛错、被摘除,存活连接照常收到", () => {
-    listClients.clear();
+    appClients.clear();
     const dead = deadController();
     const live = makeController();
-    listClients.add(dead);
-    listClients.add(live.ctl);
+    appClients.add(dead);
+    appClients.add(live.ctl);
 
     expect(() => broadcastList()).not.toThrow();
-    expect(listClients.has(dead)).toBe(false); // 死连接被摘除
-    expect(listClients.has(live.ctl)).toBe(true);
+    expect(appClients.has(dead)).toBe(false); // 死连接被摘除
+    expect(appClients.has(live.ctl)).toBe(true);
     expect(live.received.length).toBe(1); // 遍历未被中断
-    listClients.clear();
+    appClients.clear();
   });
 
   test("broadcastNodeUpdate(33ms 节流的最终路径):死连接不抛错且被摘除", () => {
@@ -87,7 +87,7 @@ describe("broadcastTo 语义(经公开广播函数验证)", () => {
   });
 
   test("broadcastConversation:死连接排首位也不影响后续客户端", () => {
-    listClients.clear();
+    appClients.clear();
     const set = new Set<Ctl>();
     const dead = deadController();
     const live1 = makeController();

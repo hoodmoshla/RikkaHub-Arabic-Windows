@@ -322,7 +322,7 @@ export interface PendingEntry {
   messageNodeId?: string;
 }
 
-/** memory SSE(/api/memory/stream)推送的完整快照。 */
+/** /api/events 通道 memory 事件推送的完整快照。 */
 export interface MemorySnapshot {
   globalEnabled: boolean;
   writeStrategy: WriteStrategy;
@@ -333,7 +333,7 @@ export interface MemorySnapshot {
 }
 
 /**
- * Global app settings. The backend pushes the full object via SSE on `/api/settings/stream`
+ * Global app settings. The backend pushes the full object via the `/api/events` channel (settings event)
  * whenever any field changes, and the SPA mirrors it into the Zustand settings slice.
  */
 export interface Settings {

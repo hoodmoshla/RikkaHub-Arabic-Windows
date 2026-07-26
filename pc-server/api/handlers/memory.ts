@@ -1,23 +1,15 @@
-// api/handlers/memory.ts — 记忆路由（memory/stream、pending、global、batch、settings/memory-settings）
+// api/handlers/memory.ts — 记忆路由（pending、global、batch、settings/memory-settings;推送走 /api/events）
 // 纪律：纯搬迁自 server.ts routeApi()；记忆域契约（MemorySnapshot、pending 队列）冻结。
 
 import { saveState, state } from "../../persistence/json-store";
 import { memoryStore } from "../../memory/index";
 import { error, json, readJson } from "../request";
-import { broadcastMemoryUpdate, broadcastSettings, memoryClients, openSse } from "../sse";
+import { broadcastMemoryUpdate, broadcastSettings } from "../sse";
 import { updateSettings } from "../../app-config";
 
 export async function handleMemoryRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
   // ===== memory 路由(1.3.2)=====
-  if (path === "memory/stream") {
-    return openSse(
-      () => [["update", memoryStore.getSnapshot()]],
-      (controller) => {
-        memoryClients.add(controller);
-        return () => memoryClients.delete(controller);
-      },
-    );
-  }
+  // 记忆快照推送已并入 /api/events 通道(memory 事件)。
   if (path === "memory/pending" && request.method === "GET") {
     return json({ pending: memoryStore.getPending() });
   }

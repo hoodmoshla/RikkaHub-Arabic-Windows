@@ -1,13 +1,14 @@
-// 应用错误通道 store(P2-1 批2):订阅 errors/stream,按 severity 路由 toast,
+// 应用错误通道 store(P2-1 批2):订阅错误事件,按 severity 路由 toast,
 // 并持有错误中心快照(批3 在日志页展示)。
 // 契约:连接快照只入 store 不弹 toast(重连不重复打扰);增量 app_error 才路由 toast。
 // 风暴抑制在后端做(30s 同 domain+message 合并,窗口内不重复广播),前端无需再去抖。
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { create } from "zustand";
 import { toast } from "sonner";
 
-import api, { sse } from "~/services/api";
-import type { AppErrorDto, AppErrorPushEventDto, AppErrorSnapshotEventDto } from "~/types";
+import api from "~/services/api";
+import { onAppEvent } from "~/services/app-events";
+import type { AppErrorDto } from "~/types";
 
 interface AppErrorsStoreState {
   errors: AppErrorDto[];
@@ -33,8 +34,6 @@ export const useAppErrorsStore = create<AppErrorsStoreState>((set) => ({
   reportLocalError: (entry) => set((s) => ({ errors: [entry, ...s.errors].slice(0, 200) })),
 }));
 
-type AppErrorStreamEvent = AppErrorSnapshotEventDto | AppErrorPushEventDto;
-
 function routeToast(entry: AppErrorDto) {
   const suffix = entry.count > 1 ? ` (×${entry.count})` : "";
   if (entry.severity === "error") toast.error(entry.message + suffix);
@@ -42,39 +41,21 @@ function routeToast(entry: AppErrorDto) {
   // info 级只进错误中心,不打扰
 }
 
-/** 订阅应用错误 SSE(/api/errors/stream)。根组件调用一次;重连由 sse() 内建。 */
+/** 订阅应用错误事件(根组件调用一次)。走单一 /api/events 通道(连接预算纪律,见
+ *  services/app-events.ts)。快照事件通道内会重放,app_error 增量不重放(防重复 toast)。 */
 export function useAppErrorsSubscription() {
   const setErrors = useAppErrorsStore((s) => s.setErrors);
   const pushError = useAppErrorsStore((s) => s.pushError);
-  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    let closed = false;
-    abortRef.current = new AbortController();
-    void sse<AppErrorStreamEvent>(
-      "errors/stream",
-      {
-        onMessage: ({ data }) => {
-          if (closed) return;
-          if (data.type === "snapshot") {
-            setErrors(data.errors);
-            return;
-          }
-          if (data.type === "app_error") {
-            pushError(data.error);
-            routeToast(data.error);
-          }
-        },
-        onError: (error) => {
-          console.error("App errors SSE error:", error);
-        },
-      },
-      { signal: abortRef.current.signal },
-    );
-
+    const offSnapshot = onAppEvent("app_errors_snapshot", (data) => setErrors(data.errors));
+    const offPush = onAppEvent("app_error", (data) => {
+      pushError(data.error);
+      routeToast(data.error);
+    });
     return () => {
-      closed = true;
-      abortRef.current?.abort();
+      offSnapshot();
+      offPush();
     };
   }, [setErrors, pushError]);
 }

@@ -1,7 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { create } from "zustand";
 
-import { sse } from "~/services/api";
+import { onAppEvent } from "~/services/app-events";
 import type { MemorySnapshot } from "~/types";
 
 interface MemoryStoreState {
@@ -15,34 +15,10 @@ export const useMemoryStore = create<MemoryStoreState>((set) => ({
   setSnapshot: (snapshot) => set({ snapshot }),
 }));
 
-/** 订阅 memory SSE(/api/memory/stream)。根组件调用一次。后端连接后立即推完整 snapshot,
- *  之后任何记忆/pending 变化都触发推送。独立于 settings SSE——记忆运行时数据不属于配置(§10.3)。
- *
- *  重连:由 sse() 内建（指数退避 1s→30s,收到消息即重置,每次重连后端立即补推完整
- *  snapshot）,本 hook 不再自行实现。组件卸载时 abort 终止订阅。 */
+/** 订阅 memory 事件(根组件调用一次)。走单一 /api/events 通道(连接预算纪律,见
+ *  services/app-events.ts):连接即推完整 snapshot,之后任何记忆/pending 变化都触发推送。 */
 export function useMemorySubscription() {
   const setSnapshot = useMemoryStore((s) => s.setSnapshot);
-  const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    let closed = false;
-    abortRef.current = new AbortController();
-    void sse<MemorySnapshot>(
-      "memory/stream",
-      {
-        onMessage: ({ data }) => {
-          if (!closed) setSnapshot(data);
-        },
-        onError: (error) => {
-          console.error("Memory SSE error:", error);
-        },
-      },
-      { signal: abortRef.current.signal },
-    );
-
-    return () => {
-      closed = true;
-      abortRef.current?.abort();
-    };
-  }, [setSnapshot]);
+  useEffect(() => onAppEvent("memory", setSnapshot), [setSnapshot]);
 }

@@ -1,12 +1,12 @@
 import * as React from "react";
 import i18n from "~/i18n";
 
-import api, { sse } from "~/services/api";
+import api from "~/services/api";
+import { onAppEvent } from "~/services/app-events";
 import { mergeConversationList, refreshConversationList, sortConversationList } from "~/lib/conversation-list-ops";
 import type {
   ConversationDto,
   ConversationListDto,
-  ConversationListInvalidateEventDto,
   PagedResult,
 } from "~/types";
 
@@ -128,28 +128,15 @@ export function useConversationList({
     };
   }, []);
 
-  React.useEffect(() => {
-    const abortController = new AbortController();
-
-    void sse<ConversationListInvalidateEventDto>(
-      "conversations/stream",
-      {
-        onMessage: ({ event, data }) => {
-          if (event !== "invalidate") return;
-          if (data.assistantId !== currentAssistantIdRef.current) return;
-          scheduleListRefresh();
-        },
-        onError: (streamError) => {
-          console.error("Conversation list SSE error:", streamError);
-        },
-      },
-      { signal: abortController.signal },
-    );
-
-    return () => {
-      abortController.abort();
-    };
-  }, [scheduleListRefresh]);
+  React.useEffect(
+    // 列表失效走单一 /api/events 通道(连接预算纪律,见 services/app-events.ts)
+    () =>
+      onAppEvent("invalidate", (data) => {
+        if (data.assistantId !== currentAssistantIdRef.current) return;
+        scheduleListRefresh();
+      }),
+    [scheduleListRefresh],
+  );
 
   React.useEffect(() => {
     let active = true;

@@ -8,6 +8,9 @@ import { saveState, state } from "../../persistence/json-store";
 import { APP_VERSION } from "../../updates/index";
 import { loadModelsDev, lookupContextLimit, modelsDevCache } from "../../inference-engine/providers";
 import { error, json, readJson } from "../request";
+import { appClients, openSse } from "../sse";
+import { memoryStore } from "../../memory/index";
+import { recentAppErrors } from "../../observability/app-errors";
 import { computeStats } from "../../conversations/stats";
 import { DEFAULT_PROMPT_OPTIMIZE_PROMPT } from "../../app-config/prompts";
 import { fetchAuxiliaryText } from "../../conversations/auxiliary";
@@ -17,6 +20,22 @@ import { FONT_EXTENSIONS_SET, FONT_MIME, MAX_FONT_BYTES, fontCssName, fontExtens
 export async function handleSystemRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   // 4-6:不回显绝对 dataDir 路径(未鉴权即可见的轻微信息泄露;无消费方读它)。
   if (path === "health") return json({ ok: true, version: APP_VERSION });
+  // 单一应用事件通道(连接预算纪律,详见 api/sse.ts 顶部注释):设置/记忆/错误/列表失效
+  // 四域合一。连接即推各域完整快照——重连本身就是状态补偿,客户端无需另发 GET。
+  if (path === "events") {
+    return openSse(
+      () => [
+        ["settings", state.settings],
+        ["memory", memoryStore.getSnapshot()],
+        ["app_errors_snapshot", { type: "snapshot", errors: recentAppErrors() }],
+        ["invalidate", { type: "invalidate", assistantId: state.settings.assistantId, timestamp: Date.now() }],
+      ],
+      (controller) => {
+        appClients.add(controller);
+        return () => appClients.delete(controller);
+      },
+    );
+  }
   if (path === "ai-icon" && request.method === "GET") {
     const name = url.searchParams.get("name")?.trim();
     if (!name) return error("Missing name", 400);

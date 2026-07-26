@@ -23,7 +23,7 @@ import api from "~/services/api";
 import { confirmDialog } from "~/stores/confirm-store";
 import { toast } from "sonner";
 
-/** 待确认记忆徽章 + 确认弹窗。挂载在输入框卡片右上角(memory/stream SSE 推送的 snapshot)。
+/** 待确认记忆徽章 + 确认弹窗。挂载在输入框卡片右上角(/api/events 通道 memory 事件推送的 snapshot)。
  *
  *  交互模型(多选 + 批量作用于选中项,避免"全有或全无"的粗糙):
  *  - 每条卡片左侧有 checkbox,顶部批量区有"全选/取消全选"快捷

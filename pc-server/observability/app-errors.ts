@@ -15,7 +15,7 @@ const MERGE_WINDOW_MS = 30_000;
 const ring: AppErrorDto[] = [];
 let broadcastFn: ((entry: AppErrorDto) => void) | null = null;
 
-/** api/sse.ts 启动时注入,把新条目推给 errors/stream 订阅者(批2 接线)。 */
+/** api/sse.ts 启动时注入,把新条目经 /api/events 通道推给订阅者(app_error 事件)。 */
 export function initAppErrorBroadcast(fn: (entry: AppErrorDto) => void): void {
   broadcastFn = fn;
 }

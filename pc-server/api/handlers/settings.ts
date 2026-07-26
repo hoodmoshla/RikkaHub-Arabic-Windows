@@ -23,7 +23,7 @@ import { callImageGeneration } from "../../media/image-gen";
 import { memoryStore } from "../../memory/index";
 import { addLog } from "../logs";
 import { error, json, readJson } from "../request";
-import { broadcastMemoryUpdate, openSse, settingsClients, sseFrame } from "../sse";
+import { broadcastMemoryUpdate, sseFrame } from "../sse";
 import { deleteById, reorderByIds, upsertById, validateKnownJsonIds } from "../../foundation/utils";
 import { normalizePreferredPort, normalizeProxyConfig } from "../../foundation/net";
 import { defaultSettings } from "../../app-config/defaults";
@@ -34,15 +34,7 @@ import { endpointFor, fetchProviderBalance, fetchProviderModels, runProviderChec
 
 export async function handleSettingsRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   if (path === "settings" && request.method === "GET") return json(state.settings);
-  if (path === "settings/stream") {
-    return openSse(
-      () => [["update", state.settings]],
-      (controller) => {
-        settingsClients.add(controller);
-        return () => settingsClients.delete(controller);
-      },
-    );
-  }
+  // settings 快照推送已并入 /api/events 通道(settings 事件)。
   if (path === "settings/display" && request.method === "POST") {
     const body = await readJson<Record<string, JsonValue>>(request);
     updateSettings({ ...state.settings, displaySetting: { ...state.settings.displaySetting, ...body } });

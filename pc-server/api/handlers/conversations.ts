@@ -25,7 +25,6 @@ import {
   broadcastList,
   broadcastNodeUpdate,
   conversationClients,
-  listClients,
   openSse,
 } from "../sse";
 import { bumpAnalyticsMsgCount } from "../../app-config/analytics";
@@ -36,16 +35,8 @@ import { deleteConversationsById, ensureConversation, findAssistant, finishInter
 import { generating } from "../../conversations/generation-state";
 
 export async function handleConversationRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
-  if (path === "conversations/stream") {
-    return openSse(
-      () => [["invalidate", { type: "invalidate", assistantId: state.settings.assistantId, timestamp: Date.now() }]],
-      (controller) => {
-        listClients.add(controller);
-        return () => listClients.delete(controller);
-      },
-    );
-  }
-
+  // 列表失效事件已并入 /api/events 通道(invalidate 事件);会话详情流保持独立端点
+  // (conversations/<id>/stream)——它随切换重建,不占常驻预算的额外名额。
   if (path === "conversations/batch-delete" && request.method === "POST") {
     const body = await readJson<{ ids?: string[] }>(request);
     const ids = new Set((body.ids ?? []).map(String).filter(Boolean));

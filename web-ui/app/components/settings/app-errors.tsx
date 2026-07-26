@@ -1,5 +1,5 @@
 // components/settings/app-errors.tsx — 应用错误中心分区(P2-1 批3)。
-// 数据来自 useAppErrorsStore(errors/stream 全局订阅);与请求日志同页呈现:
+// 数据来自 useAppErrorsStore(/api/events 通道全局订阅);与请求日志同页呈现:
 // 请求日志回答"哪个 HTTP 请求失败了",错误中心回答"应用哪里在降级/出错"。
 import * as React from "react";
 import { useTranslation } from "react-i18next";
