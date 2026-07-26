@@ -14,7 +14,7 @@ import { MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state } from "../pers
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
 import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, getConversationsDb, loadAllConversationsFromDb, resetConversationsDbTo, snapshotConversationsDbBeforeImport } from "../conversations";
 import { reportError } from "../observability/app-errors";
-import { hashBytesSha256, hashFileSha256, rewritePcFileUrlsDeep } from "./file-refs";
+import { hashFileSha256, rewritePcFileUrlsDeep } from "./file-refs";
 import { clearWorkingSet } from "../conversations/working-set";
 import { importSkills } from "../tools";
 import { ANDROID_AVATAR_TYPE_TO_PC, copyDirRecursive, rewriteAvatarsInSettings } from "./export";
@@ -253,7 +253,7 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
         const newId = state.nextFileId++;
         const ext = extname(entry) || "";
         const targetPath = join(filesDir, `${newId}${ext}`);
-        writeFileSync(targetPath, readFileSync(srcPath));
+        copyFileSync(srcPath, targetPath); // 5-7:内核级拷贝,>2GiB 不进 JS 堆
         state.files.push({
           id: newId,
           path: targetPath,
@@ -578,10 +578,12 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
       existingBySize.set(size, list);
     }
     const hashCache = new Map<string, string | null>();
-    const findExistingByContent = (bytes: Uint8Array): number | undefined => {
-      const candidates = existingBySize.get(bytes.byteLength);
+    // 5-7:此前整读字节进内存再哈希/写盘,>2GiB 附件撞 Buffer 上限;改按路径流式哈希+内核级拷贝。
+    const findExistingByContent = (size: number, srcPath: string): number | undefined => {
+      const candidates = existingBySize.get(size);
       if (!candidates || candidates.length === 0) return undefined;
-      const incomingHash = hashBytesSha256(bytes);
+      const incomingHash = hashFileSha256(srcPath);
+      if (incomingHash === null) return undefined;
       for (const c of candidates) {
         let h = hashCache.get(c.path);
         if (h === undefined) {
@@ -597,8 +599,7 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
       const srcPath = join(uploadDir, entry);
       const stats = statSync(srcPath);
       if (!stats.isFile()) continue;
-      const bytes = readFileSync(srcPath);
-      const existingId = findExistingByContent(bytes);
+      const existingId = findExistingByContent(stats.size, srcPath);
       if (existingId !== undefined) {
         androidFilenameToPcId.set(entry, existingId);
         dedupedFiles += 1;
@@ -608,7 +609,7 @@ export function applyAndroidZipBackupFromPath(zipPath: string): { settingsImport
       const ext = extname(entry) || "";
       const targetName = `${fileId}${ext}`;
       const targetPath = join(filesDir, targetName);
-      writeFileSync(targetPath, bytes);
+      copyFileSync(srcPath, targetPath);
       state.files.push({
         id: fileId,
         path: targetPath,

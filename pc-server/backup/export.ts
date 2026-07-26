@@ -2,7 +2,7 @@
 // 纪律：Android 互导契约（枚举过滤、avatar FQN 转换、备份 zip 结构）冻结，只准原样搬迁。
 // 部分辅助（updateSettings 等）暂经 ../server 导入，3.5 拆 api/ 时收敛。
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import type { JsonValue } from "../foundation/types";
@@ -28,7 +28,7 @@ export function copyDirRecursive(src: string, dest: string): number {
       mkdirSync(destPath, { recursive: true });
       count += copyDirRecursive(srcPath, destPath);
     } else {
-      writeFileSync(destPath, readFileSync(srcPath));
+      copyFileSync(srcPath, destPath); // 5-7:内核级拷贝,>2GiB 不进 JS 堆
       count += 1;
     }
   }
@@ -224,8 +224,9 @@ function generateRikkaHubDb(dbPath: string, backupNameById?: Map<number, string>
         try { db.exec(row.sql); } catch { /* */ }
       }
     }
-    for (const m of metaRows) { try { db.exec(`INSERT INTO android_metadata VALUES ('${m.locale}')`); } catch { /* */ } }
-    for (const r of roomRows as any[]) { try { db.exec(`INSERT INTO room_master_table VALUES (${r.id}, '${r.identity_hash}')`); } catch { /* */ } }
+    // 5-7:参数化。值来自曾导入的安卓库,字符串拼 SQL 理论上可向自己的导出产物注入。
+    for (const m of metaRows) { try { db.prepare("INSERT INTO android_metadata VALUES (?)").run(m.locale); } catch { /* */ } }
+    for (const r of roomRows as any[]) { try { db.prepare("INSERT INTO room_master_table VALUES (?, ?)").run(r.id, r.identity_hash); } catch { /* */ } }
     // FTS5 虚拟表(message_fts)及其影子表都必须排除——APP 端 Room 会在 onOpen 自行重建。
     // 影子表(message_fts_data / _idx / _content / _config / _docsize)在 sqlite_master 里
     // 是普通 CREATE TABLE,不含 "USING fts5",单纯正则命中不到;若作为孤儿表落进备份 .db,
@@ -408,7 +409,7 @@ export function stageUploadFilesInto(
     done++;
     onProgress?.(`正在打包附件 (${done}/${copies.length})...`);
     try {
-      writeFileSync(join(uploadStage, name), readFileSync(srcPath));
+      copyFileSync(srcPath, join(uploadStage, name)); // 5-7:同上
       staged++;
     } catch (copyErr) {
       failed++;
@@ -468,7 +469,12 @@ function buildUploadStagingPlan(): UploadStagingPlan {
       orphanSkipped++;
       continue;
     }
-    resolved.push({ file, srcPath, size: statSync(srcPath).size });
+    // 5-7:existsSync↔statSync 窗口内文件被删(TOCTOU)按缺失跳过,不炸整个导出。
+    try {
+      resolved.push({ file, srcPath, size: statSync(srcPath).size });
+    } catch {
+      missingSkipped++;
+    }
   }
   const sizeCount = new Map<number, number>();
   for (const r of resolved) sizeCount.set(r.size, (sizeCount.get(r.size) ?? 0) + 1);

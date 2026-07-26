@@ -4,7 +4,7 @@
 // 纯数字引用,由调用方单独处理。
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readSync } from "node:fs";
 import type { JsonValue } from "../foundation/types";
 
 const PC_FILE_URL_RE = /\/api\/files\/(\d+)\/content/g;
@@ -13,9 +13,19 @@ export function hashBytesSha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+// 5-7:分块流式哈希。此前 readFileSync 整读,单附件 >2GiB 撞 Node Buffer 上限直接抛错。
 export function hashFileSha256(path: string): string | null {
   try {
-    return hashBytesSha256(readFileSync(path));
+    const fd = openSync(path, "r");
+    try {
+      const hash = createHash("sha256");
+      const buf = Buffer.allocUnsafe(8 * 1024 * 1024);
+      let read: number;
+      while ((read = readSync(fd, buf, 0, buf.length, null)) > 0) hash.update(buf.subarray(0, read));
+      return hash.digest("hex");
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return null;
   }

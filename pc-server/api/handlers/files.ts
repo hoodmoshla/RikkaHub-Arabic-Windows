@@ -2,13 +2,13 @@
 // 纪律：纯搬迁自 server.ts routeApi()。
 
 import type { UploadFilesResponseDto, UploadedFileDto } from "../../foundation/types";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { safeDataFilePath } from "../../files";
 import { extname, join } from "node:path";
 import type { StoredFile } from "../../foundation/types";
 import { filesDir } from "../../foundation/paths";
 import { saveState, state } from "../../persistence/json-store";
-import { extractStoredFileText, writeExtractedTextSidecar } from "../../files/index";
+import { extractStoredFileText, extractedTextPath, writeExtractedTextSidecar } from "../../files/index";
 import { error, json, mime } from "../request";
 
 export async function handleFileRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
@@ -77,7 +77,15 @@ export async function handleFileRoutes(request: Request, _url: URL, path: string
   }
   const fileDelete = path.match(/^files\/(\d+)$/);
   if (fileDelete && request.method === "DELETE") {
-    state.files = state.files.filter((item) => item.id !== Number(fileDelete[1]));
+    const deleteId = Number(fileDelete[1]);
+    const target = state.files.find((item) => item.id === deleteId);
+    state.files = state.files.filter((item) => item.id !== deleteId);
+    // 5-7:此前只删账本条目,物理字节永久残留(导出会跳过孤儿,纯磁盘泄漏)。
+    // 历史去重条目可能共享同一路径,仅当无其余条目引用时才删字节;抽取旁车一并清。
+    if (target?.path && !state.files.some((item) => item.path === target.path)) {
+      try { unlinkSync(target.path); } catch { /* 不存在/被锁,忽略 */ }
+    }
+    try { unlinkSync(extractedTextPath(deleteId)); } catch { /* 无旁车 */ }
     saveState();
     return json({ status: "deleted" });
   }

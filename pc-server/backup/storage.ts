@@ -82,7 +82,13 @@ function parseWebDavItems(xml: string) {
       return match ? stripXmlText(match[1]) : "";
     };
     const href = value("href");
-    const displayName = value("displayname") || decodeURIComponent(href.replace(/\/$/, "").split("/").pop() ?? "");
+    // 5-7:畸形 href(如裸 %)会让 decodeURIComponent 抛 URIError,炸掉整个列表接口;退回原文。
+    const rawName = href.replace(/\/$/, "").split("/").pop() ?? "";
+    let decodedName = rawName;
+    try {
+      decodedName = decodeURIComponent(rawName);
+    } catch { /* 保留原文 */ }
+    const displayName = value("displayname") || decodedName;
     return {
       href,
       displayName,
@@ -341,10 +347,27 @@ export async function s3TestConnection(config: S3Config) {
 
 export async function s3ListBackups(config: S3Config) {
   const prefix = `${s3Prefix()}backup_`;
-  const response = await s3Request(config, "GET", "", { query: { "list-type": "2", prefix } });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`S3 列表失败：${response.status} ${text.slice(0, 500)}`);
   const items: Array<{ href: string; displayName: string; size: number; lastModified: string }> = [];
+  // 5-7:ListObjectsV2 单页最多 1000 个对象,按 continuation-token 翻页,长期用户的
+  // 备份列表不再截断。上限 50 页(5 万对象)防畸形响应死循环。
+  let continuationToken: string | undefined;
+  for (let page = 0; page < 50; page++) {
+    const query: Record<string, string> = { "list-type": "2", prefix };
+    if (continuationToken) query["continuation-token"] = continuationToken;
+    const response = await s3Request(config, "GET", "", { query });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`S3 列表失败：${response.status} ${text.slice(0, 500)}`);
+    collectS3Contents(text, items);
+    const truncated = /<IsTruncated>true<\/IsTruncated>/i.test(text);
+    const tokenMatch = text.match(/<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/i);
+    if (!truncated || !tokenMatch) break;
+    continuationToken = stripXmlText(tokenMatch[1]);
+  }
+  items.sort((a, b) => Date.parse(b.lastModified || "") - Date.parse(a.lastModified || ""));
+  return items;
+}
+
+function collectS3Contents(text: string, items: Array<{ href: string; displayName: string; size: number; lastModified: string }>): void {
   // Minimal XML scan — S3 ListObjectsV2 has one <Contents> element per object.
   const blocks = text.match(/<Contents>[\s\S]*?<\/Contents>/g) ?? [];
   for (const block of blocks) {
@@ -363,8 +386,6 @@ export async function s3ListBackups(config: S3Config) {
       lastModified: lastMatch?.[1] ?? "",
     });
   }
-  items.sort((a, b) => Date.parse(b.lastModified || "") - Date.parse(a.lastModified || ""));
-  return items;
 }
 
 export async function s3Backup(config: S3Config, onProgress?: (message: string, percent?: number) => void) {
