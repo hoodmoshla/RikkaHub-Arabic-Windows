@@ -3,7 +3,7 @@
 
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { customFontsDir, dataDir } from "../../foundation/paths";
+import { customFontsDir } from "../../foundation/paths";
 import { saveState, state } from "../../persistence/json-store";
 import { APP_VERSION } from "../../updates/index";
 import { loadModelsDev, lookupContextLimit, modelsDevCache } from "../../inference-engine/providers";
@@ -15,7 +15,8 @@ import { serveAIIcon } from "../../assets/icons";
 import { FONT_EXTENSIONS_SET, FONT_MIME, MAX_FONT_BYTES, fontCssName, fontExtension, isBareFileName, isFontFile, listBuiltinFonts, listCustomFonts, listSystemFonts, makeBundledFontEntry, resolveFontFile } from "../../assets/fonts";
 
 export async function handleSystemRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
-  if (path === "health") return json({ ok: true, version: APP_VERSION, dataDir });
+  // 4-6:不回显绝对 dataDir 路径(未鉴权即可见的轻微信息泄露;无消费方读它)。
+  if (path === "health") return json({ ok: true, version: APP_VERSION });
   if (path === "ai-icon" && request.method === "GET") {
     const name = url.searchParams.get("name")?.trim();
     if (!name) return error("Missing name", 400);

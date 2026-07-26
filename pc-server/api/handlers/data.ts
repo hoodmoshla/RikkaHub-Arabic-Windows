@@ -156,6 +156,8 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
   if (path === "data/s3/restore" && request.method === "POST") {
     const body = await readJson<{ fileName?: string }>(request);
     const fileName = String(body.fileName ?? "").trim();
+    // 有意只拒 "\":S3 key 合法含 "/"(前缀目录),与 WebDAV 的双拒不对称;真实 key
+    // 均由 s3ListBackups 返回,服务端仅作 sanity 过滤。
     if (!fileName || fileName.includes("\\")) return error("Invalid S3 backup file name", 400);
     try {
       await s3Restore(state.settings.s3Config, fileName);

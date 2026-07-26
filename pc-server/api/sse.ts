@@ -83,6 +83,12 @@ export function sseFrame(event: string, data: JsonValue | object) {
  *  setTimeout 回调(33ms 节点广播)里,未捕获异常直接杀死整个 Bun 进程;发生在同步广播里
  *  则中断遍历,后续存活客户端静默丢事件。这里统一 try/catch 并把死 controller 从集合
  *  摘除(只吞不摘会让它永久驻留反复抛),对齐 heartbeat 既有的"抛错即清理"模式。 */
+/** 4-6:慢客户端背压上限。enqueue 不阻塞,卡顿客户端在长流式期间会把节点帧无限堆进
+ *  内存(33ms 合并只限速率不限积压)。desiredSize 每积压一帧减 1,低于 -256(约 25MB 级
+ *  未消费节点帧)判定为死连接,主动 close 断开——所有 SSE 通道连接即推快照/invalidate,
+ *  客户端重连后自愈,不丢终态。 */
+const MAX_SSE_BACKLOG_FRAMES = 256;
+
 function broadcastTo(
   clients: Set<ReadableStreamDefaultController<Uint8Array>> | undefined,
   frame: Uint8Array,
@@ -90,9 +96,14 @@ function broadcastTo(
   if (!clients) return;
   for (const client of clients) {
     try {
+      if ((client.desiredSize ?? 0) <= -MAX_SSE_BACKLOG_FRAMES) {
+        clients.delete(client); // Set 迭代中 delete 是安全的
+        try { client.close(); } catch { /* 已死 */ }
+        continue;
+      }
       client.enqueue(frame);
     } catch {
-      clients.delete(client); // Set 迭代中 delete 是安全的
+      clients.delete(client);
     }
   }
 }
