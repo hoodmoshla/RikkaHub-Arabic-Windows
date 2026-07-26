@@ -305,7 +305,9 @@ async function sse<T>(
           if (trimmedLine.startsWith("event:")) {
             currentEvent = trimmedLine.slice(6).trim();
           } else if (trimmedLine.startsWith("data:")) {
-            currentData += (currentData ? "\n" : "") + trimmedLine.slice(5).trim();
+            // SSE 规范:data: 后只剥一个前导空格;整行 trim 会让多行 data 的空白失真
+            const dataValue = trimmedLine.slice(5);
+            currentData += (currentData ? "\n" : "") + (dataValue.startsWith(" ") ? dataValue.slice(1) : dataValue);
           } else if (trimmedLine.startsWith("id:")) {
             currentId = trimmedLine.slice(3).trim();
           } else if (trimmedLine === "") {

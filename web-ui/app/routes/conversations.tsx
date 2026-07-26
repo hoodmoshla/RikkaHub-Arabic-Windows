@@ -526,8 +526,26 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
       void api
         .get<ConversationDto>(`conversations/${activeId}`)
         .then((data) => {
-          setDetail(data);
-          updateSummary(toConversationSummaryUpdate(data));
+          // 7-5 单调守卫:轮询响应可能晚于 SSE 增量到达,旧快照无条件覆盖会让流式文本
+          // 闪跳一下(下一帧 SSE 才纠正)。节点数变少、或节点数相同但最新节点文本更短的
+          // 响应判定为旧数据,丢弃(SSE 已领先,无需兜底)。
+          let accepted = false;
+          setDetail((prev) => {
+            if (prev && prev.id === data.id) {
+              if (data.messages.length < prev.messages.length) return prev;
+              if (data.messages.length === prev.messages.length && data.messages.length > 0) {
+                const textLen = (node: (typeof data.messages)[number]) => {
+                  const msg = node.messages[node.selectIndex] ?? node.messages[0];
+                  return JSON.stringify(msg?.parts ?? []).length;
+                };
+                const lastIdx = data.messages.length - 1;
+                if (textLen(data.messages[lastIdx]!) < textLen(prev.messages[lastIdx]!)) return prev;
+              }
+            }
+            accepted = true;
+            return data;
+          });
+          if (accepted) updateSummary(toConversationSummaryUpdate(data));
         })
         .catch(() => {
           // SSE remains the primary path; polling is only a recovery path for missed stream frames.
