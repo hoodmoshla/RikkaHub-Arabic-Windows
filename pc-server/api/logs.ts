@@ -3,7 +3,7 @@
 
 import type { RequestLog, RequestStats } from "../foundation/types";
 import { id, isRecord } from "../foundation/utils";
-import { saveState, state } from "../persistence/json-store";
+import { scheduleThrottledSaveState, state } from "../persistence/json-store";
 
 function classifyRequestGroup(kind: string, toolName: string): string {
   if (kind.startsWith("mcp:")) return "MCP 请求";
@@ -113,5 +113,7 @@ export function addLog(input: Omit<RequestLog, "id" | "at">) {
   if (entry.responseHeaders) entry.responseHeaders = sanitizeLogHeaders(entry.responseHeaders);
   state.logs.unshift(entry);
   state.logs = state.logs.slice(0, 100);
-  saveState();
+  // R1-6:每条请求日志一次全量 state 序列化落盘是放大的 IO(高频工具调用期尤甚),
+  // 改节流保存——日志/计数是可容忍秒级丢失的非关键数据,与流式期间的既有节流语义一致。
+  scheduleThrottledSaveState();
 }

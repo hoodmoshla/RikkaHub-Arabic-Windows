@@ -217,6 +217,49 @@ request requires the issued access token. The desktop app binds `127.0.0.1`
 and does not need this.
 
 
+**Security note for LAN / public deployments:** the AI's `scrape_web` tool fetches
+whatever URL the model asks for *from inside the container* — a prompt-injected web page can
+steer it into probing internal services or cloud metadata endpoints (SSRF). If that matters in
+your network, isolate the container's network or restrict its egress.
+
+### Reverse proxy (nginx)
+
+Two things matter when putting RikkaHub behind a reverse proxy (e.g. for HTTPS):
+
+- **Host passthrough** — the server rejects state-changing requests whose `Origin` header
+  doesn't match the request `Host` (CSRF protection). A default `proxy_pass` rewrites
+  `Host` to the upstream address, so every POST/DELETE fails with 403 — "the page loads but
+  nothing saves". Forward the original host with `proxy_set_header Host $host`.
+- **Streaming** — SSE responses carry `X-Accel-Buffering: no`, which makes nginx disable
+  response buffering for them automatically; `proxy_buffering off` is only a fallback for
+  proxies that ignore the header.
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl;
+    server_name rikka.example.com;
+    # ssl_certificate ...; ssl_certificate_key ...;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;              # keep the Origin/Host CSRF check working
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;   # WebSocket (voice input)
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;                      # fallback; SSE already sends X-Accel-Buffering: no
+        proxy_read_timeout 1h;                    # long-lived SSE / generation streams
+        client_max_body_size 0;                   # backup restore uploads can be hundreds of MB
+    }
+}
+```
+
+Set `RIKKAHUB_PASSWORD` whenever the proxy makes the server reachable beyond localhost.
+
 ## 🧰 Tech stack
 
 - [Bun](https://bun.sh/) — runtime, bundler, package manager

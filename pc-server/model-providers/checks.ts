@@ -9,7 +9,7 @@ import { addLog } from "../api/logs";
 import { findAssistant } from "../assistants";
 import { applyCustomBody, jsonBody, modelsEndpointFor, normalizeFetchedModels, applyRequestHeaders, providerHeaders, providerTestCorePassed, providerTestModel, textBody } from "./index";
 import { hostOfProvider } from "../inference-engine/message-builder";
-import { appendUsageFromRaw, deltaReasoningContent, deltaTextContent, parseSseChunks, responseEventToDelta } from "../inference-engine/providers";
+import { deltaReasoningContent, deltaTextContent, parseSseChunks, responseEventToDelta } from "../inference-engine/providers";
 
 function getByPath(value: unknown, path: string): unknown {
   const expression = path.trim();
@@ -220,7 +220,7 @@ function providerTestPayload(providerItem: Provider, mode: "non_stream" | "strea
   if (mode === "stream" && hostOfProvider(providerItem) !== "api.mistral.ai") body.stream_options = { include_usage: true };
   if (mode === "tools") {
     body.tools = [{ type: "function", function: { name: "get_current_time", description: "Get the current date and time.", parameters: { type: "object", properties: {} } } }];
-    // Use `"auto"` to match the live request path (server.ts:6476) and the Android client
+    // Use `"auto"` to match the live request path (conversations/orchestrator.ts) and the Android client
     // (which never sets tool_choice at all — same as auto by default). The previous shape
     // `{ type: "function", function: { name: ... } }` is the OpenAI "force this specific
     // function" format; Deepseek's API doesn't reliably emit standard tool_calls deltas
@@ -269,7 +269,6 @@ async function readProviderTestStream(response: Response, providerItem: Provider
       const raw = JSON.parse(payload);
       if (providerItem.type === "google") {
         appendPreview(String(raw.candidates?.[0]?.content?.parts?.[0]?.text ?? ""));
-        appendUsageFromRaw(undefined, raw);
         return;
       }
       if (providerItem.type === "claude") {
@@ -290,7 +289,6 @@ async function readProviderTestStream(response: Response, providerItem: Provider
       } else if (raw.usage) {
         appendPreview("[usage]");
       }
-      appendUsageFromRaw(undefined, raw);
     } catch {
       appendPreview(payload);
     }
@@ -420,12 +418,22 @@ export async function runProviderCheck(providerItem: Provider, mode: "non_stream
   };
 }
 
+/** 全面审查 R5-3:凭据/端点字段是否变更。变更即旧测试结论失效——settings/provider 保存
+ *  时撤销 testPassed;markProviderTestResult 落章前复核(测试飞行期间用户改了配置,
+ *  结论属于旧配置,不能给新配置盖章)。 */
+export function providerAuthChanged(prev: Provider, next: Provider): boolean {
+  const fields = ["type", "apiKey", "baseUrl", "chatCompletionsPath"] as const;
+  return fields.some((key) => String(prev[key] ?? "") !== String(next[key] ?? ""))
+    || (prev.useResponseApi === true) !== (next.useResponseApi === true);
+}
+
 export function markProviderTestResult(providerItem: Provider, checks: Array<{ mode: string; ok: boolean }>) {
   if (!providerTestCorePassed(checks)) return;
   updateSettings({
     ...state.settings,
     providers: state.settings.providers.map((item) =>
-      item.id === providerItem.id
+      // R5-3:providerItem 是测试开始时的快照;凭据/端点已被用户改动 → 不盖章。
+      item.id === providerItem.id && !providerAuthChanged(item, providerItem)
         ? { ...item, testPassed: true, testPassedAt: Date.now() }
         : item,
     ),

@@ -1,7 +1,7 @@
 // persistence/json-store.ts — state.json 读写与状态对象
 // 纪律：负责 state 对象的持久化和共享，不依赖业务逻辑（阶段 2/3 逐步解耦 normalizeState）。
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { dataDir, statePath } from "../foundation/paths";
@@ -15,6 +15,25 @@ export const MEMORY_FILE_SPLIT_MIGRATION = "memory-file-split-1.3.2";
 // 全局状态对象。由 bootstrap() 在启动时通过 setState(loadState()) 初始化并赋值。
 export let state!: State;
 export function setState(next: State) { state = next; }
+
+/** R1-1:Bun.serve 现在先于 loadState 绑端口(先打端口标记再跑迁移),选端口需要
+ *  preferredPort 但不能等全量装载/迁移——这里对 state.json 做一次"只窥探端口"的轻量
+ *  读取。任何失败(不存在/损坏/字段非法)都返回 null 走默认端口;损坏场景 loadState
+ *  稍后自会走恢复链,恢复出的端口下次启动生效。 */
+export function peekPreferredPortIn(statePathValue: string): number | null {
+  try {
+    if (!existsSync(statePathValue)) return null;
+    const parsed = JSON.parse(readFileSync(statePathValue, "utf8")) as { settings?: { preferredPort?: unknown } };
+    const port = parsed.settings?.preferredPort;
+    return typeof port === "number" && Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+export function peekPreferredPort(): number | null {
+  return peekPreferredPortIn(statePath);
+}
 
 let pendingThrottledSave: ReturnType<typeof setTimeout> | null = null;
 let lastSaveStateMs = 0;
@@ -74,6 +93,7 @@ async function performStateSave(): Promise<void> {
       // protects against torn writes if the process is killed mid-save.
       await fsPromises.rename(tempPath, statePath);
       maybeWriteDailyBackup(content);
+      sweepObsoleteRecoveryFilesIfArmed();
       return;
     } catch (errorValue) {
       lastError = errorValue;
@@ -90,6 +110,7 @@ async function performStateSave(): Promise<void> {
   // P2-1:静默丢配置是最高危的一类故障,用户必须知道(通道镜像到 console)。
   try {
     await Bun.write(`${statePath}.recovery-${Date.now()}.json`, content);
+    recoverySweepArmed = true; // 磁盘上有 recovery 了,下次成功落盘后需要清
     reportError("persistence", "error", "state.json 落盘失败(已另存 recovery 文件,重启后自动恢复)", lastError);
   } catch (recErr) {
     reportError("persistence", "error", "state.json 落盘失败,recovery 文件也写不出——本次变更未持久化", lastError ?? recErr);
@@ -131,41 +152,132 @@ function maybeWriteDailyBackup(content: string): void {
   maybeWriteDailyBackupTo(`${statePath}.daily.bak`, content);
 }
 
-/** 全面审查 1-2:state.json 损坏时的回退链(loadState 解析失败后调用)。原先只认
- *  pre-sqlite.bak(1.2.6 迁移时代化石,老用户可能落后数月),而 performStateSave 八连败
- *  写出的 recovery-*.json 从来无人读——磁盘上躺着最新完整状态却回滚到远古设置。
- *  按新鲜度依次尝试:① 最新 recovery-*.json(坏则逐个回退)→ ② 每日滚动备份 →
- *  ③ pre-sqlite.bak → ④ null(调用方回默认)。用过的 recovery 归档改名 .applied-<ts>,
- *  防下次启动误用陈旧 recovery 覆盖更新的状态。 */
-export function recoverStateFromBackups(dataDirPath: string, statePathValue: string): Partial<State> | null {
+/** 恢复链返回信息:除状态本体外携带来源与落盘时间,调用方必须让用户知道
+ *  "回滚到了哪个备份、哪一天"(R1-2 ④)。 */
+export interface RecoveredStateInfo {
+  state: Partial<State>;
+  source: string;
+  mtimeMs: number;
+}
+
+/** 全面审查 1-2(批次一收口):state.json 损坏时的回退链(loadState 解析失败后调用)。
+ *  候选 = recovery-*.json(落盘失败的最后一笔抢救)+ daily.bak(每日滚动)+
+ *  pre-sqlite.bak(迁移时代化石)。原实现按"类别优先级"固定顺序,数月前的陈旧
+ *  recovery 会压过昨天的 daily.bak——静默把设置/密钥回滚数月。现统一按文件 mtime
+ *  新鲜度排序取最新可解析者;同龄(同一 tick 写出)按 recovery > daily > pre-sqlite
+ *  破平。用过的 recovery 归档改名 .applied-<ts>,防下次启动重复采用。 */
+export function recoverStateFromBackups(dataDirPath: string, statePathValue: string): RecoveredStateInfo | null {
+  interface Candidate { path: string; source: string; mtimeMs: number; rank: number }
+  const candidates: Candidate[] = [];
   try {
-    const names = readdirSync(dataDirPath)
-      .filter((n) => n.startsWith("state.json.recovery-") && n.endsWith(".json"))
-      .sort() // Date.now() 毫秒时间戳同位数,字典序即时间序
-      .reverse();
-    for (const name of names) {
-      const candidate = join(dataDirPath, name);
+    for (const name of readdirSync(dataDirPath)) {
+      if (!name.startsWith("state.json.recovery-") || !name.endsWith(".json")) continue;
+      const candidatePath = join(dataDirPath, name);
       try {
-        const parsed = JSON.parse(readFileSync(candidate, "utf8")) as Partial<State>;
-        console.error(`[loadState] 已从 recovery 文件恢复:${name}`);
-        try { renameSync(candidate, `${candidate}.applied-${Date.now()}`); } catch { /* 归档尽力而为 */ }
-        return parsed;
-      } catch { /* 该 recovery 也坏 → 试更早的 */ }
+        candidates.push({ path: candidatePath, source: name, mtimeMs: statSync(candidatePath).mtimeMs, rank: 0 });
+      } catch { /* stat 失败 → 当不存在 */ }
     }
-  } catch { /* readdir 失败 → 继续下一级 */ }
-  try {
-    const daily = `${statePathValue}.daily.bak`;
-    const parsed = JSON.parse(readFileSync(daily, "utf8")) as Partial<State>;
-    console.error("[loadState] 已从每日滚动备份恢复(最多回退一天)");
-    return parsed;
-  } catch { /* 不存在/损坏 → 继续 */ }
-  try {
-    const bak = join(dataDirPath, "state.json.pre-sqlite.bak");
-    const parsed = JSON.parse(readFileSync(bak, "utf8")) as Partial<State>;
-    console.error("[loadState] 已从 pre-sqlite.bak 恢复(迁移时代快照,可能显著过时)");
-    return parsed;
-  } catch { /* 不存在/损坏 */ }
+  } catch { /* readdir 失败 → 只剩固定候选 */ }
+  const fixed = [
+    { path: `${statePathValue}.daily.bak`, source: "daily.bak(每日滚动备份,最多回退一天)", rank: 1 },
+    { path: join(dataDirPath, "state.json.pre-sqlite.bak"), source: "pre-sqlite.bak(迁移时代快照,可能显著过时)", rank: 2 },
+  ];
+  for (const f of fixed) {
+    try {
+      candidates.push({ ...f, mtimeMs: statSync(f.path).mtimeMs });
+    } catch { /* 不存在 */ }
+  }
+  // mtime 新鲜度优先;同龄按类别(rank)破平;recovery 之间再按文件名时间戳降序破平。
+  candidates.sort((a, b) => (b.mtimeMs - a.mtimeMs) || (a.rank - b.rank) || b.source.localeCompare(a.source));
+  // 用过的 recovery 不改名归档:采用后到首次成功落盘之间若再崩溃,改名会让下次启动
+  // 读不到这份最新数据(.applied 不参与恢复链)。原样保留 → 重启重采用(幂等),
+  // 首次成功落盘后由 sweepObsoleteRecoveryFilesIfArmed 统一清掉。
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(c.path, "utf8")) as Partial<State>;
+      console.error(`[loadState] 已从备份恢复:${c.source}(落盘于 ${new Date(c.mtimeMs).toISOString()})`);
+      return { state: parsed, source: c.source, mtimeMs: c.mtimeMs };
+    } catch { /* 本候选损坏 → 试下一个 */ }
+  }
   return null;
+}
+
+/** R1-2(终极补强):state.json 完好也要看一眼 recovery。场景:落盘八连败写出 recovery
+ *  后进程随即退出(关机/崩溃时序),下次启动 state.json 能正常解析——但它是旧的,
+ *  最后一笔状态只存在于 recovery 里;原实现只在"解析失败"时才读 recovery,这笔数据
+ *  被静默丢弃。仅当 recovery 严格新于 state.json(mtime)才采用;正常运行中写过
+ *  recovery 且后续保存成功的场景,成功路径已把 recovery 清掉,不会走到这里。
+ *  采用后不改名不删除:首次成功落盘前再崩溃可幂等重采用;落盘成功即被清扫。 */
+export function maybeAdoptFresherRecovery(dataDirPath: string, statePathValue: string): RecoveredStateInfo | null {
+  let stateMtimeMs: number;
+  try { stateMtimeMs = statSync(statePathValue).mtimeMs; } catch { return null; }
+  let names: string[];
+  try { names = readdirSync(dataDirPath); } catch { return null; }
+  const fresher = names
+    .filter((n) => n.startsWith("state.json.recovery-") && n.endsWith(".json"))
+    .flatMap((n) => {
+      const p = join(dataDirPath, n);
+      try {
+        const mtimeMs = statSync(p).mtimeMs;
+        return mtimeMs > stateMtimeMs ? [{ path: p, source: n, mtimeMs }] : [];
+      } catch { return []; }
+    })
+    .sort((a, b) => (b.mtimeMs - a.mtimeMs) || b.source.localeCompare(a.source));
+  for (const c of fresher) {
+    try {
+      const parsed = JSON.parse(readFileSync(c.path, "utf8")) as Partial<State>;
+      return { state: parsed, source: c.source, mtimeMs: c.mtimeMs };
+    } catch { /* 该 recovery 损坏 → 试更早的 fresher */ }
+  }
+  return null;
+}
+
+// ── R1-2 ① 成功落盘后清扫过期 recovery ────────────────────────────────
+// 成功写入的 state.json 必然新于磁盘上任何 recovery(saves 串行 + 实例锁单进程),
+// 过期 recovery 留着只会在未来某次损坏恢复时把状态拽回旧点位,且内含全量 API Key。
+// 启动时磁盘状况未知 → 首次成功保存清一次;此后仅在再次写出 recovery 后重新武装,
+// 避免每次保存都 readdir。
+let recoverySweepArmed = true;
+
+export function sweepObsoleteRecoveryFilesIn(dir: string): number {
+  let removed = 0;
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return 0; }
+  for (const name of names) {
+    if (!name.startsWith("state.json.recovery-") || !name.endsWith(".json")) continue;
+    try { unlinkSync(join(dir, name)); removed++; } catch { /* 单个失败不影响其余 */ }
+  }
+  if (removed > 0) console.log(`[state] 已清扫 ${removed} 个过期 recovery 文件`);
+  return removed;
+}
+
+function sweepObsoleteRecoveryFilesIfArmed(): void {
+  if (!recoverySweepArmed) return;
+  recoverySweepArmed = false;
+  sweepObsoleteRecoveryFilesIn(dataDir);
+}
+
+/** R1-2 ③:.applied-*(旧版"用后归档"产生的 recovery 残留,现行代码不再生成)
+ *  内含全量 API Key,超龄即清(默认 30 天)。启动时调用(见 loadState)。 */
+export function sweepAgedRecoveryArchivesIn(dir: string, maxAgeMs = 30 * 24 * 60 * 60 * 1000): number {
+  let removed = 0;
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return 0; }
+  for (const name of names) {
+    if (!name.startsWith("state.json.recovery-") || !name.includes(".applied-")) continue;
+    const fullPath = join(dir, name);
+    try {
+      if (Date.now() - statSync(fullPath).mtimeMs < maxAgeMs) continue;
+      unlinkSync(fullPath);
+      removed++;
+    } catch { /* 单个失败不影响其余 */ }
+  }
+  if (removed > 0) console.log(`[state] 已清扫 ${removed} 个超龄 recovery 归档(.applied)`);
+  return removed;
+}
+
+export function sweepAgedRecoveryArchives(): number {
+  return sweepAgedRecoveryArchivesIn(dataDir);
 }
 
 // ── 1-4 启动清扫 .tmp 残留 ──────────────────────────────────────

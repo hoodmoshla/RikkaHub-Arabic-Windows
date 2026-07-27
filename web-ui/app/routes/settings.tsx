@@ -42,8 +42,7 @@ type Section =
   | "logs"
   | "proxy"
   | "donate"
-  | "about"
-  | "plan";
+  | "about";
 
 const navItems: Array<{
   id: Section;

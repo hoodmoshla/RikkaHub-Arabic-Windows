@@ -6,7 +6,8 @@
     ".react-router/types/**/*"
   ],
   "exclude": [
-    "**/*.test.ts"
+    "**/*.test.ts",
+    "**/*.test.tsx"
   ],
   "compilerOptions": {
     "lib": [

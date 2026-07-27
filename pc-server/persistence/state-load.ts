@@ -4,19 +4,22 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { AssistantMemoryFile, Conversation, GlobalMemoryFile, JsonValue, State, StoredFile, WriteStrategy } from "../foundation/types";
-import { id, isRecord, mergeById, uniqueStrings } from "../foundation/utils";
+import { getStringArray, id, isRecord, mergeById, uniqueStrings } from "../foundation/utils";
 import { assistantMemoryPath, dataDir, filesDir, globalMemoryPath, pendingMemoryPath, skillsDir, statePath } from "../foundation/paths";
 import { normalizeProxyConfig, normalizePreferredPort } from "../foundation/net";
 import {
   CONVERSATIONS_SQLITE_MIGRATION,
   MEMORY_FILE_SPLIT_MIGRATION,
+  maybeAdoptFresherRecovery,
   recoverStateFromBackups,
+  sweepAgedRecoveryArchives,
   sweepStaleStateTempFiles,
   writeSlimStateJsonSync,
   writeSlimStateJsonSyncForMemory,
 } from "./json-store";
 import { reportError } from "../observability/app-errors";
-import { getConversationsDb, migrateConversationsIntoDb, openConversationsDb, resetConversationsDbTo } from "../conversations";
+import { getConversationsDb, migrateConversationsIntoDbBatched, openConversationsDb, resetConversationsDbTo } from "../conversations";
+import { setStartupPhase } from "../foundation/startup-gate";
 import { countConversations } from "../conversations/read-queries";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory";
 import { NA_API_PRESET_MODELS, NA_API_PROVIDER_ID, SUNSET_PROVIDER_IDS, TENCENT_PROVIDER_ID, builtinProviderRank, enrichModel, inferModelAbilities, model } from "../model-providers";
@@ -33,9 +36,15 @@ import {
   DEFAULT_OCR_PROMPT,
   DEFAULT_PROMPT_OPTIMIZE_PROMPT,
   DEFAULT_SUGGESTION_PROMPT,
+  SUGGESTION_CHARACTER_LIMIT,
   DEFAULT_TITLE_PROMPT,
   DEFAULT_TRANSLATION_PROMPT,
+  TITLE_CHARACTER_LIMIT,
 } from "../app-config/prompts";
+
+// 1.1.1 内置供应商重排迁移标记。模块级导出:恢复备份时由 backup/import.ts 预置
+// (备份里的 providers 顺序就是用户排好的顺序,恢复后重排只会破坏它,见 R4-1)。
+export const PROVIDER_REORDER_MIGRATION = "provider-reorder-1.1.1";
 
 export function normalizeState(input: Partial<State>): State {
   const fresh = defaultState();
@@ -135,8 +144,16 @@ export function normalizeState(input: Partial<State>): State {
   normalized.settings.ocrPrompt = normalized.settings.ocrPrompt || DEFAULT_OCR_PROMPT;
   normalized.settings.compressPrompt = normalized.settings.compressPrompt || DEFAULT_COMPRESS_PROMPT;
   normalized.settings.promptOptimizePrompt = normalized.settings.promptOptimizePrompt || DEFAULT_PROMPT_OPTIMIZE_PROMPT;
-  normalized.settings.titlePrompt = normalized.settings.titlePrompt.replace(/not exceed 10 characters/gi, "not exceed 15 characters");
-  normalized.settings.suggestionPrompt = normalized.settings.suggestionPrompt.replace(/not exceed 10 characters/gi, "not exceed 18 characters");
+  // R1-11:标题/建议默认提示词的字数上限曾从 10 调到 15/18。旧做法是每次启动无条件正则
+  // 替换 "not exceed 10 characters"——用户有意写 10 的自定义提示词被反复静默改掉。
+  // 终极版不用迁移标记(pc-backup.json 不导出标记,恢复即丢,R1-12 已踩过这坑),改为
+  // 无状态精确匹配:由现默认值重建"字数还是 10"的旧默认全文,整段完全相等才视为
+  // "未自定义的旧默认值",升级到新默认;任何自定义(含刻意写 10)原样保留。幂等、
+  // 随备份天然往返,新老数据同一条路径。
+  const legacyTitlePrompt = DEFAULT_TITLE_PROMPT.replace(`not exceed ${TITLE_CHARACTER_LIMIT} characters`, "not exceed 10 characters");
+  if (normalized.settings.titlePrompt === legacyTitlePrompt) normalized.settings.titlePrompt = DEFAULT_TITLE_PROMPT;
+  const legacySuggestionPrompt = DEFAULT_SUGGESTION_PROMPT.replace(`not exceed ${SUGGESTION_CHARACTER_LIMIT} characters`, "not exceed 10 characters");
+  if (normalized.settings.suggestionPrompt === legacySuggestionPrompt) normalized.settings.suggestionPrompt = DEFAULT_SUGGESTION_PROMPT;
   // Backfill REASONING ability for previously-saved models (e.g. claude-opus-4-6) whose
   // abilities array was set before the inference regex covered them. Only adds — never removes.
   normalized.settings.providers = normalized.settings.providers.map((providerItem) => ({
@@ -167,8 +184,7 @@ export function normalizeState(input: Partial<State>): State {
   // 1.1.1:按预置顺序重排内置供应商(老用户也生效)。用户新增的自定义供应商不在
   // BUILTIN_PROVIDER_ORDER 里,rank 都是 MAX_SAFE_INTEGER,稳定排序后仍按原相对顺序
   // 排在内置供应商之后,不会被重排打乱。这是一次性迁移——记录在 appliedMigrations,
-  // 升级后用户的后续手动排序不会再被覆盖。
-  const PROVIDER_REORDER_MIGRATION = "provider-reorder-1.1.1";
+  // 升级后用户的后续手动排序不会再被覆盖(常量在模块顶部,恢复路径也引用)。
   const appliedMigrations = Array.isArray(normalized.appliedMigrations) ? normalized.appliedMigrations : [];
   if (!appliedMigrations.includes(PROVIDER_REORDER_MIGRATION)) {
     normalized.settings.providers = [...normalized.settings.providers].sort(
@@ -176,31 +192,36 @@ export function normalizeState(input: Partial<State>): State {
     );
     normalized.appliedMigrations = [...appliedMigrations, PROVIDER_REORDER_MIGRATION];
   }
+  // 全面审查 R1-12(终极版):内置搜索服务的补齐/回填必须尊重删除墓碑。此前"按 type
+  // 缺了就补"每次启动都跑,用户删掉的内置项重启必复活;一次性迁移标记也不彻底——
+  // pc-backup.json 不导出 appliedMigrations,备份恢复后标记丢失、复活重演。墓碑
+  // (dismissedSearchServiceTypes)住在 settings 里,由删除端点写入、手动重加撤销,
+  // 随备份天然往返:重启/恢复/跨机迁移都不推翻删除意图。老数据无该字段 → 空墓碑,
+  // 行为与旧版完全一致。
+  normalized.settings.dismissedSearchServiceTypes = uniqueStrings(
+    getStringArray(normalized.settings.dismissedSearchServiceTypes).map((t) => t.toLowerCase()),
+  );
+  const dismissedSearchTypes = new Set(normalized.settings.dismissedSearchServiceTypes);
+  const searchTypeOf = (service: JsonValue) => String((service as Record<string, JsonValue>).type ?? "").toLowerCase();
   normalized.settings.searchServices = normalized.settings.searchServices?.length
     ? normalized.settings.searchServices
-    : defaults.searchServices;
+    : defaults.searchServices.filter((service) => !dismissedSearchTypes.has(searchTypeOf(service)));
   normalized.settings.webDavConfig = normalizeWebDavConfig(normalized.settings.webDavConfig);
   normalized.settings.s3Config = normalizeS3Config(normalized.settings.s3Config);
   normalized.settings.proxyConfig = normalizeProxyConfig(normalized.settings.proxyConfig);
   normalized.settings.preferredPort = normalizePreferredPort(normalized.settings.preferredPort);
-  if (!normalized.settings.searchServices.some((service) => String((service as Record<string, JsonValue>).type ?? "").toLowerCase() === "tinyfish")) {
-    normalized.settings.searchServices = [
-      ...normalized.settings.searchServices,
-      { type: "tinyfish", id: id(), name: "Tinyfish", apiKey: "" },
-    ];
-  }
-  // Backfill 2026-05 search service additions for existing installs.
-  if (!normalized.settings.searchServices.some((service) => String((service as Record<string, JsonValue>).type ?? "").toLowerCase() === "firecrawl")) {
-    normalized.settings.searchServices = [
-      ...normalized.settings.searchServices,
-      { type: "firecrawl", id: id(), name: "Firecrawl", apiKey: "" },
-    ];
-  }
-  if (!normalized.settings.searchServices.some((service) => String((service as Record<string, JsonValue>).type ?? "").toLowerCase() === "grok")) {
-    normalized.settings.searchServices = [
-      ...normalized.settings.searchServices,
-      { type: "grok", id: id(), name: "Grok", apiKey: "", customUrl: "https://api.x.ai/v1/responses", model: "grok-4-fast" },
-    ];
+  // 内置搜索服务补齐(带墓碑豁免):type 不存在且用户没删过 → 补。新增内置服务时在
+  // 此登记即可,墓碑机制天然防复活,无需迁移标记。
+  const backfillSearchPresets: Array<Record<string, JsonValue>> = [
+    { type: "tinyfish", id: id(), name: "Tinyfish", apiKey: "" },
+    { type: "firecrawl", id: id(), name: "Firecrawl", apiKey: "" },
+    { type: "grok", id: id(), name: "Grok", apiKey: "", customUrl: "https://api.x.ai/v1/responses", model: "grok-4-fast" },
+  ];
+  for (const preset of backfillSearchPresets) {
+    const presetType = String(preset.type);
+    if (dismissedSearchTypes.has(presetType)) continue;
+    if (normalized.settings.searchServices.some((service) => searchTypeOf(service) === presetType)) continue;
+    normalized.settings.searchServices = [...normalized.settings.searchServices, preset];
   }
   normalized.settings.asrProviders = normalizeAsrProviders(normalized.settings.asrProviders);
   normalized.settings.selectedASRProviderId = normalized.settings.asrProviders.some((provider) => provider.id === normalized.settings.selectedASRProviderId)
@@ -228,6 +249,19 @@ export function normalizeState(input: Partial<State>): State {
     ...normalized.generatedImages.map((image) => Number(image.id) + 1).filter((value) => Number.isFinite(value)),
     1,
   );
+  // R3-3:ssePostEndpoint 曾被误持久化进 settings(现已停止,见 api/handlers/settings.ts)。
+  // 它是运行时会话缓存(常带 sessionId),服务器重启即失效,留在磁盘上会让重启 PC 也救不回来。
+  // 每次加载无条件剥除——幂等、无需迁移标记,且天然覆盖备份恢复带回的旧值(顺应"数据文件夹
+  // 干净"原则)。
+  if (Array.isArray(normalized.settings.mcpServers)) {
+    normalized.settings.mcpServers = normalized.settings.mcpServers.map((server) => {
+      if (!server || typeof server !== "object" || Array.isArray(server)) return server;
+      if (!("ssePostEndpoint" in server)) return server;
+      const clone = { ...(server as Record<string, JsonValue>) };
+      delete clone.ssePostEndpoint;
+      return clone as JsonValue;
+    });
+  }
   return normalized;
 }
 
@@ -248,7 +282,7 @@ export function normalizeState(input: Partial<State>): State {
 //     assistant——崩在任意点,recompute 都能自愈,已落盘 id 永不重用。
 // ============================================================================
 
-export function loadState(): State {
+export async function loadState(): Promise<State> {
   mkdirSync(filesDir, { recursive: true });
   mkdirSync(skillsDir, { recursive: true });
   // 1.2.6:会话从 state.json 迁入 SQLite 活库(rikka_hub.db)。state.json 瘦身后只保留
@@ -262,6 +296,13 @@ export function loadState(): State {
   } else {
     try {
       parsed = JSON.parse(readFileSync(statePath, "utf8")) as Partial<State>;
+      // R1-2(终极补强):state.json 完好但磁盘上有更新鲜的 recovery——上次退出前落盘
+      // 八连败写出的最后一笔抢救数据,不采用即静默丢弃最后一个会话期的全部变更。
+      const fresher = maybeAdoptFresherRecovery(dataDir, statePath);
+      if (fresher) {
+        reportError("persistence", "warn", `检测到上次退出前落盘失败的抢救数据(${fresher.source},落盘于 ${new Date(fresher.mtimeMs).toISOString()}),比 state.json 更新,已自动采用`);
+        parsed = fresher.state;
+      }
     } catch (err) {
       // 全面审查 1-2:state.json 损坏 → 按新鲜度走恢复链(recovery-*.json → daily.bak
       // → pre-sqlite.bak),全部失败才回默认。原先只认化石 pre-sqlite.bak,磁盘上躺着
@@ -269,8 +310,8 @@ export function loadState(): State {
       console.error("[loadState] state.json 解析失败,按恢复链回退", err);
       const recovered = recoverStateFromBackups(dataDir, statePath);
       if (recovered) {
-        reportError("persistence", "warn", "state.json 损坏,已从备份恢复——请核对设置是否为最新", err);
-        parsed = recovered;
+        reportError("persistence", "warn", `state.json 损坏,已从备份恢复:${recovered.source},落盘于 ${new Date(recovered.mtimeMs).toISOString()}——请核对设置是否为最新`, err);
+        parsed = recovered.state;
       } else {
         reportError("persistence", "error", "state.json 损坏且无任何可用备份,已回退默认状态", err);
         parsed = defaultState();
@@ -279,7 +320,7 @@ export function loadState(): State {
   }
 
   // 迁移 + 瘦身(首次升级)。返回 true=迁移完成(活库即权威);false=迁移失败。
-  const migrated = migrateConversationsIfNeeded(parsed);
+  const migrated = await migrateConversationsIfNeeded(parsed);
 
   // DB-first:会话运行时权威 = 活库 + working set,启动不装载会话(元数据也不装)。
   // 活库健康探测:迁移完成但活库读失败(打开成功而 SELECT 失败的窄场景,如页损坏)
@@ -297,8 +338,9 @@ export function loadState(): State {
   migrateMemoryFilesIfNeeded(state);
   repairRelocatedFilePaths(state);
   migrateExtractedTextToSidecars(state);
-  migrateFileDedupIfNeeded(state);
+  await migrateFileDedupIfNeeded(state);
   sweepStaleStateTempFiles(); // 1-4:此刻本进程尚未开始任何原子写,清扫安全
+  sweepAgedRecoveryArchives(); // R1-2 ③:.applied 归档(已采用的 recovery)超龄 30 天清扫
   return state;
 }
 
@@ -351,7 +393,7 @@ export const FILE_DEDUP_MIGRATION = "file-dedup-2.0";
  *  (仅当该路径不再被任何保留条目使用)。改写先于删除:任意点崩溃后重跑,分组与映射由
  *  当前内容重新推导,天然幂等。活库未打开、或会话仍在 state.json(SQLite 迁移未完成)时
  *  本次跳过且不写标记,下次启动重试。 */
-function migrateFileDedupIfNeeded(stateObj: State): void {
+async function migrateFileDedupIfNeeded(stateObj: State): Promise<void> {
   const appliedMigrations = Array.isArray(stateObj.appliedMigrations) ? stateObj.appliedMigrations : [];
   if (appliedMigrations.includes(FILE_DEDUP_MIGRATION)) return;
   if (Array.isArray(stateObj.conversations)) return;
@@ -374,11 +416,20 @@ function migrateFileDedupIfNeeded(stateObj: State): void {
     }
     const idMap = new Map<number, number>();
     const dupItems: { f: StoredFile; path: string }[] = [];
+    // R1-1:sha256 是同步 CPU/IO 块(GB 级截图库可达分钟级),逐文件让出事件循环并回填
+    // 进度,迁移期的 503/进度端点才有机会被服务。
+    let hashTotal = 0;
+    for (const group of bySize.values()) if (group.length >= 2) hashTotal += group.length;
+    let hashed = 0;
+    if (hashTotal > 0) setStartupPhase("file-dedup", 0, hashTotal);
     for (const group of bySize.values()) {
       if (group.length < 2) continue;
       const byHash = new Map<string, { f: StoredFile; path: string }[]>();
       for (const item of group) {
+        await Bun.sleep(0);
         const h = hashFileSha256(item.path);
+        hashed += 1;
+        setStartupPhase("file-dedup", hashed, hashTotal);
         if (!h) continue;
         const list = byHash.get(h) ?? [];
         list.push(item);
@@ -520,7 +571,7 @@ function migrateMemoryFilesIfNeeded(stateObj: State): void {
 // 触发真实磁盘迁移。已收敛到 bootstrap.ts 显式编排;此处原有的三段搬迁遗留无主注释
 // (描述 json-store 写队列/TDZ 约束)一并清除。
 
-function migrateConversationsIfNeeded(parsed: Partial<State>): boolean {
+async function migrateConversationsIfNeeded(parsed: Partial<State>): Promise<boolean> {
   const appliedMigrations = Array.isArray(parsed.appliedMigrations) ? parsed.appliedMigrations : [];
   if (appliedMigrations.includes(CONVERSATIONS_SQLITE_MIGRATION)) return true;
 
@@ -531,11 +582,14 @@ function migrateConversationsIfNeeded(parsed: Partial<State>): boolean {
   // 失败、saveState 把会话从 state.json 抹空了(此路径已被 performStateSave 的标记门闸堵住,
   // 这里是纵深防御,捕获任何把 state.json 抹空的未知途径)。从 .bak 救回重灌。
   // 仅在迁移标记未写时执行:已迁移用户的空活库是合法空状态(用户删光了),不能误复活。
-  // 标记已写会在上面 L3888 早退,不会走到这里。
+  // 标记已写会在函数开头早退,不会走到这里。
   if (conversationsToMigrate.length === 0) {
     const fromBak = recoverConversationsFromBak();
     if (fromBak.length > 0) {
       console.log(`[conv-db] 检测到迁移失败残留:从 pre-sqlite.bak 恢复 ${fromBak.length} 条会话`);
+      // R4-1 配套:化石灌库是重大事件(快照可能落后数月),必须让用户看见——正常升级
+      // 首启不走这里(state.json 自带 conversations),走到这里说明会话曾被某种途径抹空。
+      reportError("persistence", "warn", `检测到会话迁移失败残留,已从迁移前快照(pre-sqlite.bak)恢复 ${fromBak.length} 条会话——快照可能不是最新,请核对会话内容`);
       conversationsToMigrate = fromBak;
     }
   }
@@ -549,11 +603,13 @@ function migrateConversationsIfNeeded(parsed: Partial<State>): boolean {
     }
   }
 
-  // ② 灌库(单事务,幂等)。巨量会话卡几秒——这是一次性的。
+  // ② 灌库(分批事务,幂等;R1-1 ③)。批间让出事件循环,迁移期启动进度端点可响应;
+  // 中途断电重启后从头重灌,逐会话 upsert 幂等不会脏。
   if (conversationsToMigrate.length > 0) {
     console.log(`[conv-db] 首次升级:迁移 ${conversationsToMigrate.length} 条会话进 SQLite 活库...`);
+    setStartupPhase("migrate-conversations", 0, conversationsToMigrate.length);
     try {
-      migrateConversationsIntoDb(getConversationsDb()!, conversationsToMigrate);
+      await migrateConversationsIntoDbBatched(getConversationsDb()!, conversationsToMigrate, 200, (done, total) => setStartupPhase("migrate-conversations", done, total));
       console.log("[conv-db] 会话迁移完成");
     } catch (err) {
       console.error("[conv-db] 会话迁移失败,保留 state.json 原样,下次启动重试", err);

@@ -14,6 +14,7 @@ import { Slider } from "~/components/ui/slider";
 import { Switch } from "~/components/ui/switch";
 import { Textarea } from "~/components/ui/textarea";
 import { UIAvatar } from "~/components/ui/ui-avatar";
+import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import api from "~/services/api";
 import { confirmDialog } from "~/stores/confirm-store";
 import type { AssistantProfile, ProviderModel, Settings } from "~/types";
@@ -93,38 +94,35 @@ export function AssistantsSection({
   const [draft, setDraft] = React.useState<AssistantProfile | null>(
     assistant ? clone(assistant) : null,
   );
-  const dirtyRef = React.useRef(false);
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      if (!draft) return;
+      await api.post("settings/assistant/detail", draft);
+      onSettings({
+        ...settings,
+        assistants: settings.assistants.map((item) => (item.id === draft.id ? draft : item)),
+      });
+    },
+    { onSaveError: (error) => toast.error((error as Error).message || t("settings:assistants.autosave_failed")) },
+  );
 
+  // assistantsRef:重对齐只在切换助手(assistantId)时重载表单。settings.assistants 不能
+  // 作为依赖——否则每次 autosave → onSettings 回环都会重触发,把保存窗口内新敲的字符
+  // 当场清掉(McpServerEditor 点名的旧病根,同模式见 providers/search)。
+  const assistantsRef = React.useRef(settings.assistants);
+  assistantsRef.current = settings.assistants;
   React.useEffect(() => {
     const next =
-      settings.assistants.find((item) => item.id === assistantId) ?? settings.assistants[0];
-    dirtyRef.current = false;
+      assistantsRef.current.find((item) => item.id === assistantId) ?? assistantsRef.current[0];
+    autosave.reset();
     setDraft(next ? clone(next) : null);
-  }, [assistantId, settings.assistants]);
-
-  const save = async () => {
-    if (!draft) return;
-    const nextAssistants = settings.assistants.map((item) => (item.id === draft.id ? draft : item));
-    const nextSettings = { ...settings, assistants: nextAssistants };
-    await api.post("settings/assistant/detail", draft);
-    onSettings(nextSettings);
-    dirtyRef.current = false;
-  };
-
-  React.useEffect(() => {
-    if (!draft || !dirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void save().catch((error: Error) =>
-        toast.error(error.message || t("settings:assistants.autosave_failed")),
-      );
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [draft, settings.assistants]);
+  }, [assistantId]);
 
   if (!draft) return null;
 
   const patchDraft = (patch: Partial<AssistantProfile>) => {
-    dirtyRef.current = true;
+    autosave.markDirty();
     setDraft({ ...draft, ...patch });
   };
 
@@ -169,6 +167,8 @@ export function AssistantsSection({
     } else {
       if (!(await confirmDialog({ title: t("settings:assistants.delete_confirm", { name: nameLabel }), danger: true }))) return;
     }
+    // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1)
+    await autosave.discard();
     await api.delete(`settings/assistant/${encodeURIComponent(draft.id)}${deleteMemories ? "?deleteMemories=true" : ""}`);
     const assistants = settings.assistants.filter((item) => item.id !== draft.id);
     onSettings({

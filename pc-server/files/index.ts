@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { StoredFile, XmlToken, MupdfModule } from "../foundation/types";
 import { dataDir, filesDir } from "../foundation/paths";
+import { ZipFileReader, withZipFile } from "./zip-file";
 
 // mupdf-wasm.wasm 通过 `with { type: "file" }` 让 bun build --compile 把这个 9.6MB 的
 // wasm 二进制嵌进单 exe。运行时通过 readFileSync(mupdfWasmPath) 读出字节,塞进 mupdf 暴露
@@ -48,6 +49,8 @@ export function stripXmlText(input: string) {
     .trim();
 }
 
+// 内存态 zip 条目全量解包(每个条目都解压进堆)。仅供 skills-import 的小 zip 使用;
+// 文档解析(DOCX/PPTX/EPUB)已改走 zip-file.ts 的随机访问读取器,大文件路径禁止使用本函数。
 export function readZipEntries(buffer: Buffer) {
   const entries: Array<{ name: string; data: Buffer }> = [];
   const eocd = buffer.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
@@ -80,58 +83,25 @@ export function readZipEntries(buffer: Buffer) {
   return entries;
 }
 
-// Extract a single named member from a (potentially huge) zip via an external `unzip` /
-// `tar.exe` invocation, so we don't decompress every entry into JS heap just to read one
-// XML file. Returns the member's raw bytes or null on failure.
+// --- Document extraction memory discipline -------------------------------------------------
 //
-// Platform support:
-//   - Windows 10+ : System32\tar.exe (BSD libarchive build) speaks zip natively. We
-//     spell out the full path to avoid PATH resolving to GNU tar shipped with Git Bash etc.,
-//     which only handles tar archives and rejects zip with "This does not look like a tar archive".
-//   - Linux: standard `unzip -p <zip> <member>` writes the decompressed bytes to stdout.
-//
-// Falls back to in-memory readZipEntries if the spawn fails (e.g. missing tool, sandboxed
-// environment), so the caller doesn't have to handle that case.
-export function extractSingleZipMemberStreaming(zipPath: string, memberName: string): Buffer | null {
-  try {
-    const isWindows = process.platform === "win32";
-    const cmd = isWindows
-      ? [join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe"), "-xOf", zipPath, memberName]
-      : ["unzip", "-p", zipPath, memberName];
-    const proc = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
-    if (proc.exitCode !== 0) {
-      const stderr = new TextDecoder().decode(proc.stderr ?? new Uint8Array()).slice(0, 200);
-      console.warn(`[document] ${cmd[0]} exit ${proc.exitCode}: ${stderr}`);
-      return null;
-    }
-    const out = proc.stdout;
-    if (!out || out.length === 0) return null;
-    return Buffer.from(out);
-  } catch (err) {
-    console.warn(`[document] streaming zip extract spawn failed: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
-}
+// 安卓对齐(document 模块):DOCX/PPTX/EPUB 走 zip-file.ts 的中央目录随机访问读取器
+// (对齐 java.util.zip.ZipFile),只解压需要的 XML 条目——单文件内存峰值 = 最大单条目,
+// 与归档总体积无关,故这三种格式与安卓一样【无大小上限】。仍保留上限的两类,原因都是
+// 平台差异而非偷懒:
+//   - PDF:mupdf-wasm 只能从内存 buffer 打开(安卓 MuPDF 原生按路径打开、库内流式读页),
+//     整文件必须进 wasm 堆一次,100MB 上限是 wasm 内存空间的现实约束。
+//   - 纯文本:两端最终都是整串进内存(安卓 copyTo 同样如此),100MB 是 JS 堆的 OOM 保险;
+//     这是内存天花板,不是内容截断——上限内全量透传。
+export const MAX_PDF_EXTRACT_BYTES = 100 * 1024 * 1024;
+export const MAX_TEXT_EXTRACT_BYTES = 100 * 1024 * 1024;
 
-// --- Document extraction OOM protection ---------------------------------------------------
-//
-// Android's document module is fully streaming (InputStream.copyTo / ZipFile.getInputStream
-// / MuPDF page-by-page), so it doesn't need explicit size caps — single-file memory peak
-// stays low even for multi-hundred-MB files. PC end's readFileSync-and-parse approach can't
-// match that everywhere without rewriting the zip parser, so we layer in *file-size* guards:
-// above these thresholds, extraction is skipped and the prompt falls back to a brief notice
-// (see fallbackDocumentText). We do NOT cap extracted-text length — truncating a 6000-line
-// upload mid-stream broke large novel/log uploads (Android had no such cap). Models that
-// reject oversized prompts will surface the error themselves; that's the user's call.
-export const MAX_PDF_EXTRACT_BYTES = 100 * 1024 * 1024;   // 100 MB — MuPDF streams pages, headroom for big books
-export const MAX_DOCX_EXTRACT_BYTES = 100 * 1024 * 1024;  // 100 MB — >20 MB routes through streaming unzip, so heap stays bounded
-export const MAX_PPTX_EXTRACT_BYTES = 100 * 1024 * 1024;  // 100 MB — PPTX often padded with embedded images
-export const MAX_EPUB_EXTRACT_BYTES = 100 * 1024 * 1024;
-export const MAX_TEXT_EXTRACT_BYTES = 100 * 1024 * 1024;  // plain text/code; OOM guard only (not a content cap) — covers any realistic novel/log
-// DOCX above this size routes to the external-unzip path (`tar.exe` on Windows, `unzip` on
-// Linux) to extract only `word/document.xml`, instead of decompressing every zip entry into
-// JS heap. Threshold picked at the point where in-memory cost starts to matter.
-export const DOCX_STREAMING_THRESHOLD_BYTES = 20 * 1024 * 1024;
+/** R4-3:同步 CPU 重活(MuPDF 逐页/PPTX 逐 slide/EPUB 逐章节)之间让出事件环,
+ *  大文档抽取不再冻结其他会话的流式输出与 SSE。setImmediate 无 setTimeout 的最小
+ *  时钟粒度,千页文档的累计开销在毫秒级。安卓靠后台线程,PC 单线程用协作式让出对齐。 */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 // --- Lightweight XML pull parser (mirrors Android XmlPullParser) ----------------
 //
@@ -240,25 +210,28 @@ export function getStoredFileSize(entry: StoredFile): number {
 // 2. Parse OPF → extract manifest + spine (chapter reading order)
 // 3. Follow spine order, parse each XHTML file with structured text extraction
 // Falls back to filename-sorted stripXmlText if container/OPF is missing.
-export function extractEpubText(pathValue: string) {
+// 安卓对齐:随机访问只解压 container.xml / OPF / spine 章节;封面图、字体等条目
+// 永不解压(EpubParser.kt 的 ZipFile 语义)。
+export async function extractEpubText(pathValue: string): Promise<string> {
+  let zip: ZipFileReader | null = null;
   try {
-    const entries = readZipEntries(readFileSync(pathValue));
-    const entryMap = new Map(entries.map((e) => [e.name, e]));
+    zip = new ZipFileReader(pathValue);
+    const containerData = zip.readEntry("META-INF/container.xml");
+    if (!containerData) return extractEpubFallback(zip);
 
-    const containerEntry = entryMap.get("META-INF/container.xml");
-    if (!containerEntry) return extractEpubFallback(entries);
+    const opfPath = findEpubOpfPath(containerData.toString("utf8"));
+    if (!opfPath) return extractEpubFallback(zip);
 
-    const opfPath = findEpubOpfPath(containerEntry.data.toString("utf8"));
-    if (!opfPath) return extractEpubFallback(entries);
-
-    const opfEntry = entryMap.get(opfPath);
-    if (!opfEntry) return extractEpubFallback(entries);
+    const opfData = zip.readEntry(opfPath);
+    if (!opfData) return extractEpubFallback(zip);
 
     const opfDir = opfPath.includes("/") ? opfPath.substring(0, opfPath.lastIndexOf("/")) : "";
-    return extractEpubFromOpf(entryMap, opfEntry.data.toString("utf8"), opfDir);
+    return await extractEpubFromOpf(zip, opfData.toString("utf8"), opfDir);
   } catch (err) {
     console.warn("[document] EPUB extract failed:", err);
     return "";
+  } finally {
+    zip?.close();
   }
 }
 
@@ -273,11 +246,11 @@ export function findEpubOpfPath(containerXml: string): string | null {
   return null;
 }
 
-export function extractEpubFromOpf(
-  entryMap: Map<string, { name: string; data: Buffer }>,
+export async function extractEpubFromOpf(
+  zip: ZipFileReader,
   opfXml: string,
   opfDir: string,
-): string {
+): Promise<string> {
   const p = new XmlPull(opfXml);
   const manifest = new Map<string, { href: string; mediaType: string }>();
   const spine: string[] = [];
@@ -300,10 +273,11 @@ export function extractEpubFromOpf(
     const item = manifest.get(itemId);
     if (!item || !item.mediaType.includes("html")) continue;
     const itemPath = opfDir ? `${opfDir}/${item.href}` : item.href;
-    const entry = entryMap.get(itemPath);
-    if (!entry) continue;
-    const content = parseEpubXhtml(entry.data.toString("utf8"));
+    const data = zip.readEntry(itemPath);
+    if (!data) continue;
+    const content = parseEpubXhtml(data.toString("utf8"));
     if (content) parts.push(content);
+    await yieldToEventLoop();
   }
   const text = parts.join("\n\n").trim();
   return text;
@@ -366,50 +340,41 @@ export function parseEpubXhtml(xhtml: string): string {
   } catch { return ""; }
 }
 
-export function extractEpubFallback(entries: Array<{ name: string; data: Buffer }>): string {
-  const textEntries = entries
+export function extractEpubFallback(zip: ZipFileReader): string {
+  const textEntries = zip.entries()
     .filter((e) => /\.(xhtml|html|htm|xml|opf|ncx)$/i.test(e.name))
     .filter((e) => !/^(META-INF\/|mimetype$)/i.test(e.name))
     .sort((a, b) => a.name.localeCompare(b.name));
   return textEntries
-    .map((e) => stripXmlText(e.data.toString("utf8")))
+    .map((e) => {
+      const data = zip.readEntry(e);
+      return data ? stripXmlText(data.toString("utf8")) : "";
+    })
     .filter(Boolean)
     .join("\n\n");
 }
 
-// 非 PDF 格式的同步抽取,仅供 extractStoredFileText(上传路径)与 ensureExtractedTextAsync
+// 非 PDF 格式的抽取,仅供 extractStoredFileText(上传路径)与 ensureExtractedTextAsync
 // (后台补抽)内部使用;编码热路径只读旁车缓存,不再直接调它(1-7/3-4)。
-function extractStoredFileTextSync(entry: StoredFile): string {
+// DOCX/PPTX/EPUB 走随机访问 zip 读取器,无大小上限(见上方内存纪律注释)。
+async function extractNonPdfText(entry: StoredFile): Promise<string> {
   const name = entry.fileName.toLowerCase();
   const mimeValue = entry.mime.toLowerCase();
-  const size = getStoredFileSize(entry);
   try {
     if (mimeValue === "application/epub+zip" || name.endsWith(".epub")) {
-      if (size > MAX_EPUB_EXTRACT_BYTES) {
-        console.warn(`[document] skipping EPUB extraction: ${entry.fileName} ${size} > ${MAX_EPUB_EXTRACT_BYTES}`);
-        return "";
-      }
-      return extractEpubText(entry.path);
+      return await extractEpubText(entry.path);
     }
     if (mimeValue === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || name.endsWith(".docx")) {
-      if (size > MAX_DOCX_EXTRACT_BYTES) {
-        console.warn(`[document] skipping DOCX extraction: ${entry.fileName} ${size} > ${MAX_DOCX_EXTRACT_BYTES}`);
-        return "";
-      }
-      return extractDocxText(entry.path, size);
+      return extractDocxText(entry.path);
     }
     if (mimeValue === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || name.endsWith(".pptx")) {
-      if (size > MAX_PPTX_EXTRACT_BYTES) {
-        console.warn(`[document] skipping PPTX extraction: ${entry.fileName} ${size} > ${MAX_PPTX_EXTRACT_BYTES}`);
-        return "";
-      }
-      return extractPptxText(entry.path);
+      return await extractPptxText(entry.path);
     }
     if (
       mimeValue.startsWith("text/") ||
       /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html|htm|css|js|ts|tsx|jsx|py|java|kt|rs|go|c|cpp|h|hpp|cs|php|rb|sh|ps1|sql)$/i.test(name)
     ) {
-      if (size > MAX_TEXT_EXTRACT_BYTES) {
+      if (getStoredFileSize(entry) > MAX_TEXT_EXTRACT_BYTES) {
         // OOM guard: a >100 MB plain-text upload would balloon JS heap. Bail and let
         // fallbackDocumentText tell the model the file is too large to inline. This is a
         // memory ceiling, not content truncation — anything below it flows through in full.
@@ -418,7 +383,7 @@ function extractStoredFileTextSync(entry: StoredFile): string {
       return readFileSync(entry.path, "utf8");
     }
   } catch (err) {
-    console.warn(`[document] sync extract failed for ${entry.fileName}:`, err);
+    console.warn(`[document] extract failed for ${entry.fileName}:`, err);
   }
   return "";
 }
@@ -456,14 +421,19 @@ export function writeExtractedTextSidecar(fileId: number, text: string): void {
 }
 
 /** 3-4:后台补抽。编码热路径未命中缓存时调用——不再同步解析大文件阻塞事件环,
- *  本次请求降级 fallbackDocumentText,抽取完写旁车,下次发送生效。in-flight 去重。 */
+ *  本次请求降级 fallbackDocumentText,抽取完写旁车,下次发送生效。in-flight 去重。
+ *  R4-4:抽取结果为空(扫描版 PDF/不支持格式)不写旁车,不记录的话每次发送都会
+ *  全量重抽同一个文件。空结果进程内负缓存:本次运行只试一次;不落盘,避免把瞬时
+ *  故障(如 wasm 初始化失败)永久钉死,重启/重新上传自然失效。 */
 const inflightExtractions = new Set<number>();
+const emptyExtractionAttempts = new Set<number>();
 export function ensureExtractedTextAsync(entry: StoredFile): void {
-  if (inflightExtractions.has(entry.id)) return;
+  if (inflightExtractions.has(entry.id) || emptyExtractionAttempts.has(entry.id)) return;
   inflightExtractions.add(entry.id);
   void extractStoredFileText(entry)
     .then((text) => {
       if (text) writeExtractedTextSidecar(entry.id, text);
+      else emptyExtractionAttempts.add(entry.id);
     })
     .catch((err) => console.warn(`[document] 后台抽取失败 ${entry.fileName}:`, err))
     .finally(() => inflightExtractions.delete(entry.id));
@@ -487,7 +457,7 @@ export async function extractStoredFileText(entry: StoredFile): Promise<string> 
       return "";
     }
   }
-  return extractStoredFileTextSync(entry);
+  return extractNonPdfText(entry);
 }
 
 // Format a fallback prompt fragment for a document whose text content isn't available —
@@ -507,11 +477,9 @@ export function fallbackDocumentText(part: { fileName: string; url: string; entr
 
   // Size-cap path: tell the model the file is too big to inline so it can ask the user
   // to split / summarize rather than pretend to have read it.
+  // 安卓对齐后仅 PDF(wasm 约束)与纯文本(JS 堆保险)仍有上限;zip 类格式无上限。
   const overCap =
     ((mimeValue === "application/pdf" || name.endsWith(".pdf")) && size > MAX_PDF_EXTRACT_BYTES) ||
-    ((mimeValue === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || name.endsWith(".docx")) && size > MAX_DOCX_EXTRACT_BYTES) ||
-    ((mimeValue === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || name.endsWith(".pptx")) && size > MAX_PPTX_EXTRACT_BYTES) ||
-    ((mimeValue === "application/epub+zip" || name.endsWith(".epub")) && size > MAX_EPUB_EXTRACT_BYTES) ||
     ((mimeValue.startsWith("text/") || /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html|htm|css|js|ts|tsx|jsx|py|java|kt|rs|go|c|cpp|h|hpp|cs|php|rb|sh|ps1|sql)$/i.test(name)) && size > MAX_TEXT_EXTRACT_BYTES);
   if (overCap) {
     return `[Document: ${fileName} — too large to inline (${sizeMb} MB). Ask the user to split it or describe the part they need.]`;
@@ -541,6 +509,8 @@ export async function extractPdfText(pathValue: string): Promise<string> {
     const pageCount = doc.countPages();
     const parts: string[] = [];
     for (let i = 0; i < pageCount; i++) {
+      // R4-3:页间让出事件环——大书解析期间流式输出/SSE 不再冻结(安卓在后台线程,无此问题)。
+      if (i > 0) await yieldToEventLoop();
       const page = doc.loadPage(i);
       try {
         const stext = page.toStructuredText();
@@ -562,24 +532,11 @@ export async function extractPdfText(pathValue: string): Promise<string> {
 
 // DOCX parser — mirrors Android's DocxParser.kt:
 // Parse word/document.xml from the ZIP, extract paragraphs with heading/list/table structure.
-// For files above DOCX_STREAMING_THRESHOLD_BYTES, route to extractSingleZipMemberStreaming
-// (external unzip) so we only spend RAM on the one entry we care about instead of every
-// member in the archive.
-export function extractDocxText(pathValue: string, sizeBytes?: number) {
-  const size = sizeBytes ?? statSync(pathValue).size;
-  let docXmlData: Buffer | null = null;
-  if (size >= DOCX_STREAMING_THRESHOLD_BYTES) {
-    docXmlData = extractSingleZipMemberStreaming(pathValue, "word/document.xml");
-    if (!docXmlData) {
-      console.warn(`[document] streaming extract failed for ${pathValue}; falling back to in-memory`);
-    }
-  }
-  if (!docXmlData) {
-    const entries = readZipEntries(readFileSync(pathValue));
-    const docEntry = entries.find((e) => e.name === "word/document.xml");
-    if (!docEntry) return "";
-    docXmlData = docEntry.data;
-  }
+// 安卓对齐:只解压 word/document.xml 一个条目(DocxParser.kt 的 ZipInputStream 扫到即停
+// 语义),嵌入图片/字体不进内存——无大小上限,也不再依赖外部 tar.exe/unzip。
+export function extractDocxText(pathValue: string) {
+  const docXmlData = withZipFile(pathValue, (zip) => zip.readEntry("word/document.xml"));
+  if (!docXmlData) return "";
   const xml = docXmlData.toString("utf8");
   // Extract body content
   const bodyMatch = xml.match(/<w:body[\s>]?([\s\S]*?)<\/w:body>/i);
@@ -674,29 +631,36 @@ export function extractDocxTable(xml: string): string {
 // PPTX parser — mirrors Android's PptxParser.kt:
 // Process <sp> shapes (with bullet/numbering detection) and <graphicFrame> tables.
 // Speaker notes extracted via <ph type="body"> detection (same as Android).
-export function extractPptxText(pathValue: string) {
-  const entries = readZipEntries(readFileSync(pathValue));
-  const entryMap = new Map(entries.map((e) => [e.name, e]));
-  const slideEntries = entries
-    .filter((e) => /^ppt\/slides\/slide\d+\.xml$/i.test(e.name))
-    .sort((a, b) => {
-      const na = parseInt(a.name.match(/slide(\d+)/i)?.[1] ?? "0");
-      const nb = parseInt(b.name.match(/slide(\d+)/i)?.[1] ?? "0");
-      return na - nb;
-    });
-  if (!slideEntries.length) return "";
-  const slides: string[] = [];
-  for (let i = 0; i < slideEntries.length; i++) {
-    const slideNumber = i + 1;
-    const content = parsePptxSlideXml(slideEntries[i].data.toString("utf8"));
-    const notesEntry = entryMap.get(`ppt/notesSlides/notesSlide${slideNumber}.xml`);
-    const notes = notesEntry ? parsePptxNotesXml(notesEntry.data.toString("utf8")) : "";
-    if (!content && !notes) continue;
-    let slide = `## Slide ${slideNumber}\n\n${content}`;
-    if (notes) slide += `\n\n### Speaker Notes\n\n${notes}`;
-    slides.push(slide);
+// 安卓对齐:中央目录列出 slide 条目,只解压 slideN.xml 与对应 notesSlideN.xml
+// (PptxParser.kt 的 ZipFile 语义)——嵌入媒体永不解压,无大小上限。
+export async function extractPptxText(pathValue: string): Promise<string> {
+  const zip = new ZipFileReader(pathValue);
+  try {
+    const slideEntries = zip.entries()
+      .filter((e) => /^ppt\/slides\/slide\d+\.xml$/i.test(e.name))
+      .sort((a, b) => {
+        const na = parseInt(a.name.match(/slide(\d+)/i)?.[1] ?? "0");
+        const nb = parseInt(b.name.match(/slide(\d+)/i)?.[1] ?? "0");
+        return na - nb;
+      });
+    if (!slideEntries.length) return "";
+    const slides: string[] = [];
+    for (let i = 0; i < slideEntries.length; i++) {
+      if (i > 0) await yieldToEventLoop();
+      const slideNumber = i + 1;
+      const slideData = zip.readEntry(slideEntries[i]);
+      const content = slideData ? parsePptxSlideXml(slideData.toString("utf8")) : "";
+      const notesData = zip.readEntry(`ppt/notesSlides/notesSlide${slideNumber}.xml`);
+      const notes = notesData ? parsePptxNotesXml(notesData.toString("utf8")) : "";
+      if (!content && !notes) continue;
+      let slide = `## Slide ${slideNumber}\n\n${content}`;
+      if (notes) slide += `\n\n### Speaker Notes\n\n${notes}`;
+      slides.push(slide);
+    }
+    return slides.join("\n\n");
+  } finally {
+    zip.close();
   }
-  return slides.join("\n\n");
 }
 
 export function parsePptxSlideXml(xml: string): string {

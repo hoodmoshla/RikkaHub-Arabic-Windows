@@ -40,6 +40,8 @@ function MemoryItem({ entry, scope, assistantId }: {
     setEditing(false);
   };
   const remove = async () => {
+    // R8-1:破坏性删除必须确认(记忆无回收站,删了就没了)
+    if (!(await confirmDialog({ title: t("settings:memory.delete_confirm"), danger: true }))) return;
     const path = scope === "global"
       ? `memory/global/${entry.id}`
       : `memory/assistant/${assistantId}/${entry.id}`;

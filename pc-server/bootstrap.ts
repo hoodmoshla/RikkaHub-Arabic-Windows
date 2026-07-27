@@ -1,35 +1,35 @@
-// bootstrap.ts — 显式启动编排(全面审查 0-3/8-4/1-8)
+// bootstrap.ts — 显式启动编排(全面审查 0-3/8-4/1-8/R1-1)
 // 此前整个启动序列 = "server.ts import 块的求值顺序 + 三处模块顶层副作用"
 // (state-load 装载迁移、conversations 定时器、api/sse 接线),约束只靠 import 顺序
 // 隐式保证,且任何脚本/测试 import 到 state-load 就会执行真实磁盘迁移。
-// 现在收敛为单一编排点:server.ts 在解析端口/Bun.serve 之前调用一次。
+// R1-1:本函数改为异步,由 server.ts 在 Bun.serve 绑端口、打出 RIKKAHUB_PORT 标记之后
+// 调用——重数据老用户的一次性迁移可达分钟级,旧的"先迁移后绑端口"会撞上壳的就绪
+// 超时被连坐击杀,形成每次启动都从头重来的死循环。迁移期间 fetch 入口按启动闸门
+// (foundation/startup-gate)把 /api 挡成 503,前端渲染迁移进度页。
+// 实例锁(1-5)也随之移交 server.ts:锁冲突必须抢在端口标记打出之前退出,否则壳已
+// 拿到端口并导航,只会看到一扇死窗口。
 
-import { applyEffectiveProxy, installProxyFetchInterceptor } from "./foundation/net";
-import { DataDirLockedError, acquireDataDirLock } from "./persistence/instance-lock";
+import { applyEffectiveProxy, installProxyFetchInterceptor, primeSystemProxyCache } from "./foundation/net";
+import { setStartupPhase } from "./foundation/startup-gate";
 import { saveState, setState, state } from "./persistence/json-store";
 import { loadState } from "./persistence/state-load";
 import { initConversationsRuntime } from "./conversations";
 import { initSseWiring } from "./api/sse";
 
-export function bootstrap(): void {
-  // 0) 1-5:dataDir 单实例互斥。必须先于 loadState——另一实例持有时绝不能碰迁移链/state.json。
-  try {
-    acquireDataDirLock();
-  } catch (err) {
-    if (err instanceof DataDirLockedError) {
-      console.error(`[rikkahub-server] ${err.message}`);
-      process.exit(3);
-    }
-    throw err;
-  }
-
+export async function bootstrap(): Promise<void> {
   // 1) 状态装载 + 一次性迁移链(SQLite 灌库、记忆拆分、附件去重、.tmp 清扫都在 loadState 内)。
-  setState(loadState());
+  //    R1-1:灌库分批提交、去重逐文件让出事件循环,迁移期启动进度端点可被响应。
+  setStartupPhase("load-state");
+  setState(await loadState());
   state.launchCount += 1;
 
-  // 2) 代理拦截器:必须在首次 fetch 之前安装(Bun.serve 接受请求之前),
-  //    否则首个请求会触发 Bun 的 env 快照锁定,之后改代理不生效。
+  // 2) 代理拦截器:必须在首次出站 fetch 之前安装,否则首个请求会触发 Bun 的 env 快照
+  //    锁定,之后改代理不生效。就绪前 /api 全部 503,不会有业务出站请求先行。
   installProxyFetchInterceptor(() => state.settings.proxyConfig);
+  // R1-7:系统代理探测(reg query/gsettings)已全异步化,拦截器 per-request 只读缓存。
+  // 这里预热一次,保证首个业务出站请求就能拿到正确的系统代理(之后 TTL 过期走
+  // "陈值即用 + 后台刷新",事件循环永不被 spawn 阻塞)。
+  await primeSystemProxyCache();
   applyEffectiveProxy(state.settings.proxyConfig);
 
   // 3) 会话运行时:working set 判据接线 + 驻留清扫定时器。
@@ -41,5 +41,6 @@ export function bootstrap(): void {
   // 5) 1-8:启动规范化结果(normalizeState 的 backfill/迁移标记)与 launchCount 立即落盘。
   //    此前只活在内存,纯只读会话(启动→看历史→退出)每次启动重跑全部规范化,
   //    launchCount 在这类会话中永不落盘。
+  setStartupPhase("finalize");
   saveState();
 }

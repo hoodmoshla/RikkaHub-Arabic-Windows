@@ -4,7 +4,7 @@
 import type { Conversation, JsonValue, MessagePart } from "../../foundation/types";
 import type { ConversationListDto, MessageSearchResultDto, PagedResult } from "../../foundation/types";
 import { applyPlaceholders, id, message, textFromParts } from "../../foundation/utils";
-import { saveState, state } from "../../persistence/json-store";
+import { state } from "../../persistence/json-store";
 import {
   getConversation,
   persistConversation,
@@ -140,15 +140,28 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       conversation.updateAt = Date.now();
       if (!conversation.title) conversation.title = "New Conversation";
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       void (async () => {
-        userMessage.parts = await attachOcrToImageParts(userMessage.parts, picked.model);
-        conversation.updateAt = Date.now();
-        persistConversation(conversation);
-        saveState();
-        broadcastNodeUpdate(conversation, userNode);
-        void generateAnswer(conversation);
+        // R2-2:续体自持引用——路由级 checkout 在 202 返回时即 release,慢 OCR(可 >60s)
+        // 期间实例可能被 sweep 清出:续体写的是孤儿对象,generateAnswer 的 checkout 从活库
+        // 装出第二实例,流式写进孤儿、persist 的却是陈旧实例(屏上看得到回答,重启后消失)。
+        // 自持覆盖续体全程(checkout 在 IIFE 首个 await 前同步执行,与路由级引用无缝衔接),
+        // working-set 不变式"持有实例期间 checkout 必返回同一实例"恢复成立。
+        checkoutConversation(conversation.id);
+        try {
+          userMessage.parts = await attachOcrToImageParts(userMessage.parts, picked.model);
+          // 批6复审 G1:长 await 期间会话可能已被删除/被导入替换——persistConversation 是
+          // 无条件 upsert,直接落库会把已删会话连整棵消息树复活,generateAnswer 还会给僵尸
+          // 会话续写。身份比对(非仅存在性)同时防"导入同 id 会话"后陈旧实例反向覆盖。
+          if (getConversation(conversation.id) !== conversation) return;
+          conversation.updateAt = Date.now();
+          persistConversation(conversation);
+          broadcastNodeUpdate(conversation, userNode);
+          // generateAnswer 入口同步自持引用,续体无需 await 到生成结束
+          void generateAnswer(conversation);
+        } finally {
+          releaseConversation(conversation.id);
+        }
       })();
       return json({ status: "accepted" }, { status: 202 });
     }
@@ -156,7 +169,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       conversation.isPinned = !conversation.isPinned;
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       return json({ status: "updated" });
     }
@@ -165,7 +177,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       conversation.title = body.title?.trim() || conversation.title;
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       return json({ status: "updated" });
     }
@@ -174,7 +185,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       conversation.assistantId = body.assistantId;
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       return json({ status: "updated" });
     }
@@ -183,7 +193,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       conversation.systemPrompt = String(body.systemPrompt ?? "").trim() || null;
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       return json({ status: "updated" });
     }
@@ -214,18 +223,22 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       }
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       return json({ status: "stopped" });
     }
     if (sub === "regenerate-title" && request.method === "POST") {
       try {
-        conversation.title = await generateTitleForConversation(conversation);
+        const title = await generateTitleForConversation(conversation);
+        // R7-4:客户端已取消/超时断开则结果作废,不改写标题(取消语义硬保证)。
+        if (request.signal.aborted) return error("Client cancelled", 499);
+        // 批6复审 G1:标题生成期间会话可能已被删除——下方 persistConversation 是无条件
+        // upsert,会复活它。已删/被替换即作废。
+        if (getConversation(conversation.id) !== conversation) return error("Conversation not found", 404);
+        conversation.title = title;
       } catch (err) {
         return error(err instanceof Error ? err.message : String(err), 400);
       }
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       return json({ status: "updated", title: conversation.title });
     }
@@ -270,7 +283,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       }
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       void generateAnswer(conversation, regenerateAtNodeId);
       return json({ status: "accepted" }, { status: 202 });
@@ -285,7 +297,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       node.selectIndex = nextIndex;
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       return json({ status: "updated" });
     }
@@ -303,7 +314,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       if (!changed) return error("Message not found", 404);
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       return json({ status: "deleted" });
     }
@@ -336,16 +346,22 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       conversation.chatSuggestions = [];
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       if (msg.role === "USER") {
         void (async () => {
-          msg.parts = await attachOcrToImageParts(msg.parts, picked.model);
-          conversation.updateAt = Date.now();
-          persistConversation(conversation);
-          saveState();
-          broadcastNodeUpdate(conversation, node);
-          void generateAnswer(conversation);
+          // R2-2:同 messages POST 续体——自持引用覆盖 OCR 全程,防实例被 sweep 后分叉。
+          checkoutConversation(conversation.id);
+          try {
+            msg.parts = await attachOcrToImageParts(msg.parts, picked.model);
+            // 批6复审 G1:同 messages POST 续体——会话已删/被替换时丢弃结果,防复活。
+            if (getConversation(conversation.id) !== conversation) return;
+            conversation.updateAt = Date.now();
+            persistConversation(conversation);
+            broadcastNodeUpdate(conversation, node);
+            void generateAnswer(conversation);
+          } finally {
+            releaseConversation(conversation.id);
+          }
         })();
       }
       return json({ status: "updated" }, { status: msg.role === "USER" ? 202 : 200 });
@@ -363,9 +379,10 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       msg.translation = "正在翻译...";
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       void (async () => {
+        // R2-2:续体自持引用(流式翻译可长于 60s sweep 闲置期),理由同 messages POST 续体。
+        checkoutConversation(conversation.id);
         try {
           const pickedTranslationModel = findModel(state.settings.translateModeId || state.settings.chatModelId);
           const useQwenMt = isQwenMtModel(pickedTranslationModel.model.modelId);
@@ -403,10 +420,13 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
         } finally {
           // 2-3:落库收口到 finally 一次。同时修复原缺陷:非流式路径(Qwen-MT)与失败
           // 路径的 translation 从未 persistConversation,重启即丢。
-          conversation.updateAt = Date.now();
-          persistConversation(conversation);
-          saveState();
-          broadcastConversation(conversation);
+          // 批6复审 G1:会话在翻译期间被删除/被导入替换时跳过落库,防无条件 upsert 复活。
+          if (getConversation(conversation.id) === conversation) {
+            conversation.updateAt = Date.now();
+            persistConversation(conversation);
+            broadcastConversation(conversation);
+          }
+          releaseConversation(conversation.id);
         }
       })();
       return json({ status: "accepted", translation: msg.translation }, { status: 202 });
@@ -420,11 +440,14 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       generating.delete(conversation.id);
       finishInterruptedPendingToolsInConversation(conversation);
       try {
+        // R7-4:透传 request.signal——客户端取消(压缩框取消键)后,compressConversation
+        // 在分块间与落库前检查,保证取消后不改写会话。
         const summaries = await compressConversation(
           conversation,
           String(body.additionalPrompt ?? ""),
           Math.max(256, Number(body.targetTokens ?? 2000) || 2000),
           Math.max(0, Number(body.keepRecentMessages ?? 32) || 0),
+          request.signal,
         );
         return json({ status: "compressed", summaries });
       } catch (err) {
@@ -447,7 +470,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       };
       registerConversation(fork); // fork 树复制自内存源会话,内存即权威
       persistConversation(fork);
-      saveState();
       broadcastList();
       return json({ conversationId: fork.id });
     }
@@ -471,7 +493,6 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       if (!changed) return error("Tool call not found", 404);
       conversation.updateAt = Date.now();
       persistConversation(conversation);
-      saveState();
       broadcastConversation(conversation);
       const hasPendingTools = conversation.messages.some((node) =>
         node.messages.some((msg) => hasPendingToolApproval(msg))

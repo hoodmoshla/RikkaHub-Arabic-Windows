@@ -22,6 +22,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~
 import { Switch } from "~/components/ui/switch";
 import { Textarea } from "~/components/ui/textarea";
 import Markdown from "~/components/markdown/markdown";
+import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import { cn } from "~/lib/utils";
 import api, { appendWebAuthQuery } from "~/services/api";
 import { confirmDialog } from "~/stores/confirm-store";
@@ -214,30 +215,57 @@ function McpServerEditor({
     prettyJson((selected.commonOptions as Record<string, unknown> | undefined)?.tools ?? []),
   );
   const [busy, setBusy] = React.useState(false);
-  // dirtyRef drives the debounce autosave (set on every edit, cleared on save completion).
-  const dirtyRef = React.useRef(false);
-  // Race-condition tracking for in-flight saves. A keystroke landing between "save starts"
-  // and "save resolves" used to have its dirtyRef=true overwritten by the post-save reset,
-  // so the next debounce cycle skipped and the keystroke was never persisted — it lingered
-  // in draft only until the realignment effect below clobbered it with the just-saved
-  // (older) snapshot. savingRef lets every edit during the save window flag
-  // editedDuringSaveRef; on completion we keep dirtyRef true when it's set, so the next
-  // debounce re-saves instead of dropping the keystroke.
-  const savingRef = React.useRef(false);
-  const editedDuringSaveRef = React.useRef(false);
+  // R8-2:三件套竞态防护("URL input eats characters" 的修复)抽成共享 hook,本编辑器是
+  // 原始出处——语义与病史见 hooks/use-autosave-draft.ts 文件头。
+  // draft/headersText/toolsText 走 ref 取最新值:persist 既被防抖调用(渲染早已提交),
+  // 也被 patchCommon 同步立即调用(setState 尚未提交,由 patch 同步写 ref 保证新鲜)。
+  const draftRef = React.useRef(draft);
+  draftRef.current = draft;
+  const headersTextRef = React.useRef(headersText);
+  headersTextRef.current = headersText;
+  const toolsTextRef = React.useRef(toolsText);
+  toolsTextRef.current = toolsText;
+  const autosave = useAutosaveDraft(
+    async () => {
+      const currentDraft = draftRef.current;
+      const currentCommon =
+        currentDraft.commonOptions && typeof currentDraft.commonOptions === "object"
+          ? (currentDraft.commonOptions as Record<string, unknown>)
+          : {};
+      const payload = {
+        ...currentDraft,
+        commonOptions: {
+          ...currentCommon,
+          headers: parseJson<unknown[]>(headersTextRef.current, [], t("settings:mcp.json_invalid")),
+          tools: parseJson<unknown[]>(toolsTextRef.current, [], t("settings:mcp.json_invalid")),
+        },
+      };
+      setBusy(true);
+      try {
+        const result = await api.post<{ server: Record<string, unknown> }>(
+          "settings/mcp-server/detail",
+          payload,
+        );
+        setSelectedId(String(result.server.id));
+        applyServerResult(result.server);
+        await pullSettings(onSettings);
+      } finally {
+        setBusy(false);
+      }
+    },
+    {
+      delayMs: 800,
+      onSaveError: (error) => console.warn("MCP auto-save failed", error),
+    },
+  );
   // serversRef lets the realignment effect read the freshest servers list WITHOUT taking
   // settings.mcpServers as a dependency. If settings.mcpServers were a dep, the effect
   // would re-fire after every save → pullSettings round-trip and overwrite in-flight
-  // keystrokes — the original "URL input eats characters" bug. The old dirtyRef guard
-  // tried to defend this but was undone by save() clearing dirtyRef on completion (the
-  // keystroke-while-saving window).
+  // keystrokes — the original "URL input eats characters" bug.
   const serversRef = React.useRef(servers);
   serversRef.current = servers;
 
-  const markDirty = () => {
-    dirtyRef.current = true;
-    if (savingRef.current) editedDuringSaveRef.current = true;
-  };
+  const markDirty = () => autosave.markDirty();
 
   React.useEffect(() => {
     // Re-load the form only when the user switches server (selectedId). settings.mcpServers
@@ -253,8 +281,7 @@ function McpServerEditor({
     setToolsText(
       prettyJson((next.commonOptions as Record<string, unknown> | undefined)?.tools ?? []),
     );
-    dirtyRef.current = false;
-    editedDuringSaveRef.current = false;
+    autosave.reset();
   }, [selectedId]);
 
   const common =
@@ -311,90 +338,34 @@ function McpServerEditor({
     });
     setToolsText(prettyJson(serverCommon.tools ?? []));
   };
+  // 开关类修改:同步写 ref 后立即落盘(不等防抖),失败 toast。
   const patchCommon = (patch: Record<string, unknown>) => {
-    let parsedHeaders: unknown[];
-    let parsedTools: unknown[];
-    try {
-      parsedHeaders = parseJson<unknown[]>(headersText, [], t("settings:mcp.json_invalid"));
-      parsedTools = parseJson<unknown[]>(toolsText, [], t("settings:mcp.json_invalid"));
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : t("settings:mcp.json_invalid"));
-      return;
-    }
     const nextDraft = { ...draft, commonOptions: { ...common, ...patch } };
+    draftRef.current = nextDraft;
     setDraft(nextDraft);
-    savingRef.current = true;
-    editedDuringSaveRef.current = false;
-    void api
-      .post<{ server: Record<string, unknown> }>("settings/mcp-server/detail", {
-        ...nextDraft,
-        commonOptions: {
-          ...(nextDraft.commonOptions as Record<string, unknown>),
-          headers: parsedHeaders,
-          tools: parsedTools,
-        },
-      })
-      .then((result: { server: Record<string, unknown> }) => {
-        setSelectedId(String(result.server.id));
-        savingRef.current = false;
-        // Keep dirty if the user typed during the round-trip; otherwise mark clean.
-        dirtyRef.current = editedDuringSaveRef.current;
-        applyServerResult(result.server);
-        return pullSettings(onSettings);
-      })
-      .catch((error) => {
-        savingRef.current = false;
-        dirtyRef.current = true; // retry on next debounce
-        toast.error(error instanceof Error ? error.message : t("settings:mcp.save_failed"));
-      });
+    void autosave.saveNow({ force: true }).catch((error) => {
+      toast.error(error instanceof Error ? error.message : t("settings:mcp.save_failed"));
+    });
   };
-  const save = async (announce = true) => {
-    if (!announce && !dirtyRef.current) return;
-    setBusy(true);
-    savingRef.current = true;
-    editedDuringSaveRef.current = false;
-    try {
-      const payload = {
-        ...draft,
-        commonOptions: {
-          ...common,
-          headers: parseJson<unknown[]>(headersText, [], t("settings:mcp.json_invalid")),
-          tools: parseJson<unknown[]>(toolsText, [], t("settings:mcp.json_invalid")),
-        },
-      };
-      const result = await api.post<{ server: Record<string, unknown> }>(
-        "settings/mcp-server/detail",
-        payload,
-      );
-      setSelectedId(String(result.server.id));
-      savingRef.current = false;
-      // Keep dirty if the user typed during the round-trip; otherwise mark clean.
-      dirtyRef.current = editedDuringSaveRef.current;
-      applyServerResult(result.server);
-      await pullSettings(onSettings);
-      if (announce) toast.success(t("settings:mcp.server.saved"));
-    } catch (error) {
-      savingRef.current = false;
-      dirtyRef.current = true; // retry on next debounce
-      if (announce) toast.error(error instanceof Error ? error.message : t("settings:mcp.save_failed"));
-      else console.warn("MCP auto-save failed", error);
-    } finally {
-      setBusy(false);
-    }
-  };
-  React.useEffect(() => {
-    if (!dirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void save(false);
-    }, 800);
-    return () => window.clearTimeout(timer);
-  }, [draft, headersText, toolsText]);
   const remove = async () => {
     if (!selected.id) return;
     if (!(await confirmDialog({ title: t("settings:mcp.server.delete_confirm"), danger: true }))) return;
+    // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1)
+    const remaining = servers.filter((item) => String(item.id) !== String(selected.id));
+    await autosave.discard();
     await api.delete(`settings/mcp-server/${encodeURIComponent(String(selected.id))}`);
-    setSelectedId("");
+    // 先拉全量再选中下一条:此前 setSelectedId("") 先于 pullSettings,重对齐 effect 用
+    // 旧列表兜底到 servers[0]——可能正是刚删的那条,草稿对回已删实体(复审 F2)。
     await pullSettings(onSettings);
+    if (remaining.length) {
+      setSelectedId(String(remaining[0].id));
+    } else {
+      // 删到空:复位为挂载空列表时同款的空白新草稿(重对齐 effect 无条目可载)
+      setSelectedId("");
+      setDraft(clone(createMcpServer()));
+      setHeadersText("[]");
+      setToolsText("[]");
+    }
     toast.success(t("settings:mcp.server.deleted"));
   };
   const reorder = async (from: number, to: number) => {
@@ -440,7 +411,7 @@ function McpServerEditor({
           setDraft(clone(next));
           setHeadersText("[]");
           setToolsText("[]");
-          dirtyRef.current = false;
+          autosave.reset();
         } catch (error) {
           toast.error(error instanceof Error ? error.message : t("settings:mcp.server.create_failed"));
         }
@@ -1014,7 +985,14 @@ function LorebookEditor({
   const selected =
     items.find((item) => String(item.id) === selectedId) ?? items[0] ?? createLorebook();
   const [draft, setDraft] = React.useState<Record<string, unknown>>(clone(selected));
-  const dirtyRef = React.useRef(false);
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      await api.post("settings/lorebook/detail", draft);
+      await pullSettings(onSettings);
+    },
+    { delayMs: 800, onSaveError: (error) => console.warn("Lorebook auto-save failed", error) },
+  );
   // itemsRef: avoid re-running this effect after every autosave → pullSettings round-trip
   // (would overwrite mid-flight keystrokes). See McpServerEditor for rationale.
   const itemsRef = React.useRef(items);
@@ -1024,33 +1002,19 @@ function LorebookEditor({
     if (!next) return;
     setSelectedId(String(next.id));
     setDraft(clone(next));
-    dirtyRef.current = false;
+    autosave.reset();
   }, [selectedId]);
   const entries = Array.isArray(draft.entries)
     ? (draft.entries as Array<Record<string, unknown>>)
     : [];
   const patchDraft = (patch: Record<string, unknown>) => {
-    dirtyRef.current = true;
+    autosave.markDirty();
     setDraft({ ...draft, ...patch });
   };
   const setEntries = (next: Array<Record<string, unknown>>) => {
-    dirtyRef.current = true;
+    autosave.markDirty();
     setDraft({ ...draft, entries: next });
   };
-  const save = async (announce = true) => {
-    if (!announce && !dirtyRef.current) return;
-    await api.post("settings/lorebook/detail", draft);
-    dirtyRef.current = false;
-    await pullSettings(onSettings);
-    if (announce) toast.success(t("settings:mcp.lorebook.saved"));
-  };
-  React.useEffect(() => {
-    if (!dirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void save(false).catch((error: Error) => console.warn("Lorebook auto-save failed", error));
-    }, 800);
-    return () => window.clearTimeout(timer);
-  }, [draft]);
   const bind = async (checked: boolean) => {
     const ids = new Set(assistant.lorebookIds ?? []);
     if (checked) ids.add(String(draft.id));
@@ -1078,7 +1042,7 @@ function LorebookEditor({
       onCreate={async () => {
         // Eager-save pattern — same race-condition rationale as MCP and ModeInjection
         // (see settings.tsx:3515 and the PromptItemEditor onCreate comment). The original
-        // setState + dirtyRef=true approach loses the new lorebook because the
+        // setState + markDirty approach loses the new lorebook because the
         // `[selectedId, settings.lorebooks]` realignment effect at line 3857 fires when
         // selectedId changes, doesn't find the new id in settings (not saved yet), and
         // snaps the user back to lorebooks[0] — silently dropping the new entry.
@@ -1089,7 +1053,7 @@ function LorebookEditor({
           await pullSettings(onSettings);
           setSelectedId(String(next.id));
           setDraft(next);
-          dirtyRef.current = false;
+          autosave.reset();
         } catch (error) {
           toast.error(error instanceof Error ? error.message : t("settings:mcp.lorebook.create_failed"));
         }
@@ -1174,8 +1138,16 @@ function LorebookEditor({
           <Button
             variant="destructive"
             onClick={async () => {
+              if (!(await confirmDialog({ title: t("settings:mcp.lorebook.delete_confirm", { name: textValue(draft.name) }), danger: true }))) return;
+              // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1)
+              // 删除后显式选中下一条:重对齐 effect 只随 selectedId 触发,不选中会让草稿
+              // 停留在已删实体上,再编辑一笔就经自动保存复活它(复审 F2)。
+              const remaining = items.filter((item) => String(item.id) !== String(draft.id));
+              await autosave.discard();
               await api.delete(`settings/lorebook/${draft.id}`);
               await pullSettings(onSettings);
+              if (remaining.length) setSelectedId(String(remaining[0].id));
+              else setDraft(clone(createLorebook()));
             }}
           >
             <Trash2 className="size-4" />
@@ -1227,7 +1199,14 @@ function QuickMessageEditor({
   const selected = items.find((item) => String(item.id) === selectedId) ??
     items[0] ?? { id: crypto.randomUUID(), title: "", content: "" };
   const [draft, setDraft] = React.useState<Record<string, unknown>>(clone(selected));
-  const dirtyRef = React.useRef(false);
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      await api.post("settings/quick-message/detail", draft);
+      await pullSettings(onSettings);
+    },
+    { onSaveError: (error) => console.warn("Quick message auto-save failed", error) },
+  );
   // itemsRef: avoid re-running this effect after every autosave → pullSettings round-trip
   // (would overwrite mid-flight keystrokes). See McpServerEditor for rationale.
   const itemsRef = React.useRef(items);
@@ -1237,32 +1216,13 @@ function QuickMessageEditor({
     if (next) {
       setSelectedId(String(next.id));
       setDraft(clone(next));
-      dirtyRef.current = false;
+      autosave.reset();
     }
   }, [selectedId]);
   const patchDraft = (patch: Record<string, unknown>) => {
-    dirtyRef.current = true;
+    autosave.markDirty();
     setDraft({ ...draft, ...patch });
   };
-  const save = React.useCallback(
-    async (announce = false) => {
-      if (!announce && !dirtyRef.current) return;
-      await api.post("settings/quick-message/detail", draft);
-      dirtyRef.current = false;
-      await pullSettings(onSettings);
-      if (announce) toast.success(t("settings:mcp.quick.saved"));
-    },
-    [draft, onSettings],
-  );
-  React.useEffect(() => {
-    if (!dirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void save(false).catch((error: Error) =>
-        console.warn("Quick message auto-save failed", error),
-      );
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [draft, save]);
   const bind = async (checked: boolean) => {
     const ids = new Set(assistant.quickMessageIds ?? []);
     if (checked) ids.add(String(draft.id));
@@ -1293,7 +1253,7 @@ function QuickMessageEditor({
         const next = { id: crypto.randomUUID(), title: t("settings:mcp.tab.quick"), content: "" };
         setSelectedId(String(next.id));
         setDraft(next);
-        dirtyRef.current = true;
+        autosave.markDirty();
       }}
     >
       <div className="space-y-4">
@@ -1322,8 +1282,14 @@ function QuickMessageEditor({
           <Button
             variant="destructive"
             onClick={async () => {
+              if (!(await confirmDialog({ title: t("settings:mcp.quick.delete_confirm", { name: textValue(draft.title) }), danger: true }))) return;
+              // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1);同 Lorebook,删除后显式选中下一条(复审 F2)
+              const remaining = items.filter((item) => String(item.id) !== String(draft.id));
+              await autosave.discard();
               await api.delete(`settings/quick-message/${draft.id}`);
               await pullSettings(onSettings);
+              if (remaining.length) setSelectedId(String(remaining[0].id));
+              else setDraft({ id: crypto.randomUUID(), title: "", content: "" });
             }}
           >
             <Trash2 className="size-4" />
@@ -1367,7 +1333,14 @@ function PromptItemEditor({
   title: string;
 }) {
   const { t } = useTranslation();
-  const dirtyRef = React.useRef(false);
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      await api.post(savePath, draft);
+      await pullSettings(onSettings);
+    },
+    { onSaveError: (error) => console.warn(`${title} auto-save failed`, error) },
+  );
   const promptVariables = [
     "{{cur_datetime}}",
     "{{date}}",
@@ -1382,29 +1355,14 @@ function PromptItemEditor({
   const usesStandaloneMessage =
     position === "top_of_chat" || position === "bottom_of_chat" || position === "at_depth";
   React.useEffect(() => {
-    dirtyRef.current = false;
-  }, [selectedId, items]);
+    // 只在切换条目时复位;items 不能作依赖——autosave → pullSettings 回环会把保存窗口内
+    // 的编辑冲掉(R8-2 病根,同 McpServerEditor 的 serversRef 说明)。
+    autosave.reset();
+  }, [selectedId]);
   const patchDraft = (patch: Record<string, unknown>) => {
-    dirtyRef.current = true;
+    autosave.markDirty();
     setDraft({ ...draft, ...patch });
   };
-  const save = React.useCallback(
-    async (announce = false) => {
-      if (!announce && !dirtyRef.current) return;
-      await api.post(savePath, draft);
-      dirtyRef.current = false;
-      await pullSettings(onSettings);
-      if (announce) toast.success(t("settings:mcp.item_saved", { title }));
-    },
-    [draft, onSettings, savePath, title],
-  );
-  React.useEffect(() => {
-    if (!dirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void save(false).catch((error: Error) => console.warn(`${title} auto-save failed`, error));
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [draft, save, title]);
   const appendVariable = (variable: string) => {
     const content = textValue(draft.content);
     const separator = content && !content.endsWith("\n") ? "\n" : "";
@@ -1439,7 +1397,7 @@ function PromptItemEditor({
         // Eager save — same pattern as McpServerEditor.onCreate. The original code relied
         // on the 700 ms debounce, but two race conditions guaranteed the save never fired:
         //   1. The `[selectedId, items]` effect at line 4108 unconditionally reset
-        //      `dirtyRef.current = false` when selectedId changed, cancelling the pending
+        //      the dirty flag when selectedId changed, cancelling the pending
         //      save.
         //   2. The wrapper component's `[selectedId, settings.modeInjections]` effect
         //      (e.g. line 3600) couldn't find the new id in settings and snapped
@@ -1453,7 +1411,7 @@ function PromptItemEditor({
           await pullSettings(onSettings);
           setSelectedId(String(next.id));
           setDraft(next);
-          dirtyRef.current = false;
+          autosave.reset();
         } catch (error) {
           toast.error(error instanceof Error ? error.message : t("settings:mcp.item_create_failed", { title }));
         }
@@ -1567,8 +1525,14 @@ function PromptItemEditor({
           <Button
             variant="destructive"
             onClick={async () => {
+              if (!(await confirmDialog({ title: t("settings:mcp.inject_delete_confirm", { name: textValue(draft.name) }), danger: true }))) return;
+              // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1);同 Lorebook,删除后显式选中下一条(复审 F2)
+              const remaining = items.filter((item) => String(item.id) !== String(draft.id));
+              await autosave.discard();
               await api.delete(`${deletePath}/${draft.id}`);
               await pullSettings(onSettings);
+              if (remaining.length) setSelectedId(String(remaining[0].id));
+              else setDraft(clone(createItem()));
             }}
           >
             <Trash2 className="size-4" />
@@ -1599,7 +1563,21 @@ function SkillsEditor({
   const [importingFile, setImportingFile] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const dirtyRef = React.useRef(false);
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      const name = textValue(parseSkillName(content) || selected || "new-skill");
+      setSaving(true);
+      try {
+        await api.post("skills/detail", { name, content });
+        await load();
+        setSelected(name);
+      } finally {
+        setSaving(false);
+      }
+    },
+    { delayMs: 900, onSaveError: (error) => console.warn("Skill auto-save failed", error) },
+  );
 
   const load = React.useCallback(async () => {
     const list = await api.get<SkillProfile[]>("skills");
@@ -1622,8 +1600,10 @@ function SkillsEditor({
     api
       .get<SkillProfile>(`skills/${encodeURIComponent(selected)}`)
       .then((skill) => {
+        // 编辑中(含保存窗口内的键击)不回填服务端内容:每次 autosave → load() 都会换新
+        // selectedSkill 触发本 effect,无守卫会把在飞键击冲掉(R8-2 病根)。
+        if (autosave.isDirty()) return;
         setContent(skill.content ?? "");
-        dirtyRef.current = false;
       })
       .catch(() => setContent(""));
     api
@@ -1632,36 +1612,11 @@ function SkillsEditor({
       .catch(() => setFiles([]));
   }, [selected, selectedSkill]);
 
-  const save = React.useCallback(
-    async (announce = false) => {
-      if (!announce && !dirtyRef.current) return;
-      const name = textValue(parseSkillName(content) || selected || "new-skill");
-      setSaving(true);
-      try {
-        await api.post("skills/detail", { name, content });
-        dirtyRef.current = false;
-        await load();
-        setSelected(name);
-        if (announce) toast.success(t("settings:mcp.skill_saved"));
-      } catch (error) {
-        if (announce) toast.error(error instanceof Error ? error.message : t("settings:mcp.save_failed"));
-        else console.warn("Skill auto-save failed", error);
-      } finally {
-        setSaving(false);
-      }
-    },
-    [content, load, selected],
-  );
-  React.useEffect(() => {
-    if (!dirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void save(false);
-    }, 900);
-    return () => window.clearTimeout(timer);
-  }, [content, save]);
   const remove = async () => {
     if (!selected) return;
     if (!(await confirmDialog({ title: t("settings:mcp.delete_skill_confirm"), danger: true }))) return;
+    // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1)
+    await autosave.discard();
     await api.delete(`skills/${encodeURIComponent(selected)}`);
     setSelected("");
     setContent("");
@@ -1680,7 +1635,7 @@ function SkillsEditor({
       await load();
       setSelected(result.skill.name);
       setContent(result.skill.content ?? "");
-      dirtyRef.current = false;
+      autosave.reset();
       setGithubUrl("");
       toast.success(t("settings:mcp.skill_imported", { name: result.skill.name }));
     } catch (error) {
@@ -1712,7 +1667,7 @@ function SkillsEditor({
       if (first) {
         setSelected(first.name);
         setContent(first.content ?? "");
-        dirtyRef.current = false;
+        autosave.reset();
       }
       const names = (data.imported ?? []).join("、");
       toast.success(t("settings:mcp.skill_imported", { name: names || file.name }));
@@ -1765,7 +1720,7 @@ function SkillsEditor({
           `---\nname: ${name}\ndescription: ${t("settings:mcp.skill_desc_default")}\n---\n\n${t("settings:mcp.skill_body_default")}\n`,
         );
         setFiles([]);
-        dirtyRef.current = true;
+        autosave.markDirty();
       }}
     >
       <div className="space-y-4">
@@ -1868,7 +1823,7 @@ function SkillsEditor({
           <Textarea
             value={content}
             onChange={(event) => {
-              dirtyRef.current = true;
+              autosave.markDirty();
               setContent(event.target.value);
             }}
             className="h-80 max-h-80 font-mono text-xs"

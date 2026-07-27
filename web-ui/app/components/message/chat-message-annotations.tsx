@@ -3,9 +3,9 @@ import * as React from "react";
 import { ExternalLink } from "lucide-react";
 
 import { cn } from "~/lib/utils";
-import type { UIMessageAnnotation } from "~/types";
+import type { UIMessageAnnotation, UrlCitationAnnotation } from "~/types";
 
-function getCitationLabel(annotation: UIMessageAnnotation): string {
+function getCitationLabel(annotation: UrlCitationAnnotation): string {
   if (annotation.title.trim().length > 0) {
     return annotation.title;
   }
@@ -30,7 +30,10 @@ export function ChatMessageAnnotationsRow({
   alignRight: boolean;
 }) {
   const citations = React.useMemo(
-    () => annotations?.filter((annotation) => annotation.type === "url_citation") ?? [],
+    () =>
+      (annotations ?? []).filter(
+        (annotation): annotation is UrlCitationAnnotation => annotation.type === "url_citation",
+      ),
     [annotations],
   );
 

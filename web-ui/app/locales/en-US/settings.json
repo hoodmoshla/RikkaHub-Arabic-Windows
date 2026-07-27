@@ -46,7 +46,8 @@
     "batch_save_error": "Save failed: {{msg}}",
     "cancel": "Cancel",
     "save": "Save",
-    "source_ai": "AI proposed"
+    "source_ai": "AI proposed",
+    "delete_confirm": "Delete this memory?"
   },
   "donate": {
     "title": "Donate",
@@ -87,7 +88,6 @@
     "ui_font_size": "UI font size",
     "ui_font_size_hint": "Scale the font size and spacing of the entire app. Everything scales proportionally without breaking the layout.",
     "reset": "Reset",
-    "profile_saved": "Profile saved",
     "tray_title": "Window & tray",
     "tray_desc": "Window close behavior and an explicit quit entry.",
     "minimize_to_tray": "Minimize to tray on close",
@@ -323,7 +323,6 @@
     "password": "Password",
     "optional": "(optional)",
     "current": "Current proxy",
-    "saved": "Proxy settings saved",
     "save_failed": "Failed to save proxy settings",
     "detected": "System proxy detected: {{url}}",
     "none_detected": "No system proxy detected",
@@ -334,7 +333,6 @@
     "port_number": "Port number",
     "port_number_hint": "(blank = auto, default 8080)",
     "port_invalid": "Port must be an integer between 1 and 65535",
-    "port_saved": "Port saved, effective after restart",
     "port_save_failed": "Failed to save port settings",
     "port_restart_note": "Port changes take effect after restarting. The running instance still uses the old port.",
     "active_from_system": "{{url}} (from system proxy)",
@@ -428,7 +426,6 @@
     "current": "Current",
     "service_default": "Search service",
     "autosaved": "Saved automatically",
-    "saved": "Search service saved",
     "autosave_failed": "Failed to auto-save search service",
     "added": "Search service added",
     "add_failed": "Failed to add search service",
@@ -548,7 +545,6 @@
     "status_error": "Connection error",
     "status_connected": "Connected",
     "server": {
-      "saved": "MCP server saved",
       "deleted": "MCP server deleted",
       "delete_confirm": "Delete this MCP server?",
       "create_failed": "Failed to create MCP server",
@@ -587,7 +583,6 @@
     "entries_count": "Entries ({{count}})",
     "no_entries": "No entries yet. Click “Add entry” to start.",
     "lorebook": {
-      "saved": "Lorebook saved",
       "create_failed": "Failed to create lorebook",
       "empty": "No lorebooks yet",
       "detail": "Lorebook details",
@@ -595,22 +590,22 @@
       "enable": "Enable entire lorebook",
       "desc": "Description",
       "desc_ph": "(optional) describe what this lorebook is for",
-      "delete": "Delete lorebook"
+      "delete": "Delete lorebook",
+      "delete_confirm": "Delete the lorebook \"{{name}}\"?"
     },
     "quick": {
-      "saved": "Quick message saved",
       "empty": "No quick messages yet",
       "detail": "Quick message details",
       "title": "Title",
-      "content": "Content"
+      "content": "Content",
+      "delete_confirm": "Delete the quick message \"{{name}}\"?"
     },
-    "item_saved": "{{title}} saved",
     "empty_item": "No {{title}} yet",
     "item_create_failed": "Failed to create {{title}}",
     "item_detail": "{{title}} details",
     "inject_content_template_ph": "Injection content, supports template variables like {{cur_datetime}}",
+    "inject_delete_confirm": "Delete the injection template \"{{name}}\"?",
     "template_vars": "Template variables",
-    "skill_saved": "Skill saved",
     "skill_imported": "Skill imported: {{name}}",
     "import_failed": "Import failed",
     "empty_skill": "No skills yet",
@@ -629,6 +624,8 @@
     "add_new": "Add"
   },
   "speech": {
+    "tts_delete_confirm": "Delete the TTS provider \"{{name}}\"?",
+    "asr_delete_confirm": "Delete the ASR provider \"{{name}}\"?",
     "tts_title": "Text to speech",
     "tts_subtitle": "TTS providers narrate messages; ASR providers power real-time speech recognition in the input box.",
     "asr_title": "Speech recognition",
@@ -692,7 +689,6 @@
     "restore_confirm": "Restoring {{name}} overwrites your current local settings, conversations and logs. Continue?",
     "delete_confirm": "Delete the remote backup {{name}}?",
     "s3_restore_confirm": "Restore from the remote backup {{name}}? This overwrites the current local state.",
-    "webdav_saved": "WebDAV settings saved",
     "webdav_autosave_failed": "Failed to auto-save WebDAV settings",
     "webdav_conn_ok": "WebDAV connection succeeded",
     "webdav_conn_failed": "WebDAV connection failed",
@@ -702,7 +698,6 @@
     "webdav_restore_failed": "WebDAV restore failed",
     "webdav_deleted": "WebDAV backup deleted",
     "webdav_delete_failed": "WebDAV delete failed",
-    "s3_saved": "S3 settings saved",
     "s3_autosave_failed": "Failed to auto-save S3 settings",
     "s3_list_failed": "S3 list failed",
     "webdav_list_failed": "WebDAV list failed",
@@ -890,6 +885,7 @@
     "loading": "Loading fonts…",
     "added_toast": "Font added: {{name}}",
     "upload_failed": "Font upload failed",
+    "delete_confirm": "Delete the custom font \"{{name}}\"?",
     "pick_title": "Choose font",
     "search_placeholder": "Search fonts…",
     "no_match": "No matching fonts",

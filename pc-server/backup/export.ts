@@ -262,7 +262,7 @@ function generateRikkaHubDb(dbPath: string, backupNameById?: Map<number, string>
 /** 把 PC 记忆写进 rikka_hub.db 的 MemoryEntity 表(PC→APP 方向,§7.7)。表结构从
  *  cached.db 克隆(id INTEGER PK AUTOINCREMENT / assistant_id TEXT / content TEXT)。
  *  防御:cached.db 若来自老版 APP(无 MemoryEntity 表),跳过,不影响会话。
- *  id 不写:SQLite AUTOINCREMENT 分配(对称 APP→PC 导入丢弃 id 重分配,server.ts:4012)。
+ *  id 不写:SQLite AUTOINCREMENT 分配(对称 APP→PC 导入丢弃 id 重分配,backup/import.ts)。
  *  时间戳不写:APP 的 MemoryEntity 表无此列。整体替换语义下助手+记忆同源 assistantId,天然匹配。 */
 function insertMemoriesIntoDb(db: InstanceType<typeof Database>) {
   const hasTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='MemoryEntity'").get();
@@ -420,7 +420,8 @@ export function stageUploadFilesInto(
   return { staged, failed, firstError };
 }
 
-function collectReferencedFileIds(): Set<number> {
+// R1-13:数据目录卫生的孤儿附件统计复用本扫描器,导出。
+export function collectReferencedFileIds(): Set<number> {
   const ids = new Set<number>();
   collectPcFileRefs(safeJsonStringify(state), ids);
   for (const img of state.generatedImages ?? []) {
@@ -447,6 +448,23 @@ type UploadStagingPlan = {
 // 批5:附件 staging 计划。①无引用孤儿不进备份;②内容 sha256 去重(只对尺寸碰撞组计算,
 // 避免全量读盘两遍),重复内容共享同一 zip 内文件名——多个 id 的 backupName 指向同一份字节,
 // 恢复端天然归并;③重名规避沿用 stem_<id>.ext。
+// R4-6:备份 staging 文件名跨平台清洗。fileName 可能来自 Linux/安卓上传(那边 :*?"<>|
+// 等字符合法),Windows 上 copyFileSync 会炸,该附件永远缺席备份且用户无解。backupName
+// 与原名本就解耦(pc-backup.json 按 backupName 回链,manifest 与 zip 同源于同一产出),
+// 清洗零副作用。四步:①非法字符与控制符 → _;②剥结尾点/空格(Windows 目录项非法尾缀);
+// ③CON/PRN/AUX/NUL/COM1-9/LPT1-9 设备保留名(裸名或带任意扩展名)加 _ 前缀;④超长名
+// 截干保尾缀(staging 与解包都落真实文件系统,常见上限 255 字节,150 字符对多字节留足余量)。
+// 清洗后为空由调用方回退 <id>.<ext>;清洗后撞名由调用方 usedNames 去重兜底。
+export function sanitizeStagingFileName(rawName: string): string {
+  let name = rawName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(name)) name = `_${name}`;
+  if (name.length > 150) {
+    const ext = extname(name);
+    name = name.slice(0, 150 - ext.length) + ext;
+  }
+  return name;
+}
+
 function buildUploadStagingPlan(): UploadStagingPlan {
   const referenced = collectReferencedFileIds();
   const resolved: Array<{ file: (typeof state.files)[number]; srcPath: string; size: number }> = [];
@@ -493,7 +511,9 @@ function buildUploadStagingPlan(): UploadStagingPlan {
         continue;
       }
     }
-    let name = file.fileName || `${file.id}${extname(srcPath) || ""}`;
+    // R4-6:跨平台清洗见 sanitizeStagingFileName(非法字符/尾缀/设备保留名/超长名)。
+    const sanitized = sanitizeStagingFileName(file.fileName || "");
+    let name = sanitized || `${file.id}${extname(srcPath) || ""}`;
     if (usedNames.has(name)) {
       const ext = extname(name);
       const stem = name.slice(0, name.length - ext.length);

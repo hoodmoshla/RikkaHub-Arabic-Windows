@@ -20,6 +20,10 @@
 const REPLAY_EVENTS = new Set(["settings", "memory", "app_errors_snapshot", "invalidate"]);
 /** 3 次心跳未见(页面崩溃/被杀,pagehide 没来得及发 bye)即判死摘除。 */
 const PORT_STALE_MS = 45_000;
+/** R6-1:SSE 连接活性看门狗。服务端每 15s 发 `: heartbeat` 注释帧;45s(3×心跳)无字节
+ *  判连接已死(合盖睡眠/换网产生的半开 TCP 会让 reader.read() 永久挂起,不抛错不重连),
+ *  abort 本次连接走既有退避重连。与页内 services/api.ts sse() 口径一致。 */
+const SSE_IDLE_TIMEOUT_MS = 45_000;
 
 const ports = new Map<MessagePort, { lastSeen: number }>();
 const lastSnapshot = new Map<string, unknown>();
@@ -69,10 +73,20 @@ async function run(): Promise<void> {
   let attempt = 0;
 
   while (running && !signal.aborted) {
+    // R6-1:每次连接一个独立 controller:全局 stop 桥接进来(fatal),看门狗也从这里
+    // abort(但全局 signal 未动,循环尾的检查放行 → 走既有退避重连)。
+    const connAbort = new AbortController();
+    const onStop = () => connAbort.abort();
+    signal.addEventListener("abort", onStop, { once: true });
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const armIdleWatchdog = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => connAbort.abort(), SSE_IDLE_TIMEOUT_MS);
+    };
     try {
       const headers: Record<string, string> = { Accept: "text/event-stream" };
       if (token) headers.Authorization = `Bearer ${token}`;
-      const response = await fetch("/api/events", { headers, signal });
+      const response = await fetch("/api/events", { headers, signal: connAbort.signal });
       if (response.status === 401) {
         // 停连等待:密码闸门解锁后页面整页 reload,重新 hello 携新 token 再启动
         broadcast({ type: "auth_required", message: "Unauthorized", code: 401 });
@@ -87,9 +101,11 @@ async function run(): Promise<void> {
       let buffer = "";
       let currentEvent = "message";
       let currentData = "";
+      armIdleWatchdog(); // 连上即起看门狗
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        armIdleWatchdog(); // 收到任何字节(含 `: heartbeat` 注释帧)即重置
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -118,7 +134,10 @@ async function run(): Promise<void> {
       }
       // 服务端正常关流(如后端重启)→ 退避重连
     } catch {
-      // 网络错/中断 → 退避重连
+      // 网络错/中断/看门狗 abort → 退避重连
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      signal.removeEventListener("abort", onStop);
     }
     if (!running || signal.aborted) return;
     const delay = Math.min(1000 * 2 ** attempt, 30_000);

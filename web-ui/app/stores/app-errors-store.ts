@@ -15,9 +15,16 @@ interface AppErrorsStoreState {
   setErrors: (errors: AppErrorDto[]) => void;
   pushError: (entry: AppErrorDto) => void;
   clearErrors: () => Promise<void>;
-  /** 前端自身 catch 到的错误走同一中心(不回传后端,仅本地聚合)。 */
-  reportLocalError: (entry: AppErrorDto) => void;
+  /**
+   * 前端自身 catch 到的错误走同一中心(不回传后端,仅本地聚合)。
+   * R6-4:复用后端"同 domain+message 30s 合并计数"语义——窗口内只累加计数不新增条目。
+   * 返回是否为新条目(false = 已合并,调用方据此跳过重复 toast,避免循环失败风暴)。
+   */
+  reportLocalError: (entry: AppErrorDto) => boolean;
 }
+
+/** 与后端错误中心的风暴抑制窗口(observability/app-errors)对齐。 */
+const LOCAL_MERGE_WINDOW_MS = 30_000;
 
 export const useAppErrorsStore = create<AppErrorsStoreState>((set) => ({
   errors: [],
@@ -31,7 +38,25 @@ export const useAppErrorsStore = create<AppErrorsStoreState>((set) => ({
       // 清空是尽力而为;后端不可达时本地已清,重连快照会再同步
     }
   },
-  reportLocalError: (entry) => set((s) => ({ errors: [entry, ...s.errors].slice(0, 200) })),
+  reportLocalError: (entry) => {
+    let merged = false;
+    set((s) => {
+      // 只看最新一条同 domain+message(列表新在前);窗口锚定在该条目的 at,
+      // 不随合并滑动——持续风暴每 30s 至多产生一条新条目 + 一次 toast。
+      const index = s.errors.findIndex(
+        (item) => item.domain === entry.domain && item.message === entry.message,
+      );
+      const existing = index >= 0 ? s.errors[index] : undefined;
+      if (existing && entry.at - existing.at < LOCAL_MERGE_WINDOW_MS) {
+        merged = true;
+        const errors = [...s.errors];
+        errors[index] = { ...existing, count: existing.count + entry.count };
+        return { errors };
+      }
+      return { errors: [entry, ...s.errors].slice(0, 200) };
+    });
+    return !merged;
+  },
 }));
 
 function routeToast(entry: AppErrorDto) {

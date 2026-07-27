@@ -15,8 +15,15 @@ export type UrlCitationAnnotation = {
   url: string;
 };
 
-/** 注释判别联合(对齐安卓 UIMessageAnnotation;当前仅 url_citation 一种)。 */
-export type UIMessageAnnotation = UrlCitationAnnotation;
+/** R7-2:模型调用失败的结构化标记(orchestrator catch 落在失败消息上)。前端错误横幅
+ *  由它驱动,取代对正文的关键词正则匹配(正常讨论 HTTP 状态码/超时的内容不再误报)。 */
+export type ModelCallErrorAnnotation = {
+  type: "model_call_error";
+  message: string;
+};
+
+/** 注释判别联合(对齐安卓 UIMessageAnnotation)。 */
+export type UIMessageAnnotation = UrlCitationAnnotation | ModelCallErrorAnnotation;
 
 /** token 用量:inference-engine 三家 provider 归一化后的统一形状(appendUsageFromRaw 等)。 */
 export type TokenUsage = {

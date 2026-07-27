@@ -1,11 +1,9 @@
 import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { Streamdown } from "streamdown";
+import { Streamdown, type PluginConfig } from "streamdown";
 import { cjk } from "@streamdown/cjk";
-import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import rehypeRaw from "rehype-raw";
 import { cn } from "~/lib/utils";
 import { getCodePreviewLanguage } from "~/components/workbench/code-preview-language";
 import { useOptionalWorkbench } from "~/components/workbench/workbench-context";
@@ -14,6 +12,22 @@ import { CodeBlock } from "./code-block";
 import "katex/dist/katex.min.css";
 import "./markdown.css";
 import "streamdown/styles.css";
+
+// 批次二 R7-1(P1):不再覆盖 rehypePlugins。Streamdown 默认管线 = raw → sanitize
+// (defaultSchema)→ harden,是它专为"渲染不可信 LLM 输出"内置的消毒防线;此前传入
+// [rehypeKatex, rehypeRaw] 把整条防线替换掉了——正文里的原始 HTML 解析后既不消毒也不
+// 加固,<img onerror>/<iframe>/javascript: 链接直通(消息正文、翻译块、跨端导入/分享
+// 的会话都经此渲染)。数学改走官方 plugins.math 口子:remarkPlugin 追加在 remark 链末
+// 解析 $..$;rehypePlugin 追加在 sanitize/harden 之后渲染 KaTeX。数学节点以
+// <code class="language-math">(defaultSchema 放行 language-* 类)穿过消毒,块级公式由
+// pre>code 结构判定 display,KaTeX 产物(span/MathML/内联 style)生成于消毒之后不会被
+// 剥。remark 默认已含 gfm,无需再传。
+// 对象须为模块级常量:Streamdown 的 memo 按引用比较 plugins,内联字面量会让流式渲染
+// 每个 token delta 都重建整棵 Markdown 树。
+const STREAMDOWN_PLUGINS: PluginConfig = {
+  cjk,
+  math: { name: "katex", type: "math", remarkPlugin: remarkMath, rehypePlugin: rehypeKatex },
+};
 
 // Regex patterns for preprocessing
 const INLINE_LATEX_REGEX = /\\\((.+?)\\\)/g;
@@ -58,12 +72,23 @@ function preProcess(content: string): string {
     return `$$${formula}$$`;
   });
 
-  return result.replace(
+  result = result.replace(
     /(?<![A-Za-z0-9_])\[?\s*citation\s*[:：]?\s*([A-Za-z]?\d+)\s*\]?/gi,
     (match, id, offset) => {
       if (isInCodeBlock(offset)) return match;
-      return `[citation,source](${String(id).replace(/^s/i, "")})`;
+      return `[citation,source](#${String(id).replace(/^s/i, "")})`;
     },
+  );
+
+  // 批次二 R7-1:citation 链接统一改写成 fragment 形态(#id)。默认管线末端的
+  // rehype-harden 只放行可解析的 URL,citation 的 href 是内部 id(如 "42"/"8905cd"),
+  // 裸相对形态会被替换成 "[blocked]" 占位节点,a 组件根本收不到。fragment 是 harden
+  // 显式放行的形态。除上面刚生成的以外,还要覆盖 LLM 按搜索提示词直接输出在正文里的
+  // [citation,domain](id);(?!#) 保证幂等。
+  return result.replace(
+    /\[citation,([^\]]*)\]\((?!#)([^)\s]+)\)/g,
+    (match, domain, id, offset) =>
+      isInCodeBlock(offset) ? match : `[citation,${domain}](#${id})`,
   );
 }
 
@@ -166,10 +191,11 @@ export default function Markdown({
       a: ({ href, children, ...props }) => {
         const childText = getNodeText(children).trim();
 
-        // Citation format: [citation,domain](id)
+        // Citation format: [citation,domain](#id) —— preProcess 统一改写成 fragment
+        // 形态以穿过 rehype-harden,这里剥掉 # 还原内部 id。
         if (childText.startsWith("citation,")) {
           const domain = childText.substring("citation,".length);
-          const id = (href || "").trim().replace(/^s/i, "");
+          const id = (href || "").trim().replace(/^#/, "").replace(/^s/i, "");
           // Prefer the ordinal (1-based position) from the message's annotation/tool-output
           // list — that's the user-facing "[1]" / "[2]" label they expect. Falls back to
           // the raw id (e.g. Android's 6-char hex `8905cd`) if no mapping is available.
@@ -229,9 +255,7 @@ export default function Markdown({
   return (
     <div className={cn("markdown", className)}>
       <Streamdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex, rehypeRaw]}
-        plugins={{ cjk: cjk }}
+        plugins={STREAMDOWN_PLUGINS}
         animated={false}
         isAnimating={isAnimating}
         controls={{ code: false, mermaid: false }}

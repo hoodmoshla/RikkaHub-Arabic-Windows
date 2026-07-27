@@ -192,6 +192,46 @@ docker run -d \
 接著瀏覽器開啟 `http://localhost:8080`。映像基於 `distroless/base-debian12`，已內建
 `unzip`/`zip`；剪貼簿和 TTS 在無頭容器內無法使用。
 
+**區域網路 / 公網部署安全注記:** AI 的 `scrape_web` 工具會在容器內直接抓取模型給出的
+任意 URL——被注入提示詞的網頁可能誘導模型去探測內網服務或雲端中繼資料位址(SSRF)。若你的
+網路環境在意這一點,請隔離容器網路或限制其對外流量。
+
+### 反向代理(nginx)
+
+把 RikkaHub 放到反向代理後面(例如加 HTTPS)時,有兩個關鍵點:
+
+- **Host 透傳** —— 伺服器會拒絕 `Origin` 與請求 `Host` 不一致的寫入請求(CSRF 防護)。
+  預設的 `proxy_pass` 會把 `Host` 改寫成上游位址,導致所有 POST/DELETE 一律 403,
+  表現為「網頁打得開但什麼都存不了」。用 `proxy_set_header Host $host` 透傳原始 Host。
+- **串流輸出** —— SSE 回應已帶 `X-Accel-Buffering: no`,nginx 會據此自動關閉回應緩衝;
+  `proxy_buffering off` 只是給不認這個標頭的代理兜底。
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl;
+    server_name rikka.example.com;
+    # ssl_certificate ...; ssl_certificate_key ...;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;              # 保住 Origin/Host CSRF 檢查
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;   # WebSocket(語音輸入)
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;                      # 兜底;SSE 已送出 X-Accel-Buffering: no
+        proxy_read_timeout 1h;                    # 長連線 SSE / 生成串流
+        client_max_body_size 0;                   # 備份還原上傳可達數百 MB
+    }
+}
+```
+
+只要代理讓服務可以從本機之外存取,務必設定 `RIKKAHUB_PASSWORD`。
+
 ## 🧰 技術棧
 
 - [Bun](https://bun.sh/) —— 執行環境、打包器、套件管理器

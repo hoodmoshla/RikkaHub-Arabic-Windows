@@ -3,8 +3,8 @@
 
 import type { Assistant, Conversation, JsonValue, Message, MessageNode, MessagePart } from "../foundation/types";
 import { estimateTokens, id, isRecord, message, reasoningFromParts, textFromParts } from "../foundation/utils";
-import { saveState, state } from "../persistence/json-store";
-import { broadcastList, conversationClients } from "../api/sse";
+import { state } from "../persistence/json-store";
+import { broadcastList, dropConversationSse } from "../api/sse";
 import { deletePcConversations, flushConvDirtyNow, getConversation, persistConversation, selectedConversationMessages } from "./index";
 import { registerConversation, removeConversations } from "./working-set";
 import { generating } from "./generation-state";
@@ -32,13 +32,13 @@ export function abortConversationGeneration(conversationId: string) {
 export function deleteConversationsById(ids: Set<string>) {
   for (const conversationId of ids) {
     abortConversationGeneration(conversationId);
-    conversationClients.delete(conversationId);
+    // R2-4+R2-6:close 详情流 + 清待发节点广播(见 dropConversationSse 注释)
+    dropConversationSse(conversationId);
   }
   // 先删 working set,再删活库——避免删活库后残余脏标记 flush 又把节点 upsert 回来
   // (flushConvDirty 经 peekConversation 查注册表,条目没了就跳过)。
   removeConversations(ids);
   deletePcConversations(Array.from(ids));
-  saveState();
   broadcastList();
 }
 

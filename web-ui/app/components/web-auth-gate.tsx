@@ -15,8 +15,13 @@ export function WebAuthGate() {
   const [error, setError] = React.useState<string | null>(null);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
+  // R6-3:401 事件按请求数分发不去重。弹窗已开时(用户可能正在输密码),后台请求再触发
+  // 的 401 只需保持弹窗,不得重置字段——否则正在输入的密码被当场清空。
+  const openRef = React.useRef(false);
+  openRef.current = open;
   React.useEffect(() => {
     return onWebAuthRequired(() => {
+      if (openRef.current) return;
       setOpen(true);
       setSubmitting(false);
       setError(null);

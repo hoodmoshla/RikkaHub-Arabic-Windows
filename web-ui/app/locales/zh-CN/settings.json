@@ -46,7 +46,8 @@
     "batch_save_error": "保存失败:{{msg}}",
     "cancel": "取消",
     "save": "保存",
-    "source_ai": "AI 提议"
+    "source_ai": "AI 提议",
+    "delete_confirm": "删除这条记忆？"
   },
   "donate": {
     "title": "赞助",
@@ -87,7 +88,6 @@
     "ui_font_size": "界面字号",
     "ui_font_size_hint": "调整整个应用的字号与间距比例，所有元素等比缩放，不会破坏布局。",
     "reset": "恢复默认",
-    "profile_saved": "用户资料已保存",
     "tray_title": "窗口与托盘",
     "tray_desc": "关闭窗口时的行为，以及显式退出入口。",
     "minimize_to_tray": "关闭时最小化到托盘",
@@ -323,7 +323,6 @@
     "password": "密码",
     "optional": "（可选）",
     "current": "当前代理",
-    "saved": "代理设置已保存",
     "save_failed": "保存代理设置失败",
     "detected": "检测到系统代理：{{url}}",
     "none_detected": "未检测到系统代理",
@@ -334,7 +333,6 @@
     "port_number": "端口号",
     "port_number_hint": "（留空 = 自动，默认 8080）",
     "port_invalid": "端口必须是 1–65535 之间的整数",
-    "port_saved": "端口设置已保存，重启应用后生效",
     "port_save_failed": "保存端口设置失败",
     "port_restart_note": "修改端口后需要重启应用才能生效。当前运行中的实例仍使用原端口。",
     "active_from_system": "{{url}}（来自系统代理）",
@@ -428,7 +426,6 @@
     "current": "当前",
     "service_default": "搜索服务",
     "autosaved": "已自动保存",
-    "saved": "搜索服务已保存",
     "autosave_failed": "自动保存搜索服务失败",
     "added": "搜索服务已添加",
     "add_failed": "添加搜索服务失败",
@@ -548,7 +545,6 @@
     "status_error": "连接异常",
     "status_connected": "已连接",
     "server": {
-      "saved": "MCP 服务器已保存",
       "deleted": "已删除 MCP 服务器",
       "delete_confirm": "删除这个 MCP 服务器？",
       "create_failed": "新增 MCP 服务器失败",
@@ -587,7 +583,6 @@
     "entries_count": "条目（{{count}}）",
     "no_entries": "还没有条目。点击\"添加条目\"开始。",
     "lorebook": {
-      "saved": "世界书已保存",
       "create_failed": "新增世界书失败",
       "empty": "还没有世界书",
       "detail": "世界书详情",
@@ -595,22 +590,22 @@
       "enable": "启用整个世界书",
       "desc": "描述",
       "desc_ph": "（可选）说明这个世界书的用途",
-      "delete": "删除世界书"
+      "delete": "删除世界书",
+      "delete_confirm": "删除世界书「{{name}}」？"
     },
     "quick": {
-      "saved": "快捷消息已保存",
       "empty": "还没有快捷消息",
       "detail": "快捷消息详情",
       "title": "标题",
-      "content": "内容"
+      "content": "内容",
+      "delete_confirm": "删除快捷消息「{{name}}」？"
     },
-    "item_saved": "{{title}} 已保存",
     "empty_item": "还没有 {{title}}",
     "item_create_failed": "新增{{title}}失败",
     "item_detail": "{{title}} 详情",
     "inject_content_template_ph": "注入内容，支持 {{cur_datetime}} 等模板变量",
+    "inject_delete_confirm": "删除注入模板「{{name}}」？",
     "template_vars": "模板变量",
-    "skill_saved": "Skill 已保存",
     "skill_imported": "Skill 已导入：{{name}}",
     "import_failed": "导入失败",
     "empty_skill": "还没有 Skill",
@@ -629,6 +624,8 @@
     "add_new": "新增"
   },
   "speech": {
+    "tts_delete_confirm": "删除语音合成服务「{{name}}」？",
+    "asr_delete_confirm": "删除语音识别服务「{{name}}」？",
     "tts_title": "文字转语音",
     "tts_subtitle": "TTS provider 用于消息语音播报，ASR provider 用于输入框实时语音识别。",
     "asr_title": "语音识别",
@@ -692,7 +689,6 @@
     "restore_confirm": "恢复 {{name}} 会覆盖当前本地设置、会话和日志。继续？",
     "delete_confirm": "删除远端备份 {{name}}？",
     "s3_restore_confirm": "从远端备份 {{name}} 恢复？这会覆盖当前本地状态。",
-    "webdav_saved": "WebDAV 配置已保存",
     "webdav_autosave_failed": "自动保存 WebDAV 失败",
     "webdav_conn_ok": "WebDAV 连接成功",
     "webdav_conn_failed": "WebDAV 连接失败",
@@ -702,7 +698,6 @@
     "webdav_restore_failed": "WebDAV 恢复失败",
     "webdav_deleted": "WebDAV 备份已删除",
     "webdav_delete_failed": "WebDAV 删除失败",
-    "s3_saved": "S3 配置已保存",
     "s3_autosave_failed": "自动保存 S3 失败",
     "s3_list_failed": "S3 列表失败",
     "webdav_list_failed": "WebDAV 列表失败",
@@ -890,6 +885,7 @@
     "loading": "加载字体…",
     "added_toast": "已添加字体：{{name}}",
     "upload_failed": "字体上传失败",
+    "delete_confirm": "删除自定义字体「{{name}}」？",
     "pick_title": "选择字体",
     "search_placeholder": "搜索字体…",
     "no_match": "无匹配字体",

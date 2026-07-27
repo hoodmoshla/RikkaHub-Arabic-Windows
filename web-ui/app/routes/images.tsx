@@ -22,6 +22,7 @@ import { Textarea } from "~/components/ui/textarea";
 import { normalizeImageForModelUpload } from "~/lib/image-normalize";
 import api from "~/services/api";
 import { useSettingsStore } from "~/stores/app-store";
+import { confirmDialog } from "~/stores/confirm-store";
 import type { ProviderModel } from "~/types";
 import i18n from "~/i18n";
 
@@ -451,6 +452,7 @@ export default function ImagesPage() {
                         variant="ghost"
                         size="icon-sm"
                         onClick={async () => {
+                          if (!(await confirmDialog({ title: t("image_page.delete_confirm"), danger: true }))) return;
                           await api.delete(`images/${image.id}`);
                           setImages((current) => current.filter((item) => item.id !== image.id));
                         }}

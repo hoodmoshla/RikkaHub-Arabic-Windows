@@ -6,12 +6,15 @@
 //   文本累积 / 工具卡创建(未在流内建卡的 provider) / 审批 pre-scan bail / 工具执行分发 /
 //   非流式降级重试(可选能力) / 超限抛错。
 // Provider 差异经 ProviderRoundAdapter 注入：单轮流解析、工具调用归一、下一轮编码(回放
-// assistant 轮 + 工具结果轮的 provider 特定格式)、日志载荷、若干冻结的行为点位。
+// assistant 轮 + 工具结果轮的 provider 特定格式)、日志载荷、若干参数化的差异点位。
 //
-// 行为冻结纪律：本文件从三个旧循环逐字搬迁共同骨架，行为差异点位全部保留为 adapter
-// 字段（见接口注释），不做任何有意统一——那属于单独的行为修复提交。
+// 骨架搬迁纪律：本文件从三个旧循环逐字搬迁共同骨架。批次三(R3-1/R3-4)在此兑现了
+// tool-loop 原注释预告的"行为修复单独提交":
+//   · R3-1 头超时 + signal 桥接由骨架统一(headerTimeoutMs),Claude/Google 不再裸奔;
+//   · R3-4 工具执行 for 循环每迭代查 signal.aborted,三家一致(删除 abortCheckAfterRead
+//     冻结点——此前 Claude/Google 停止后本轮工具仍会执行,违背用户"停止"心智)。
+// 其余仍为纯参数化差异(文案/编码格式等),不做无谓统一。
 import type { Assistant, Message, Provider } from "../foundation/types";
-import { id } from "../foundation/utils";
 import { initialApprovalState, toolNeedsApproval } from "../tools/approval";
 import { toolExecutionErrorPayload } from "../tools/format";
 import { finishReasoningParts } from "./parts";
@@ -23,6 +26,60 @@ import { touchStream } from "../api/sse";
 import { isRecord } from "../foundation/utils";
 
 export const MAX_TOOL_STEPS = 256;
+
+// R3-1:主对话流的空闲看门狗预算。上游黑洞(TCP 通但永不回头,或流中途静默不断连——
+// 劣质中转站常见)时,若无此上限 reader.read() 永久悬挂,generating 卡死、挡住 working-set
+// 清扫且不可自愈。三家流式 reader 统一走 readWithIdleTimeout 包装(此前仅 OpenAI 有)。
+export const STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+/** 用空闲超时包裹一次 reader.read():超 timeoutMs 未收到任何字节即 reject,让上游黑洞
+ *  连接及时报错释放,而非永久悬挂。与 signal 轮询互补——signal 管"用户主动停",本包装
+ *  管"上游静默挂死"。read 的 promise 在超时后仍挂着(JS 无法取消),但错误已向上传播,
+ *  请求处理栈随之解开、连接由 GC 回收(与原 OpenAI 行为一致)。 */
+export function readWithIdleTimeout<T>(read: () => Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    read(),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`流空闲超时:${Math.round(timeoutMs / 1000)}s 未收到上游数据`)),
+        timeoutMs,
+      );
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+// R3-1:头超时 + 外部 signal 桥接。下沉自 OpenAI adapter 的 fetchRound 包装,现为骨架能力,
+// 三家共用。响应头到达(fetch settle)即 cleanup 清定时器、摘外部 abort 监听——之后的流式
+// 读阶段由各 reader 直接轮询外部 signal 处理用户停止(见 readRound),不依赖本 controller。
+async function fetchRoundWithHeaderTimeout(
+  adapter: ProviderRoundAdapter,
+  requestBody: Record<string, unknown>,
+  round: number,
+  externalSignal: AbortSignal | undefined,
+): Promise<Response> {
+  const timeoutMs = adapter.headerTimeoutMs(requestBody);
+  if (timeoutMs <= 0) return adapter.fetchRound(requestBody, round, externalSignal);
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let abortHandler: (() => void) | null = null;
+  const cleanup = () => {
+    if (timeout) clearTimeout(timeout);
+    if (externalSignal && abortHandler) externalSignal.removeEventListener("abort", abortHandler);
+  };
+  if (externalSignal) {
+    abortHandler = () => controller.abort(externalSignal.reason);
+    if (externalSignal.aborted) controller.abort(externalSignal.reason);
+    else externalSignal.addEventListener("abort", abortHandler, { once: true });
+  }
+  timeout = setTimeout(
+    () => controller.abort(new Error(`响应头超时:${Math.round(timeoutMs / 1000)}s 内未收到上游响应`)),
+    timeoutMs,
+  );
+  return adapter.fetchRound(requestBody, round, controller.signal).finally(cleanup);
+}
 
 export function toolCallContext(hooks?: StreamHooksWithSink): ToolDispatchContext | undefined {
   if (!hooks?.conversation) return undefined;
@@ -62,8 +119,12 @@ export interface ProviderRoundAdapter {
   logUrl: string;
   /** 请求日志的 requestHeaders 字段。 */
   logHeaders: Record<string, string>;
-  /** 发起单轮请求。骨架不关心 url/headers 细节（超时/abort 桥接等由 adapter 自理）。 */
-  fetchRound(requestBody: Record<string, unknown>, round: number): Promise<Response>;
+  /** 发起单轮请求。骨架统一负责"头超时 + 外部 signal 桥接"(R3-1),传入桥接后的 signal;
+   *  adapter 只管拼 url/headers/body 并把 signal 透传给 fetch。 */
+  fetchRound(requestBody: Record<string, unknown>, round: number, signal: AbortSignal | undefined): Promise<Response>;
+  /** 本轮"响应头超时"预算(ms):上游 TCP 通但迟迟不回响应头时的看门狗;返回 0 表示禁用。
+   *  下沉自 OpenAI(非流式 180s / 流式 600s),三家统一后 Claude/Google 主链路不再无超时裸奔。 */
+  headerTimeoutMs(requestBody: Record<string, unknown>): number;
   /** 读取并解析单轮响应，流内增量经 hooks/sink 下沉。 */
   readRound(response: Response, signal: AbortSignal | undefined): Promise<RoundResult>;
   /** 编码下一轮请求 body：回放本轮 assistant 轮 + 工具结果轮（provider 特定格式）。 */
@@ -78,9 +139,6 @@ export interface ProviderRoundAdapter {
   finishReasoningOnFinal: boolean;
   /** MAX_TOOL_STEPS 超限的报错文案（三家文案不同，冻结）。 */
   exhaustedError: string;
-  /** 读流结束后是否检查 abort 并抛出（OpenAI: true；Claude/Google: false——原实现只在
-   *  轮首检查，abort 后本轮工具仍会执行。此差异冻结，统一属行为修复须单独提交）。 */
-  abortCheckAfterRead: boolean;
   /** 流式失败降级为非流式重试（仅 OpenAI）。makeBody 把请求体改造为非流式形态。 */
   nonStreamFallback?: {
     makeBody(body: Record<string, unknown>): Record<string, unknown>;
@@ -136,7 +194,7 @@ export async function runStreamingToolLoop(
 
     let response: Response;
     try {
-      response = await adapter.fetchRound(requestBody, round);
+      response = await fetchRoundWithHeaderTimeout(adapter, requestBody, round, signal);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       logRound(adapter, round, roundStarted, requestBody, { ok: false, status: 0, responseBody: "", error: detail });
@@ -199,7 +257,9 @@ export async function runStreamingToolLoop(
       allContent += result.text;
     }
 
-    if (adapter.abortCheckAfterRead && signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
+    // R3-4:读流结束后统一检查 abort(此前仅 OpenAI 查)。流读取期间的 abort 只中断网络,
+    // 若恰在"读完→执行工具"窗口停止,不查就会照常执行本轮工具。
+    if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
 
     if (result.toolCalls.length === 0) {
       if (adapter.finishReasoningOnFinal) finishReasoningParts(hooks.message!);
@@ -214,6 +274,9 @@ export async function runStreamingToolLoop(
     const toolResults: ExecutedToolResult[] = [];
 
     for (const call of result.toolCalls) {
+      // R3-4:每个工具执行前查停止——用户看到工具卡即点停止时,不再执行剩余工具的副作用
+      // (MCP 写操作/剪贴板/TTS 等)。已建卡的工具保留为无输出态落库,orchestrator 正常收尾。
+      if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
       if (!adapter.toolCardsCreatedInStream && hooks.message) {
         // 流内不建卡的 provider（OpenAI）：循环层创建工具卡（pending 时也要渲染卡）
         const toolPart: ToolPart = {
@@ -268,7 +331,3 @@ export async function runStreamingToolLoop(
   throw new Error(adapter.exhaustedError);
 }
 
-/** 生成兜底 id（adapter 归一化工具调用缺 id 时用）。 */
-export function fallbackToolCallId(): string {
-  return id();
-}

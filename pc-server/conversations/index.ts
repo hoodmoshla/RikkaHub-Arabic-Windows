@@ -477,6 +477,23 @@ export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, co
   txn();
 }
 
+/** R1-1 ③:启动迁移专用的分批灌库。旧的单事务整库灌在巨量会话下把事件循环整段占死
+ *  (迁移期 503/进度端点全部失灵),且中途断电=全部重来。migrateConversationsIntoDb
+ *  对单个会话幂等(upsert+删旧节点重插),按批提交后崩溃重启只是重做,不会脏;
+ *  批间让出事件循环,/api/startup/status 才能被响应。 */
+export async function migrateConversationsIntoDbBatched(
+  db: InstanceType<typeof Database>,
+  conversations: Conversation[],
+  batchSize = 200,
+  onProgress?: (done: number, total: number) => void,
+): Promise<void> {
+  for (let start = 0; start < conversations.length; start += batchSize) {
+    migrateConversationsIntoDb(db, conversations.slice(start, start + batchSize));
+    onProgress?.(Math.min(start + batchSize, conversations.length), conversations.length);
+    await Bun.sleep(0);
+  }
+}
+
 /** 备份 2.0:把活库两张会话表 ATTACH 复制成独立 dump(pc_conversations.db)。
  *  PC→PC 会话备份的权威载体,与安卓 schema 模板彻底解耦(纯 PC 用户从此有完整会话备份)。
  *  不带 FTS(导入侧 resetConversationsDbTo 重建),纯 SQL 复制零 JS 内存开销;

@@ -37,5 +37,28 @@ export function mime(path: string) {
   if (path.endsWith(".png")) return "image/png";
   if (path.endsWith(".webp")) return "image/webp";
   if (path.endsWith(".ico")) return "image/x-icon";
+  // R1-8:自定义字体(上传端点接受 ttf/otf/woff/woff2 四种,见 system.ts FONT_EXTENSIONS_SET)
+  // 此前以 octet-stream 兜底——字体浏览器容忍(仅告警),但 .wasm 一旦引入会因
+  // instantiateStreaming 强制 MIME 校验而直接失败,提前补齐。
+  if (path.endsWith(".woff2")) return "font/woff2";
+  if (path.endsWith(".woff")) return "font/woff";
+  if (path.endsWith(".ttf")) return "font/ttf";
+  if (path.endsWith(".otf")) return "font/otf";
+  if (path.endsWith(".json")) return "application/json; charset=utf-8";
+  if (path.endsWith(".wasm")) return "application/wasm";
   return "application/octet-stream";
+}
+
+/** R5-2:SSE 响应标准头。X-Accel-Buffering: no 让 nginx 等反向代理对本响应自动关闭
+ *  proxy_buffering——否则事件被攒进缓冲区批量放行,流式表现为"卡住后一次性倾倒",
+ *  与 33ms 合并广播的丝滑目标背道而驰。全部 text/event-stream 响应(events/详情流/
+ *  provider 流式测试/更新下载/WebDAV/S3 进度×4)共用此构造,新增 SSE 端点也从这里拿头。 */
+export function sseHeaders(overrides?: Record<string, string>): Record<string, string> {
+  return {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+    ...overrides,
+  };
 }

@@ -9,6 +9,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { Textarea } from "~/components/ui/textarea";
+import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
 import { confirmDialog } from "~/stores/confirm-store";
@@ -221,8 +222,28 @@ export function SearchSection({
   const [keyTestEntries, setKeyTestEntries] = React.useState<
     Array<{ key: string; status: "ok" | "fail"; failCode?: string }>
   >([]);
-  const dirtyRef = React.useRef(false);
   const { t } = useTranslation();
+
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      const result = await api.post<{ service: Record<string, unknown> }>(
+        "settings/search/service/detail",
+        draft,
+      );
+      const savedService = toSearchService(result.service);
+      const exists = settings.searchServices.some(
+        (item) => String(item.id) === String(savedService.id),
+      );
+      const searchServices = exists
+        ? settings.searchServices.map((item) =>
+            String(item.id) === String(savedService.id) ? savedService : item,
+          )
+        : [...settings.searchServices, savedService];
+      onSettings({ ...settings, searchServices });
+    },
+    { onSaveError: (error) => toast.error((error as Error).message || t("settings:search.autosave_failed")) },
+  );
 
   // searchServicesRef: avoid re-running this effect after every autosave → onSettings
   // round-trip (would overwrite mid-flight keystrokes). See McpServerEditor for rationale.
@@ -232,12 +253,12 @@ export function SearchSection({
     const next = (searchServicesRef.current.find((item) => String(item.id) === selectedId) ??
       searchServicesRef.current[0]) as Record<string, unknown> | undefined;
     if (next) setDraft(clone(next));
-    dirtyRef.current = false;
+    autosave.reset();
     setTestResult("");
   }, [selectedId]);
 
   const patchDraft = (patch: Record<string, unknown>) => {
-    dirtyRef.current = true;
+    autosave.markDirty();
     setDraft({ ...draft, ...patch });
   };
 
@@ -260,54 +281,10 @@ export function SearchSection({
     onSettings({ ...settings, searchServiceSelected: index });
     await api.post("settings/search/service", { index });
   };
-  const save = async () => {
-    const result = await api.post<{ service: Record<string, unknown> }>(
-      "settings/search/service/detail",
-      draft,
-    );
-    const savedService = toSearchService(result.service);
-    const exists = settings.searchServices.some(
-      (item) => String(item.id) === String(result.service.id),
-    );
-    const searchServices = exists
-      ? settings.searchServices.map((item) =>
-          String(item.id) === String(savedService.id) ? savedService : item,
-        )
-      : [...settings.searchServices, savedService];
-    onSettings({
-      ...settings,
-      searchServices,
-      searchServiceSelected: searchServices.findIndex(
-        (item) => String(item.id) === String(savedService.id),
-      ),
-    });
-    setSelectedId(String(savedService.id));
-    toast.success(t("settings:search.saved"));
-  };
-  React.useEffect(() => {
-    if (!dirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void api
-        .post<{ service: Record<string, unknown> }>("settings/search/service/detail", draft)
-        .then((result) => {
-          dirtyRef.current = false;
-          const savedService = toSearchService(result.service);
-          const exists = settings.searchServices.some(
-            (item) => String(item.id) === String(savedService.id),
-          );
-          const searchServices = exists
-            ? settings.searchServices.map((item) =>
-                String(item.id) === String(savedService.id) ? savedService : item,
-              )
-            : [...settings.searchServices, savedService];
-          onSettings({ ...settings, searchServices });
-        })
-        .catch((error: Error) =>
-          toast.error(error.message || t("settings:search.autosave_failed")),
-        );
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [draft, onSettings, settings]);
+  // 测试前的"确保服务端拿到当前草稿"。原手动 save 与自动保存是两份重复的 POST+合并逻辑,
+  // 现统一为 hook 的 persist 体;原顺带改写全局 searchServiceSelected 的行为是自动保存
+  // 之前的遗留(测试一个服务不应劫持全局选中),一并去除。
+  const save = () => autosave.saveNow({ force: true });
   const addService = () => {
     const service = createSearchService();
     void api
@@ -403,12 +380,17 @@ export function SearchSection({
       }))
     )
       return;
+    // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1)
+    await autosave.discard();
     await api.delete(`settings/search/service/${encodeURIComponent(String(draft.id))}`);
     const searchServices = settings.searchServices.filter(
       (item) => String(item.id) !== String(draft.id),
     );
     onSettings({ ...settings, searchServices, searchServiceSelected: 0 });
     setSelectedId(String(searchServices[0]?.id ?? ""));
+    // 删到空:重对齐 effect 无条目可载,草稿若停留在已删实体上,再编辑一笔就会经
+    // 自动保存复活它。复位为挂载空列表时同款的空白新草稿(复审 F2)。
+    if (!searchServices.length) setDraft(createSearchService());
     toast.success(t("settings:search.deleted"));
   };
 
@@ -667,9 +649,7 @@ export function SearchSection({
               <span className="text-sm font-medium">{t("settings:search.result_count")}</span>
               <Input
                 value={numberText(
-                  draft.resultSize ??
-                    (settings.searchCommonOptions as Record<string, unknown> | undefined)
-                      ?.resultSize,
+                  draft.resultSize ?? settings.searchCommonOptions.resultSize,
                 )}
                 onChange={(event) => patchDraft({ resultSize: Number(event.target.value) || 10 })}
               />

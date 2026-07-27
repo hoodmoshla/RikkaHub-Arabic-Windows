@@ -20,29 +20,12 @@ import { Checkbox } from "~/components/ui/checkbox";
 import { Input } from "~/components/ui/input";
 import { Separator } from "~/components/ui/separator";
 import { Switch } from "~/components/ui/switch";
+import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import { cn } from "~/lib/utils";
 import api, { appendWebAuthQuery } from "~/services/api";
 import { confirmDialog } from "~/stores/confirm-store";
-import type { Settings } from "~/types";
+import type { S3Config, Settings, WebDavConfig } from "~/types";
 import { SectionHeader } from "~/components/settings/shared";
-
-interface WebDavConfig {
-  url: string;
-  username: string;
-  password: string;
-  path: string;
-  items: string[];
-}
-
-interface S3Config {
-  endpoint: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  bucket: string;
-  region: string;
-  pathStyle: boolean;
-  items: string[];
-}
 
 interface S3BackupItem {
   href: string;
@@ -83,13 +66,8 @@ export function DataSection({
   const [registeringSchema, setRegisteringSchema] = React.useState(false);
   const [schemaExpanded, setSchemaExpanded] = React.useState(false);
   const [importProgress, setImportProgress] = React.useState(0); // 0-100 during upload
-  const defaultWebDav = (settings.webDavConfig ?? {
-    url: "",
-    username: "",
-    password: "",
-    path: "rikkahub_backups",
-    items: ["DATABASE", "FILES"],
-  }) as WebDavConfig;
+  // webDavConfig/s3Config 由服务端 normalizeState 保证在场且默认值同源,类型单源后无需兜底。
+  const defaultWebDav = settings.webDavConfig;
   const [webDavDraft, setWebDavDraft] = React.useState<WebDavConfig>(defaultWebDav);
   const [webDavItems, setWebDavItems] = React.useState<WebDavBackupItem[]>([]);
   const [webDavBusy, setWebDavBusy] = React.useState("");
@@ -98,17 +76,16 @@ export function DataSection({
     percent: number;
   } | null>(null);
   const [showWebDavPassword, setShowWebDavPassword] = React.useState(false);
-  const webDavDirtyRef = React.useRef(false);
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const webDavAutosave = useAutosaveDraft(
+    async () => {
+      const result = await api.post<{ config: WebDavConfig }>("data/webdav/config", webDavDraft);
+      onSettings({ ...settings, webDavConfig: result.config });
+    },
+    { onSaveError: (error) => toast.error((error as Error).message || t("settings:data.webdav_autosave_failed")) },
+  );
 
-  const defaultS3 = (settings.s3Config ?? {
-    endpoint: "",
-    accessKeyId: "",
-    secretAccessKey: "",
-    bucket: "",
-    region: "auto",
-    pathStyle: true,
-    items: ["DATABASE", "FILES"],
-  }) as S3Config;
+  const defaultS3 = settings.s3Config;
   const [s3Draft, setS3Draft] = React.useState<S3Config>(defaultS3);
   const [s3Items, setS3Items] = React.useState<S3BackupItem[]>([]);
   const [s3Busy, setS3Busy] = React.useState("");
@@ -117,11 +94,19 @@ export function DataSection({
     percent: number;
   } | null>(null);
   const [showS3Secret, setShowS3Secret] = React.useState(false);
-  const s3DirtyRef = React.useRef(false);
+  const s3Autosave = useAutosaveDraft(
+    async () => {
+      const result = await api.post<{ config: S3Config }>("data/s3/config", s3Draft);
+      onSettings({ ...settings, s3Config: result.config });
+    },
+    { onSaveError: (error) => toast.error((error as Error).message || t("settings:data.s3_autosave_failed")) },
+  );
 
   React.useEffect(() => {
+    // 用户正在编辑(含保存窗口内的键击)时不让 settings 回环覆盖草稿——原实现无条件回填,
+    // autosave→onSettings 一回环就把窗口内新敲的字符当场清掉(R8-2 点名的病根)。
+    if (webDavAutosave.isDirty()) return;
     setWebDavDraft(defaultWebDav);
-    webDavDirtyRef.current = false;
   }, [
     defaultWebDav.url,
     defaultWebDav.username,
@@ -189,35 +174,17 @@ export function DataSection({
   };
 
   const patchWebDav = (patch: Partial<WebDavConfig>) => {
-    webDavDirtyRef.current = true;
+    webDavAutosave.markDirty();
     setWebDavDraft({ ...webDavDraft, ...patch });
   };
 
-  const saveWebDav = React.useCallback(
-    async (announce = false) => {
-      if (!announce && !webDavDirtyRef.current) return;
-      const result = await api.post<{ config: WebDavConfig }>("data/webdav/config", webDavDraft);
-      webDavDirtyRef.current = false;
-      onSettings({ ...settings, webDavConfig: result.config } as Settings);
-      if (announce) toast.success(t("settings:data.webdav_saved"));
-    },
-    [onSettings, settings, webDavDraft, t],
-  );
-
-  React.useEffect(() => {
-    if (!webDavDirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void saveWebDav(false).catch((error: Error) =>
-        toast.error(error.message || t("settings:data.webdav_autosave_failed")),
-      );
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [saveWebDav, webDavDraft, t]);
+  // 列表/测试/备份前的"确保已保存"(仅脏时落盘,语义同原 announce=false)。
+  const saveWebDav = () => webDavAutosave.saveNow();
 
   const refreshWebDavList = async () => {
     setWebDavBusy("list");
     try {
-      await saveWebDav(false);
+      await saveWebDav();
       const result = await api.get<{ items: WebDavBackupItem[] }>("data/webdav/list", {
         timeout: false,
       });
@@ -233,7 +200,7 @@ export function DataSection({
   const testWebDav = async () => {
     setWebDavBusy("test");
     try {
-      await saveWebDav(false);
+      await saveWebDav();
       await api.post("data/webdav/test", { config: webDavDraft }, { timeout: false });
       toast.success(t("settings:data.webdav_conn_ok"));
     } catch (error) {
@@ -262,7 +229,7 @@ export function DataSection({
     setWebDavBusy("backup");
     setWebDavBackupProgress({ message: t("settings:data.preparing"), percent: 0 });
     try {
-      await saveWebDav(false);
+      await saveWebDav();
       const data = await consumeBackupSse("/api/data/webdav/backup/stream", (message, percent) => {
         setWebDavBackupProgress({ message, percent });
       });
@@ -319,8 +286,9 @@ export function DataSection({
   };
 
   React.useEffect(() => {
+    // 同 WebDAV:编辑中不让 settings 回环覆盖草稿。
+    if (s3Autosave.isDirty()) return;
     setS3Draft(defaultS3);
-    s3DirtyRef.current = false;
   }, [
     defaultS3.endpoint,
     defaultS3.region,
@@ -332,32 +300,15 @@ export function DataSection({
   ]);
 
   const patchS3 = (patch: Partial<S3Config>) => {
-    s3DirtyRef.current = true;
+    s3Autosave.markDirty();
     setS3Draft({ ...s3Draft, ...patch });
   };
-  const saveS3 = React.useCallback(
-    async (announce = false) => {
-      if (!announce && !s3DirtyRef.current) return;
-      const result = await api.post<{ config: S3Config }>("data/s3/config", s3Draft);
-      s3DirtyRef.current = false;
-      onSettings({ ...settings, s3Config: result.config } as Settings);
-      if (announce) toast.success(t("settings:data.s3_saved"));
-    },
-    [onSettings, settings, s3Draft, t],
-  );
-  React.useEffect(() => {
-    if (!s3DirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void saveS3(false).catch((error: Error) =>
-        toast.error(error.message || t("settings:data.s3_autosave_failed")),
-      );
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [saveS3, s3Draft, t]);
+  // 列表/测试/备份前的"确保已保存"(仅脏时落盘,语义同原 announce=false)。
+  const saveS3 = () => s3Autosave.saveNow();
   const refreshS3List = async () => {
     setS3Busy("list");
     try {
-      await saveS3(false);
+      await saveS3();
       const result = await api.get<{ items: S3BackupItem[] }>("data/s3/list", { timeout: false });
       setS3Items(result.items);
     } catch (error) {
@@ -369,7 +320,7 @@ export function DataSection({
   const testS3 = async () => {
     setS3Busy("test");
     try {
-      await saveS3(false);
+      await saveS3();
       await api.post("data/s3/test", { config: s3Draft }, { timeout: false });
       toast.success(t("settings:data.s3_conn_ok"));
     } catch (error) {
@@ -383,7 +334,7 @@ export function DataSection({
     setS3Busy("backup");
     setS3BackupProgress({ message: t("settings:data.preparing"), percent: 0 });
     try {
-      await saveS3(false);
+      await saveS3();
       const data = await consumeBackupSse("/api/data/s3/backup/stream", (message, percent) => {
         setS3BackupProgress({ message, percent });
       });

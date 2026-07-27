@@ -1,31 +1,13 @@
 // 全面审查 5-1(P0)+5-6 端到端回归:恢复备份绝不覆写本机现有附件字节,且导入前留有
 // state.json 快照。原缺陷:恢复把 nextFileId 重置为 1 / 老 JSON 路径按备份内原 id 写
 // filesDir/<id>.<ext>,与本机现有附件同名 → 旧字节被直接覆写,不可逆。
+import { waitForServerReady } from "../test-utils/e2e-server";
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const serverEntry = join(import.meta.dir, "..", "server.ts");
-
-async function waitForPortLine(proc: ReturnType<typeof Bun.spawn>): Promise<number> {
-  const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
-  const decoder = new TextDecoder();
-  let acc = "";
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    acc += decoder.decode(value, { stream: true });
-    const m = acc.match(/RIKKAHUB_PORT:(\d+)/);
-    if (m) {
-      reader.releaseLock();
-      return Number(m[1]);
-    }
-  }
-  reader.releaseLock();
-  throw new Error(`服务端未打印端口标记,输出:\n${acc.slice(0, 2000)}`);
-}
 
 describe("备份恢复不覆写现有附件(5-1)+ 导入前 state.json 快照(5-6)", () => {
   test("上传附件后导入含同 id 文件的老 JSON 备份:旧字节原封不动,备份内容走新路径,快照落盘", async () => {
@@ -36,7 +18,7 @@ describe("备份恢复不覆写现有附件(5-1)+ 导入前 state.json 快照(5-
       stderr: "pipe",
     });
     try {
-      const port = await waitForPortLine(proc);
+      const port = await waitForServerReady(proc);
       const base = `http://127.0.0.1:${port}`;
 
       // 1) 上传本机附件 → 全新安装分配 id=1,落盘 files/1.png

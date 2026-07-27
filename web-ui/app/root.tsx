@@ -22,6 +22,7 @@ import { ThemeProvider } from "./components/theme-provider";
 import { TitleBar } from "./components/title-bar";
 import { UpdateDialog, type UpdateInfo } from "./components/update-dialog";
 import { WebAuthGate } from "./components/web-auth-gate";
+import { StartupGate } from "./components/startup-gate";
 import { FontFaceInjector } from "./components/font-face-injector";
 import { openExternal } from "./lib/external-link";
 import { toast } from "sonner";
@@ -51,6 +52,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* R1-1:Tauri 壳(lib.rs)用此旗标区分"本应用已加载"与"连接失败错误页",
+            决定是否需要重导航到 sidecar 实际端口。必须内联在 <head> 里尽早执行。 */}
+        <script dangerouslySetInnerHTML={{ __html: "window.__RIKKAHUB_APP__=1" }} />
         <Meta />
         <Links />
       </head>
@@ -205,12 +209,15 @@ function AppContent() {
 
   // 7-3:未捕获的 Promise 拒绝一网兜底——toast 提示 + 进错误中心(仅本地聚合)。
   // 各消息动作已有就地 catch,这里兜的是漏网之鱼,避免"点了没反应"的静默失败。
+  // R6-4:AbortError 直接忽略(导航/组件卸载取消请求属正常流,toast 只会制造噪音);
+  // 同 message 30s 内合并进既有条目且不重复 toast(合并逻辑在 reportLocalError)。
   React.useEffect(() => {
     if (typeof window === "undefined") return;
     const handler = (event: PromiseRejectionEvent) => {
-      const message = event.reason instanceof Error ? event.reason.message : String(event.reason);
-      toast.error(message);
-      useAppErrorsStore.getState().reportLocalError({
+      const reason: unknown = event.reason;
+      if (reason instanceof Error && reason.name === "AbortError") return;
+      const message = reason instanceof Error ? reason.message : String(reason);
+      const isNewEntry = useAppErrorsStore.getState().reportLocalError({
         id: crypto.randomUUID(),
         at: Date.now(),
         count: 1,
@@ -218,6 +225,7 @@ function AppContent() {
         domain: "internal",
         message,
       });
+      if (isNewEntry) toast.error(message);
     };
     window.addEventListener("unhandledrejection", handler);
     return () => window.removeEventListener("unhandledrejection", handler);
@@ -230,6 +238,7 @@ function AppContent() {
         <Outlet />
       </PageTransition>
       <WebAuthGate />
+      <StartupGate />
       <FontFaceInjector />
       <Toaster position="top-center" />
       <GlobalConfirmDialog />

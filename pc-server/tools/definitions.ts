@@ -35,8 +35,8 @@ The population is about 2.1 million. [citation,example.com](abc123) [citation,ex
             type: "object",
             properties: {
               query: { type: "string", description: "Focused search query" },
-              // `max_results` deliberately omitted from the tool schema — see callSearchTool
-              // (server.ts:3369). The user-configured `resultSize` is the authoritative count;
+              // `max_results` deliberately omitted from the tool schema — see the search
+              // execution in search/index.ts. The user-configured `resultSize` is the authoritative count;
               // letting the LLM specify max_results caused most models to silently downgrade
               // to 5 results even when the user had configured 10.
             },

@@ -10,8 +10,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~
 import { Separator } from "~/components/ui/separator";
 import { Slider } from "~/components/ui/slider";
 import { Textarea } from "~/components/ui/textarea";
+import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import { playAudio, stopAudio, useAudioPlaybackKey } from "~/lib/global-audio";
 import api from "~/services/api";
+import { confirmDialog } from "~/stores/confirm-store";
 import type {
   AsrProviderProfile,
   AsrProviderType,
@@ -230,11 +232,28 @@ function TtsSettingsPanel({
   const [draft, setDraft] = React.useState<TtsProviderProfile | null>(
     selected ? clone(selected) : null,
   );
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  // 原实现是"每次编辑 setTimeout(0) 整包立即保存":连续输入=每键一个 POST,且下方的
+  // 重对齐 effect 依赖 providers(settings 派生),每次保存回环都重触发 setDraft,把
+  // 在飞键击当场冲掉(R8-2 病根)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      if (!draft) return;
+      await saveProvider(draft);
+    },
+    { onSaveError: (error) => toast.error((error as Error).message) },
+  );
 
+  // providersRef:重对齐只在切换条目(selectedId)时重载表单。providers 是 settings 派生,
+  // 不能作依赖——每次 autosave → onSettings 回环都会重触发并冲掉在飞键击(R8-2 病根,
+  // 同 McpServerEditor 的 serversRef 说明)。
+  const providersRef = React.useRef(providers);
+  providersRef.current = providers;
   React.useEffect(() => {
-    const next = providers.find((provider) => provider.id === selectedId) ?? providers[0];
+    const next = providersRef.current.find((provider) => provider.id === selectedId) ?? providersRef.current[0];
     setDraft(next ? clone(next) : null);
-  }, [providers, selectedId]);
+    autosave.reset();
+  }, [selectedId]);
 
   const saveProvider = React.useCallback(
     async (provider: TtsProviderProfile) => {
@@ -258,17 +277,10 @@ function TtsSettingsPanel({
 
   const patchDraft = React.useCallback(
     (patch: Partial<TtsProviderProfile>) => {
-      setDraft((current) => {
-        if (!current) return current;
-        const next = { ...current, ...patch };
-        window.setTimeout(
-          () => void saveProvider(next).catch((error: Error) => toast.error(error.message)),
-          0,
-        );
-        return next;
-      });
+      autosave.markDirty();
+      setDraft((current) => (current ? { ...current, ...patch } : current));
     },
-    [saveProvider],
+    [autosave],
   );
 
   const addProvider = React.useCallback(
@@ -300,6 +312,10 @@ function TtsSettingsPanel({
 
   const removeProvider = React.useCallback(async () => {
     if (!draft || draft.type === "system") return;
+    // R8-1:破坏性删除必须确认(与供应商/助手/MCP 删除同规)
+    if (!(await confirmDialog({ title: t("settings:speech.tts_delete_confirm", { name: String(draft.name ?? "") }), danger: true }))) return;
+    // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1)
+    await autosave.discard();
     await api.delete(`settings/tts-provider/${encodeURIComponent(draft.id)}`);
     const ttsProviders = providers.filter((provider) => provider.id !== draft.id);
     onSettings({
@@ -311,7 +327,7 @@ function TtsSettingsPanel({
           : settings.selectedTTSProviderId,
     });
     setSelectedId(ttsProviders[0]?.id ?? "");
-  }, [draft, onSettings, providers, settings]);
+  }, [draft, onSettings, providers, settings, t]);
 
   // Test playback uses the global audio singleton with a synthetic key so the test button
   // can toggle (play vs stop) and so that starting the test stops any in-progress chat
@@ -331,8 +347,9 @@ function TtsSettingsPanel({
       // The backend's `tts/speech` endpoint accepts a `providerId` override — this is
       // critical so the test fires against the provider being edited, not the globally
       // selected one (which may be a different provider entirely). The draft must be
-      // already saved for this to work; patchDraft auto-saves on every keystroke so
-      // by the time the user clicks test the latest config is persisted server-side.
+      // already saved for this to work — autosave is debounced now, so flush any
+      // pending edits before firing the test.
+      await autosave.saveNow();
       const response = await api.postBlob("tts/speech", {
         text: t("settings:speech.test_text"),
         providerId: draft.id,
@@ -775,11 +792,25 @@ export function SpeechSection({
   const [draft, setDraft] = React.useState<AsrProviderProfile | null>(
     selected ? clone(selected) : null,
   );
+  // R8-2:同 TTS 面板——防抖自动保存走共享三件套 hook,重对齐仅随 selectedId。
+  const autosave = useAutosaveDraft(
+    async () => {
+      if (!draft) return;
+      await saveProvider(draft);
+    },
+    { onSaveError: (error) => toast.error((error as Error).message) },
+  );
 
+  // providersRef:重对齐只在切换条目(selectedId)时重载表单。providers 是 settings 派生,
+  // 不能作依赖——每次 autosave → onSettings 回环都会重触发并冲掉在飞键击(R8-2 病根,
+  // 同 McpServerEditor 的 serversRef 说明)。
+  const providersRef = React.useRef(providers);
+  providersRef.current = providers;
   React.useEffect(() => {
-    const next = providers.find((provider) => provider.id === selectedId) ?? providers[0];
+    const next = providersRef.current.find((provider) => provider.id === selectedId) ?? providersRef.current[0];
     setDraft(next ? clone(next) : null);
-  }, [providers, selectedId]);
+    autosave.reset();
+  }, [selectedId]);
 
   const saveProvider = React.useCallback(
     async (provider: AsrProviderProfile) => {
@@ -803,17 +834,10 @@ export function SpeechSection({
 
   const patchDraft = React.useCallback(
     (patch: Partial<AsrProviderProfile>) => {
-      setDraft((current) => {
-        if (!current) return current;
-        const next = { ...current, ...patch };
-        window.setTimeout(
-          () => void saveProvider(next).catch((error: Error) => toast.error(error.message)),
-          0,
-        );
-        return next;
-      });
+      autosave.markDirty();
+      setDraft((current) => (current ? { ...current, ...patch } : current));
     },
-    [saveProvider],
+    [autosave],
   );
 
   const addProvider = React.useCallback(
@@ -846,6 +870,10 @@ export function SpeechSection({
 
   const removeProvider = React.useCallback(async () => {
     if (!draft) return;
+    // R8-1:破坏性删除必须确认(与供应商/助手/MCP 删除同规)
+    if (!(await confirmDialog({ title: t("settings:speech.asr_delete_confirm", { name: String(draft.name ?? "") }), danger: true }))) return;
+    // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1)
+    await autosave.discard();
     await api.delete(`settings/asr-provider/${encodeURIComponent(draft.id)}`);
     const asrProviders = providers.filter((provider) => provider.id !== draft.id);
     onSettings({
@@ -857,7 +885,7 @@ export function SpeechSection({
           : settings.selectedASRProviderId,
     });
     setSelectedId(asrProviders[0]?.id ?? "");
-  }, [draft, onSettings, providers, settings]);
+  }, [draft, onSettings, providers, settings, t]);
 
   const numericInput = (
     key: keyof AsrProviderProfile,

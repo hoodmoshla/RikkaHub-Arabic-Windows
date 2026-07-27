@@ -22,7 +22,7 @@ import {
 } from "../model-providers";
 import { addLog } from "../api/logs";
 import { touchStream } from "../api/sse";
-import { MAX_TOOL_STEPS, runStreamingToolLoop, toolCallContext, type ProviderRoundAdapter, type NormalizedToolCall } from "./tool-loop";
+import { MAX_TOOL_STEPS, runStreamingToolLoop, toolCallContext, readWithIdleTimeout, STREAM_IDLE_TIMEOUT_MS, type ProviderRoundAdapter, type NormalizedToolCall } from "./tool-loop";
 
 // P1-5:工具循环骨架迁至 tool-loop.ts,这里重导出维持既有导入方。
 export { MAX_TOOL_STEPS, toolCallContext };
@@ -365,10 +365,10 @@ export async function readClaudeStreamingRound(
       return;
     }
   };
-  let currentEvent = "message";
   for (;;) {
     if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
-    const { done, value } = await reader.read();
+    // R3-1:空闲看门狗(此前仅 OpenAI 有),防上游黑洞导致 reader.read() 永久悬挂。
+    const { done, value } = await readWithIdleTimeout(() => reader.read(), STREAM_IDLE_TIMEOUT_MS);
     if (done) break;
     const chunk = decoder.decode(value, { stream: true });
     raw += chunk;
@@ -385,7 +385,6 @@ export async function readClaudeStreamingRound(
         if (line.startsWith("event:")) eventName = line.slice(6).trim() || "message";
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
       }
-      currentEvent = eventName;
       const data = dataLines.join("\n");
       if (!data || data === "[DONE]") continue;
       try {
@@ -404,7 +403,6 @@ export async function readClaudeStreamingRound(
       if (line.startsWith("event:")) eventName = line.slice(6).trim() || "message";
       else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
     }
-    currentEvent = eventName;
     const data = dataLines.join("\n");
     if (data && data !== "[DONE]") {
       try {
@@ -418,7 +416,6 @@ export async function readClaudeStreamingRound(
   const orderedBlocks = [...blocks.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, block]) => block);
-  void currentEvent;
   return { blocks: orderedBlocks, textOut, thinkingOut, stopReason, usage, raw };
 }
 
@@ -439,12 +436,14 @@ export async function streamClaudeChatWithTools(
     providerItem,
     logUrl: url,
     logHeaders: headers,
-    fetchRound: (requestBody) => fetch(url, {
+    fetchRound: (requestBody, _round, sig) => fetch(url, {
       method: "POST",
       headers: { ...headers, Accept: "text/event-stream" },
       body: JSON.stringify(requestBody),
-      signal,
+      signal: sig,
     }),
+    // R3-1:主对话流式 600s 头超时(与 OpenAI 流式一致),不再裸奔。
+    headerTimeoutMs: () => 600_000,
     async readRound(response, sig) {
       const round = await readClaudeStreamingRound(response, hooks, assistant, sig);
       const toolCalls: NormalizedToolCall[] = round.blocks
@@ -498,7 +497,6 @@ export async function streamClaudeChatWithTools(
     toolCardsCreatedInStream: true,
     finishReasoningOnFinal: true,
     exhaustedError: "Too many consecutive Claude tool calls without final assistant content",
-    abortCheckAfterRead: false,
   };
   return runStreamingToolLoop(adapter, initialBody, assistant, signal, hooks);
 }
@@ -517,6 +515,8 @@ export async function fetchClaudeTextWithTools(
   let allContent = "";
 
   for (let round = 0; round < MAX_TOOL_STEPS; round += 1) {
+    // R3-4:非流式路径同样每轮首查停止。
+    if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
     const started = Date.now();
     const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(currentBody), signal });
     const rawText = await response.text();
@@ -558,6 +558,8 @@ export async function fetchClaudeTextWithTools(
     // we don't end up sending an unanswered tool_use to Anthropic on the next turn.
     const hasPendingInBatch = toolUses.some((toolUse) => toolNeedsApproval(String(toolUse.name ?? ""), assistant));
     for (const toolUse of toolUses) {
+      // R3-4:停止后剩余工具不再执行。
+      if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
       const toolCall = {
         id: String(toolUse.id ?? id()),
         type: "function",
@@ -715,7 +717,8 @@ export async function readGoogleStreamingRound(
 
   for (;;) {
     if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
-    const { done, value } = await reader.read();
+    // R3-1:空闲看门狗(此前仅 OpenAI 有),防上游黑洞导致 reader.read() 永久悬挂。
+    const { done, value } = await readWithIdleTimeout(() => reader.read(), STREAM_IDLE_TIMEOUT_MS);
     if (done) break;
     const chunk = decoder.decode(value, { stream: true });
     result.raw += chunk;
@@ -771,12 +774,14 @@ export async function streamGoogleChatWithTools(
     providerItem,
     logUrl: streamUrl,
     logHeaders: headers,
-    fetchRound: (requestBody) => fetch(streamUrl, {
+    fetchRound: (requestBody, _round, sig) => fetch(streamUrl, {
       method: "POST",
       headers: { ...headers, Accept: "text/event-stream" },
       body: JSON.stringify(requestBody),
-      signal,
+      signal: sig,
     }),
+    // R3-1:主对话流式 600s 头超时(与 OpenAI 流式一致),不再裸奔。
+    headerTimeoutMs: () => 600_000,
     async readRound(response, sig) {
       const round = await readGoogleStreamingRound(response, hooks, assistant, sig);
       const toolCalls: NormalizedToolCall[] = round.functionCalls.map((fc) => ({
@@ -806,7 +811,6 @@ export async function streamGoogleChatWithTools(
     toolCardsCreatedInStream: true,
     finishReasoningOnFinal: true,
     exhaustedError: "Too many consecutive Gemini tool calls without final assistant content",
-    abortCheckAfterRead: false,
   };
   return runStreamingToolLoop(adapter, initialBody, assistant, signal, hooks);
 }
@@ -826,6 +830,8 @@ export async function fetchOpenAiText(
   let currentBody = { ...body, messages, stream: false };
   let allContent = "";
   for (let round = 0; round < MAX_TOOL_STEPS; round += 1) {
+    // R3-4:非流式路径同样每轮首查停止。
+    if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
     const started = Date.now();
     const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(currentBody), signal });
     const rawText = await response.text();
@@ -865,6 +871,8 @@ export async function fetchOpenAiText(
     const hasPendingInBatch = toolCalls.some((toolCall: any) => toolNeedsApproval(String(toolCall?.function?.name ?? ""), assistant));
     const dispatchCtx = toolCallContext(hooks);
     for (const toolCall of toolCalls) {
+      // R3-4:停止后剩余工具不再执行。
+      if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
       const toolPart: ToolPart = {
         type: "tool",
         toolCallId: String(toolCall.id ?? id()),
@@ -981,10 +989,21 @@ export function parseSseChunks(text: string) {
         .trim();
       if (!data) return [];
       if (data === "[DONE]") return [data];
-      return data
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean);
+      // R3-7:SSE \u89C4\u8303\u5141\u8BB8\u4E00\u4E2A\u4E8B\u4EF6\u7684 data \u8DE8\u591A\u884C\u2014\u2014join \u540E\u624D\u662F\u5B8C\u6574\u8F7D\u8377\u3002\u6B64\u524D\u65E0\u6761\u4EF6\u6309\u884C
+      // \u518D\u62C6,\u8DE8\u884C JSON \u6BCF\u884C\u90FD\u89E3\u6790\u5931\u8D25\u88AB\u8C03\u7528\u65B9\u5BB9\u9519\u541E\u6389,\u5185\u5BB9\u6574\u6BB5\u9759\u9ED8\u4E22\u5931\u4E14\u65E0\u62A5\u9519(\u5BF9\u9F50
+      // readClaudeStreamingRound \u7684 join \u540E\u6574\u4F53 parse)\u3002\u5355\u884C\u8F7D\u8377(\u4E09\u5BB6\u5B98\u65B9\u4E0A\u6E38\u7684\u73B0\u72B6)
+      // \u884C\u4E3A\u4E0D\u53D8;join \u540E\u4E0D\u662F\u5408\u6CD5 JSON \u65F6\u9000\u56DE\u9010\u884C\u62C6\u5206\u2014\u2014\u517C\u5BB9"\u540C\u4E00 block \u91CC\u585E\u591A\u4E2A\u5355\u884C
+      // JSON \u4E8B\u4EF6"\u7684\u4E0D\u89C4\u8303\u4E0A\u6E38(\u65E7\u884C\u4E3A)\u3002
+      if (!data.includes("\n")) return [data];
+      try {
+        JSON.parse(data);
+        return [data];
+      } catch {
+        return data
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+      }
     });
 }
 
@@ -1114,26 +1133,10 @@ export async function readOpenAiStream(
   const decoder = new TextDecoder();
   let buffer = "";
   let full = "";
-  const readWithIdleTimeout = async () => {
-    // Matches the 120s idle timeout in the other streaming reader (see server.ts:6063
-    // for full rationale — gist: drop from 10min to 2min so hung upstream connections
-    // release frontend pool slots before they impact unrelated requests).
-    const timeoutMs = 120_000;
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    try {
-      return await Promise.race([
-        reader.read(),
-        new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("Stream idle timeout: no data received for 10min")), timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
-  };
   for (;;) {
     if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
-    const { done, value } = await readWithIdleTimeout();
+    // R3-1/R3-5:空闲看门狗改用统一 helper(三家一致);原文案写死"10min"与实际 120s 自相矛盾。
+    const { done, value } = await readWithIdleTimeout(() => reader.read(), STREAM_IDLE_TIMEOUT_MS);
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const parts = buffer.split(/\n\n+/);
@@ -1231,9 +1234,8 @@ export async function fetchOpenAiAuxiliaryStream(
   const response = await fetchWithTimeout(url, { method: "POST", headers, body: JSON.stringify(body), timeoutMs: AUX_STREAM_TIMEOUT_MS });
   let text = "";
   if (response.ok) {
-    text = await readOpenAiStream(response, (delta, raw) => {
+    text = await readOpenAiStream(response, (delta) => {
       const content = deltaTextContent(delta);
-      appendUsageFromRaw(undefined, raw);
       onDelta(content);
       return { content };
     });
@@ -1550,37 +1552,20 @@ export async function fetchOpenAiTextStreaming(
   let messages = [...(useResponseInput ? body.input ?? [] : body.messages ?? [])];
   const initialBody: Record<string, unknown> = useResponseInput ? { ...body, input: messages } : { ...body, messages };
 
-  // 头超时:非流式 180s / 流式 600s;外部 signal 桥接到本轮请求的 controller。
-  const fetchRound = (requestBody: Record<string, any>) => {
-    const timeoutMs = requestBody.stream === false ? 180_000 : 600_000;
-    const controller = new AbortController();
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    let abortHandler: (() => void) | null = null;
-    const cleanup = () => {
-      if (timeout) clearTimeout(timeout);
-      if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
-    };
-    if (signal) {
-      abortHandler = () => controller.abort(signal.reason);
-      if (signal.aborted) controller.abort(signal.reason);
-      else signal.addEventListener("abort", abortHandler, { once: true });
-    }
-    timeout = setTimeout(() => controller.abort(new Error(`Response header timeout: no response from provider for ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
-    return fetch(url, {
-      method: "POST",
-      headers: requestBody.stream === false ? headers : { ...headers, Accept: "text/event-stream" },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal,
-    }).finally(cleanup);
-  };
-
   type OpenAiRoundReplay = Awaited<ReturnType<typeof readOpenAiResponseIntoMessage>>;
 
   const adapter: ProviderRoundAdapter = {
     providerItem,
     logUrl: url,
     logHeaders: headers,
-    fetchRound: (requestBody) => fetchRound(requestBody as Record<string, any>),
+    fetchRound: (requestBody, _round, sig) => fetch(url, {
+      method: "POST",
+      headers: requestBody.stream === false ? headers : { ...headers, Accept: "text/event-stream" },
+      body: JSON.stringify(requestBody),
+      signal: sig,
+    }),
+    // R3-1:非流式 180s / 流式 600s 头超时(原 OpenAI 自建包装,现下沉为骨架能力)。
+    headerTimeoutMs: (requestBody) => (requestBody.stream === false ? 180_000 : 600_000),
     async readRound(response, sig) {
       const r = await readOpenAiResponseIntoMessage(response, hooks, sig);
       // 稀疏数组洞与无名条目过滤:Responses API 流按 output_index 建槽,function_call 与
@@ -1641,7 +1626,6 @@ export async function fetchOpenAiTextStreaming(
     toolCardsCreatedInStream: false,
     finishReasoningOnFinal: false,
     exhaustedError: "Too many consecutive tool calls without final assistant content",
-    abortCheckAfterRead: true,
     nonStreamFallback: {
       // stream_options: undefined 会被 JSON.stringify 丢弃,与原实现一致
       makeBody: (requestBody) => ({ ...requestBody, stream: false, stream_options: undefined }),

@@ -81,7 +81,22 @@ function startViaSharedWorker(): boolean {
       name: "rikkahub-app-events",
     });
     const port = worker.port;
+    // R6-2:try/catch 只兜得住 new SharedWorker() 的同步抛错;worker 脚本异步加载/求值
+    // 失败(支持 SharedWorker 但不支持 module worker 的 WebView、脚本 404 等)只会触发
+    // worker.onerror——此前未监听,返回 true 后通道永远无消息,事件面静默死亡。
+    // 处理:未收到任何消息前出错 → 一次性切页内直连;已有消息后的运行期错误不回退
+    // (通道已建立,再开直连会造成事件双份分发)。
+    let receivedAnyMessage = false;
+    let fellBackToDirect = false;
+    worker.onerror = (errorEvent) => {
+      if (receivedAnyMessage || fellBackToDirect) return;
+      fellBackToDirect = true;
+      console.error('SharedWorker failed before first message, falling back to direct SSE:', errorEvent);
+      startDirect();
+    };
     port.onmessage = (message: MessageEvent) => {
+      receivedAnyMessage = true;
+      if (fellBackToDirect) return; // 已回退直连,迟到的 worker 消息丢弃,防双份分发
       const payload = message.data as WorkerToPageMessage;
       if (payload.type === "event" && payload.event) {
         dispatch(payload.event, payload.data);

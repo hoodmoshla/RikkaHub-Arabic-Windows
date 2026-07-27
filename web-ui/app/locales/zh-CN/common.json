@@ -117,6 +117,7 @@
     "load_more": "加载更多..."
   },
   "image_page": {
+    "delete_confirm": "删除这张图片？",
     "back_to_chat": "返回聊天",
     "model_settings": "模型设置",
     "title": "图像生成",
@@ -157,6 +158,19 @@
     "unlock": "解锁",
     "unlocking": "正在解锁...",
     "unlock_failed": "Web API 解锁失败。"
+  },
+  "startup_gate": {
+    "title": "正在准备数据",
+    "description": "RikkaHub 正在完成数据装载与升级迁移，数据量大时可能需要几分钟。请不要关闭应用，进度完成后会自动进入。",
+    "failed_title": "启动失败",
+    "failed_description": "服务端在启动或数据迁移过程中出错。你的原始数据未被删除；重启应用会自动重试。若反复出现，请联系支持并附上以下信息：",
+    "phase": {
+      "starting": "正在启动服务",
+      "load_state": "正在读取应用数据",
+      "migrate_conversations": "正在迁移会话数据库",
+      "file_dedup": "正在整理附件文件",
+      "finalize": "正在完成启动"
+    }
   },
   "update": {
     "title_new": "发现新版本",

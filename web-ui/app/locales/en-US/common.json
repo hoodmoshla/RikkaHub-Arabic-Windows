@@ -117,6 +117,7 @@
     "load_more": "Loading more..."
   },
   "image_page": {
+    "delete_confirm": "Delete this image?",
     "back_to_chat": "Back to chat",
     "model_settings": "Model settings",
     "title": "Image generation",
@@ -157,6 +158,19 @@
     "unlock": "Unlock",
     "unlocking": "Unlocking...",
     "unlock_failed": "Failed to unlock Web API access."
+  },
+  "startup_gate": {
+    "title": "Preparing your data",
+    "description": "RikkaHub is loading data and finishing upgrade migrations. Large libraries can take a few minutes. Please keep the app open — it will continue automatically.",
+    "failed_title": "Startup failed",
+    "failed_description": "The server hit an error while starting or migrating data. Your original data has not been deleted; restarting the app will retry automatically. If this keeps happening, contact support with the details below:",
+    "phase": {
+      "starting": "Starting the service",
+      "load_state": "Loading application data",
+      "migrate_conversations": "Migrating conversation database",
+      "file_dedup": "Organizing attachment files",
+      "finalize": "Finishing startup"
+    }
   },
   "update": {
     "title_new": "New version available",

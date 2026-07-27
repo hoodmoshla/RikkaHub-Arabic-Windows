@@ -1,5 +1,34 @@
+// R8-4:Settings 顶层单源 —— 权威声明在 pc-server/foundation/types/settings(state.json 序列化
+// 格式)。服务端对安卓契约透传域(mcpServers / searchServices / quickMessages / assistantTags /
+// modeInjections / lorebooks 等)故意存 JsonValue 不建模(备份往返不丢未知字段);前端在这些域
+// 需要 UI 视图形状。因此本文件 = 服务端 Settings 的全部顶层键(Omit 基座,服务端新增字段自动
+// 对前端可见)+ 下方 VIEW-REFINED 清单里显式列出的视图细化。两端同形的类型一律 type-only
+// re-export,不再手写镜像。视图细化字段的增删属契约变更,必须两端同评审。
+import type {
+  AsrProvider,
+  Model as ServerModel,
+  TtsProvider,
+} from "@server/foundation/types";
+import type { Settings as ServerSettings } from "@server/foundation/types/settings";
+
+// 两端同形:直接单源 re-export(权威在 pc-server/foundation/types)。
+export type {
+  AssistantMemoryGroup,
+  MemoryEntry,
+  MemorySettings,
+  MemorySnapshot,
+  PendingEntry,
+  ProxyConfig,
+  ProxyMode,
+  S3Config,
+  WebDavConfig,
+  WriteStrategy,
+} from "@server/foundation/types";
+
 /**
  * Display settings — user nickname, avatar, theme, fonts and other purely visual preferences.
+ * 服务端存 Record<string, JsonValue>(安卓透传 + PC-only 字段剥离逻辑见 pcOnlyDisplayFields),
+ * 这里是前端视图形状。
  */
 export interface DisplaySetting {
   userNickname: string;
@@ -88,8 +117,9 @@ export interface AssistantProfile {
   chatModelId?: string | null;
   reasoningLevel?: string | null;
   mcpServers?: string[];
-  // Per-assistant overrides for individual MCP tools. See server.ts:Assistant.mcpToolOverrides
-  // for the full semantics. Shape: { [serverId]: { [toolName]: { enable?, needsApproval? } } }.
+  // Per-assistant overrides for individual MCP tools. See Assistant.mcpToolOverrides in
+  // pc-server/foundation/types for the full semantics.
+  // Shape: { [serverId]: { [toolName]: { enable?, needsApproval? } } }.
   mcpToolOverrides?: Record<string, Record<string, McpToolOverride>>;
   modeInjectionIds?: string[];
   lorebookIds?: string[];
@@ -126,10 +156,11 @@ export interface McpServerConfig {
   [key: string]: unknown;
 }
 
-export type ModelType = "CHAT" | "IMAGE" | "EMBEDDING";
+// 单源自服务端 Model.type("CHAT" | "IMAGE" | "EMBEDDING")。
+export type ModelType = ServerModel["type"];
 // PC keeps the wider Modality list (AUDIO/VIDEO/DOCUMENT) for forward-compat with providers
 // that already accept those — Android only has TEXT/IMAGE today but we don't want PC to ship
-// narrower than the upstream API allows.
+// narrower than the upstream API allows. 服务端存 string[](透传),此联合是前端视图收窄。
 export type ModelModality = "TEXT" | "IMAGE" | "AUDIO" | "VIDEO" | "DOCUMENT";
 export type ModelAbility = "TOOL" | "REASONING";
 
@@ -185,7 +216,8 @@ export interface ProviderModel {
   /**
    * Per-model provider override. `null` / `undefined` means "use the parent provider".
    * When set, the entire upstream request (baseUrl, apiKey, etc.) goes through this
-   * override instead. See server.ts:findModel for the request-build merge logic.
+   * override instead. See findModel in pc-server/model-providers/index.ts for the
+   * request-build merge logic.
    */
   providerOverwrite?: ProviderOverwrite | null;
   /**
@@ -218,53 +250,12 @@ export interface SearchServiceOption {
   [key: string]: unknown;
 }
 
-export type AsrProviderType = "openai_realtime" | "dashscope" | "volcengine";
-
-export interface AsrProviderProfile {
-  id: string;
-  type: AsrProviderType;
-  name: string;
-  apiKey: string;
-  websocketUrl: string;
-  model?: string;
-  language?: string;
-  prompt?: string;
-  sampleRate?: number;
-  vadThreshold?: number;
-  prefixPaddingMs?: number;
-  silenceDurationMs?: number;
-  resourceId?: string;
-  [key: string]: unknown;
-}
-
-export type TtsProviderType =
-  | "system"
-  | "openai"
-  | "gemini"
-  | "minimax"
-  | "qwen"
-  | "groq"
-  | "xai"
-  | "mimo";
-
-export interface TtsProviderProfile {
-  id: string;
-  type: TtsProviderType;
-  name: string;
-  apiKey: string;
-  baseUrl: string;
-  model?: string;
-  voice?: string;
-  voiceName?: string;
-  voiceId?: string;
-  language?: string;
-  languageType?: string;
-  emotion?: string;
-  speed?: number;
-  speechRate?: number;
-  pitch?: number;
-  [key: string]: unknown;
-}
+// ASR/TTS provider:字段单源自服务端 AsrProvider/TtsProvider(两端同形);交集保留
+// index signature 供未来字段透传(前端整对象回传,不感知新字段)。
+export type AsrProviderType = AsrProvider["type"];
+export type AsrProviderProfile = AsrProvider & { [key: string]: unknown };
+export type TtsProviderType = TtsProvider["type"];
+export type TtsProviderProfile = TtsProvider & { [key: string]: unknown };
 
 /**
  * 应用内快捷键的 action 标识。和后端 defaultSettings().keybindings 的 key 一一对应,
@@ -286,98 +277,42 @@ export interface KeybindingEntry {
   enabled: boolean;
 }
 
-/** 记忆写入策略(1.3.2)。后端 memorySettings.writeStrategy 的前端镜像。 */
-export type WriteStrategy = "ask" | "always_assistant" | "always_global" | "readonly";
-
-export interface MemorySettings {
-  globalEnabled: boolean;
-  writeStrategy: WriteStrategy;
-}
-
-/** 一条记忆(运行时内部表示,含来源标记 source)。 */
-export interface MemoryEntry {
-  id: number;
-  content: string;
-  createdAt: number;
-  updatedAt: number;
-  source: "manual" | "ai";
-}
-
-/** 助手记忆分组(assistant_memory.json 结构,含助手名快照)。 */
-export interface AssistantMemoryGroup {
-  assistantId: string;
-  assistantName: string;
-  memories: MemoryEntry[];
-}
-
-/** 待确认记忆条目(模型提议,等用户处理)。 */
-export interface PendingEntry {
-  pendingId: string;
-  conversationId: string;
-  conversationTitle?: string;
-  assistantId: string;
-  assistantName: string;
-  content: string;
-  proposedAt: number;
-  messageNodeId?: string;
-}
-
-/** /api/events 通道 memory 事件推送的完整快照。 */
-export interface MemorySnapshot {
-  globalEnabled: boolean;
-  writeStrategy: WriteStrategy;
-  globalMemories: MemoryEntry[];
-  assistantMemories: AssistantMemoryGroup[];
-  pending: PendingEntry[];
-  pendingCount: number;
-}
+/**
+ * VIEW-REFINED 清单:这些顶层键在服务端是透传存储形状(JsonValue[] / Record<string, JsonValue>
+ * / 严格存储实体),前端换成 UI 视图形状。新增视图细化时在此登记并在下方 Settings 里声明。
+ */
+type ViewRefinedKey =
+  | "displaySetting"
+  | "keybindings"
+  | "providers"
+  | "assistants"
+  | "assistantTags"
+  | "mcpServers"
+  | "searchServices"
+  | "quickMessages"
+  | "modeInjections"
+  | "lorebooks"
+  | "asrProviders"
+  | "ttsProviders";
 
 /**
- * Global app settings. The backend pushes the full object via the `/api/events` channel (settings event)
- * whenever any field changes, and the SPA mirrors it into the Zustand settings slice.
+ * Global app settings. The backend pushes the full object via the `/api/events` channel
+ * (settings event) whenever any field changes, and the SPA mirrors it into the Zustand
+ * settings slice. 顶层键以服务端 Settings 为准(normalizeState 保证全字段在场,故无可选);
+ * 仅 ViewRefinedKey 列出的字段替换为前端视图形状。
  */
-export interface Settings {
-  dynamicColor: boolean;
-  themeId: string;
-  developerMode: boolean;
+export interface Settings extends Omit<ServerSettings, ViewRefinedKey> {
   displaySetting: DisplaySetting;
-  enableWebSearch: boolean;
-  favoriteModels: string[];
-  chatModelId: string;
-  titleModelId?: string;
-  translateModeId?: string;
-  suggestionModelId?: string;
-  imageGenerationModelId?: string;
-  ocrModelId?: string;
-  compressModelId?: string;
-  /** 模型 ID,用于对话界面"优化提示词"按钮。空串 = 未配置。 */
-  promptOptimizeModelId?: string;
-  /** "优化提示词"按钮使用的 meta-prompt。空串 = 用默认模板。 */
-  promptOptimizePrompt?: string;
-  titlePrompt?: string;
-  translatePrompt?: string;
-  suggestionPrompt?: string;
-  ocrPrompt?: string;
-  compressPrompt?: string;
-  asrProviders?: AsrProviderProfile[];
-  selectedASRProviderId?: string | null;
-  ttsProviders?: TtsProviderProfile[];
-  selectedTTSProviderId?: string | null;
-  assistantId: string;
+  /** 应用内快捷键绑定。PC-only(备份导出时后端剥离,Android 不可见)。 */
+  keybindings: Partial<Record<KeybindingAction, KeybindingEntry>>;
   providers: ProviderProfile[];
   assistants: AssistantProfile[];
   assistantTags: AssistantTag[];
-  modeInjections?: ModeInjectionProfile[];
-  lorebooks?: LorebookProfile[];
   mcpServers: McpServerConfig[];
   searchServices: SearchServiceOption[];
-  quickMessages?: QuickMessage[];
-  searchServiceSelected: number;
-  /** Preferred local server port (null = auto, default 8080). PC-only; restart required. */
-  preferredPort?: number | null;
-  /** 应用内快捷键绑定。PC-only(备份导出时后端剥离,Android 不可见)。 */
-  keybindings?: Partial<Record<KeybindingAction, KeybindingEntry>>;
-  /** 1.3.2 记忆设置。globalEnabled 控制全局记忆层注入;writeStrategy 控制模型提议记忆的处理。 */
-  memorySettings?: MemorySettings;
-  [key: string]: unknown;
+  quickMessages: QuickMessage[];
+  modeInjections: ModeInjectionProfile[];
+  lorebooks: LorebookProfile[];
+  asrProviders: AsrProviderProfile[];
+  ttsProviders: TtsProviderProfile[];
 }

@@ -550,22 +550,14 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
       void api
         .get<ConversationDto>(`conversations/${activeId}`)
         .then((data) => {
-          // 7-5 单调守卫:轮询响应可能晚于 SSE 增量到达,旧快照无条件覆盖会让流式文本
-          // 闪跳一下(下一帧 SSE 才纠正)。节点数变少、或节点数相同但最新节点文本更短的
-          // 响应判定为旧数据,丢弃(SSE 已领先,无需兜底)。
+          // R7-3 单调守卫:轮询响应可能晚于 SSE 增量到达,旧快照无条件覆盖会让流式文本
+          // 闪跳一下(下一帧 SSE 才纠正)。以服务端 updateAt 为单调量:每次内容变更/流式
+          // chunk 服务端都置 updateAt=Date.now(),且随 node_update 帧同步进 prev(见
+          // applyNodeUpdate),更旧即判陈旧丢弃。原实现以"最末节点序列化长度"作进度代理,
+          // 合法的改短编辑(用户改短文本/切换更短候选分支)会被误判为旧数据拒收。
           let accepted = false;
           setDetail((prev) => {
-            if (prev && prev.id === data.id) {
-              if (data.messages.length < prev.messages.length) return prev;
-              if (data.messages.length === prev.messages.length && data.messages.length > 0) {
-                const textLen = (node: (typeof data.messages)[number]) => {
-                  const msg = node.messages[node.selectIndex] ?? node.messages[0];
-                  return JSON.stringify(msg?.parts ?? []).length;
-                };
-                const lastIdx = data.messages.length - 1;
-                if (textLen(data.messages[lastIdx]!) < textLen(prev.messages[lastIdx]!)) return prev;
-              }
-            }
+            if (prev && prev.id === data.id && data.updateAt < prev.updateAt) return prev;
             accepted = true;
             return data;
           });
@@ -1241,6 +1233,8 @@ function ConversationsPageInner() {
   const [compressKeepRecent, setCompressKeepRecent] = React.useState(32);
   const [compressAdditionalPrompt, setCompressAdditionalPrompt] = React.useState("");
   const [compressing, setCompressing] = React.useState(false);
+  // R7-4:压缩可中途取消——中止本次请求;后端在落库前检查 request.signal,取消后不改写会话。
+  const compressAbortRef = React.useRef<AbortController | null>(null);
   const [translationDialogMessageId, setTranslationDialogMessageId] = React.useState<string | null>(
     null,
   );
@@ -1413,10 +1407,10 @@ function ConversationsPageInner() {
     if (!activeId || !translationDialogMessageId) return;
     setTranslatingMessage(true);
     try {
+      // R7-4:翻译端点立即返回 202,翻译在后端异步进行并经 SSE 推送——无需禁用超时。
       await api.post<{ status: string; translation?: string }>(
         `conversations/${activeId}/messages/${translationDialogMessageId}/translate`,
         { targetLanguage: translationLanguage },
-        { timeout: false },
       );
       setTranslationDialogMessageId(null);
       refreshDetail();
@@ -1500,10 +1494,13 @@ function ConversationsPageInner() {
 
   const handleRegenerateConversationTitle = React.useCallback(
     async (conversationId: string) => {
+      // R7-4:标题生成设 120s 客户端上限(原 timeout:false 会让侧栏 spinner 跟着卡死的
+      // 后端无限转)。ky 超时会 abort 底层请求;后端在落库前检查 request.signal,
+      // 超时后的迟到结果不落库。
       await api.post<{ status: string }>(
         `conversations/${conversationId}/regenerate-title`,
         undefined,
-        { timeout: false },
+        { timeout: 120_000 },
       );
       if (conversationId === activeId) {
         refreshDetail();
@@ -1604,6 +1601,8 @@ function ConversationsPageInner() {
   const handleConfirmCompressConversation = React.useCallback(async () => {
     if (!activeId) return;
     setCompressing(true);
+    const controller = new AbortController();
+    compressAbortRef.current = controller;
     try {
       await api.post<{ status: string }>(
         `conversations/${activeId}/compress`,
@@ -1612,15 +1611,19 @@ function ConversationsPageInner() {
           additionalPrompt: compressAdditionalPrompt,
           keepRecentMessages: compressKeepRecent,
         },
-        { timeout: false },
+        { timeout: false, signal: controller.signal },
       );
       setCompressDialogOpen(false);
       await refreshDetail();
       refreshList();
       toast.success(t("conversations.compress.success"));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t("conversations.compress.failed"));
+      // R7-4:用户主动取消不报错(取消不是失败)。
+      if (!controller.signal.aborted) {
+        toast.error(error instanceof Error ? error.message : t("conversations.compress.failed"));
+      }
     } finally {
+      compressAbortRef.current = null;
       setCompressing(false);
     }
   }, [
@@ -2015,8 +2018,12 @@ function ConversationsPageInner() {
             <Button
               type="button"
               variant="outline"
-              disabled={compressing}
-              onClick={() => setCompressDialogOpen(false)}
+              onClick={() => {
+                // R7-4:压缩中点取消 = 中止请求并关框(后端保证取消后不改写会话);
+                // 未压缩时就是普通关闭。
+                compressAbortRef.current?.abort();
+                setCompressDialogOpen(false);
+              }}
             >
               {t("conversations.compress.cancel")}
             </Button>

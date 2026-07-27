@@ -66,14 +66,12 @@ function hasRenderablePart(part: UIMessagePart): boolean {
   }
 }
 
+// R7-2:错误态由服务端落在消息上的结构化标记驱动(orchestrator 失败时写入
+// model_call_error 注释),不再对正文做关键词正则——正常讨论 HTTP 状态码/超时/
+// 报错文案的回答(如"500 错误怎么排查")不会再误挂横幅。
 function messageHasModelCallError(message: MessageDto): boolean {
   if (message.role !== "ASSISTANT") return false;
-  return message.parts.some((part) => {
-    if (part.type !== "text") return false;
-    return /请求失败|request failed|network error|timeout|模型不存在|model.*not.*found|401|403|404|429|500/i.test(
-      part.text,
-    );
-  });
+  return (message.annotations ?? []).some((annotation) => annotation.type === "model_call_error");
 }
 
 function providerIdForMessageModel(

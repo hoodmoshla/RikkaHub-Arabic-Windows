@@ -26,7 +26,7 @@ import {
   webDavListBackups,
   webDavRestore,
 } from "../../backup/storage";
-import { error, json, readJson } from "../request";
+import { error, json, readJson, sseHeaders } from "../request";
 import { sseFrame } from "../sse";
 import { updateSettings } from "../../app-config";
 
@@ -100,7 +100,7 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
         }
       },
     });
-    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
+    return new Response(stream, { headers: sseHeaders() });
   }
   if (path === "data/webdav/restore/stream" && request.method === "POST") {
     const body = await readJson<{ fileName?: string }>(request);
@@ -121,7 +121,7 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
         }
       },
     });
-    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
+    return new Response(stream, { headers: sseHeaders() });
   }
   if (path === "data/s3/config" && request.method === "POST") {
     const body = await readJson<Partial<S3Config>>(request);
@@ -194,7 +194,7 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
         }
       },
     });
-    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
+    return new Response(stream, { headers: sseHeaders() });
   }
   if (path === "data/s3/restore/stream" && request.method === "POST") {
     const body = await readJson<{ fileName?: string }>(request);
@@ -215,7 +215,7 @@ export async function handleDataRoutes(request: Request, _url: URL, path: string
         }
       },
     });
-    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
+    return new Response(stream, { headers: sseHeaders() });
   }
   if (path === "data/export/status" && request.method === "GET") {
     const cachedDbPath = join(dataDir, "rikka_hub_cached.db");

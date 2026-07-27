@@ -1,10 +1,11 @@
 // 5-2/5-3 回归:zip 超时按体积自适应;附件暂存失败计数返回而非静默吞。
+// R4-6 回归:staging 文件名跨平台清洗(非法字符/尾缀/设备保留名/超长名)。
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { adaptiveZipTimeoutMs, stageUploadFilesInto } from "./export";
+import { adaptiveZipTimeoutMs, sanitizeStagingFileName, stageUploadFilesInto } from "./export";
 
 describe("adaptiveZipTimeoutMs(5-2)", () => {
   test("小库维持 120s 基础值", () => {
@@ -66,5 +67,34 @@ describe("stageUploadFilesInto(5-3)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("sanitizeStagingFileName(R4-6)", () => {
+  test("Windows 非法字符与控制符清洗为 _,结尾点/空格剥除", () => {
+    expect(sanitizeStagingFileName("安卓:截图*2024?.png")).toBe("安卓_截图_2024_.png");
+    expect(sanitizeStagingFileName("a<b>c|d.txt")).toBe("a_b_c_d.txt");
+    expect(sanitizeStagingFileName(`tab${String.fromCharCode(9)}name.txt`)).toBe("tab_name.txt");
+    expect(sanitizeStagingFileName("trailing. ")).toBe("trailing");
+    expect(sanitizeStagingFileName("normal-file.pdf")).toBe("normal-file.pdf");
+  });
+
+  test("设备保留名(裸名/带扩展名/大小写)加前缀,前缀相似的正常名不误伤", () => {
+    expect(sanitizeStagingFileName("CON.png")).toBe("_CON.png");
+    expect(sanitizeStagingFileName("nul")).toBe("_nul");
+    expect(sanitizeStagingFileName("aux.tar.gz")).toBe("_aux.tar.gz");
+    expect(sanitizeStagingFileName("Com1.txt")).toBe("_Com1.txt");
+    expect(sanitizeStagingFileName("console.png")).toBe("console.png");
+    expect(sanitizeStagingFileName("communication.md")).toBe("communication.md");
+  });
+
+  test("超长名截干保尾缀,清洗后为空返回空串(调用方回退 id 名)", () => {
+    const long = "x".repeat(300) + ".jpeg";
+    const out = sanitizeStagingFileName(long);
+    expect(out.length).toBe(150);
+    expect(out.endsWith(".jpeg")).toBe(true);
+    expect(sanitizeStagingFileName("???")).toBe("___");
+    expect(sanitizeStagingFileName("")).toBe("");
+    expect(sanitizeStagingFileName("...")).toBe("");
   });
 });

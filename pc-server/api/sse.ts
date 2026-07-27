@@ -1,12 +1,13 @@
 // api/sse.ts — SSE 基础设施（客户端集合、事件帧、33ms 合并节流广播）
 // 纪律：只负责 SSE 推送；不做持久化、不改会话数据。
-// 临时耦合：generating Map 仍从 ../server 导入（生成控制归属待 api/handlers 拆分时收敛）。
+// generating Map 从 conversations/generation-state 导入(生成控制已收敛到会话域)。
 
 import type { StreamHooksWithSink } from "../inference-engine/events";
 import { initWorkingSetSseGuard, markConversationRowDirty, markMessageNodeDirty, scheduleThrottledConvFlush } from "../conversations";
 import { initAppErrorBroadcast } from "../observability/app-errors";
 import type { Conversation, ConversationListInvalidateEventDto, ConversationNodeUpdateEventDto, ConversationSnapshotEventDto, JsonValue, MessageNode } from "../foundation/types";
 import { state } from "../persistence/json-store";
+import { sseHeaders } from "./request";
 import { toConversationDto, toMessageNodeDtos } from "../conversations";
 import { memoryStore } from "../memory/index";
 import { generating } from "../conversations/generation-state";
@@ -54,6 +55,38 @@ function clearNodeBroadcast(conversation: Conversation, node: MessageNode) {
   if (!entry) return;
   if (entry.timer) clearTimeout(entry.timer);
   pendingBroadcasts.delete(key);
+}
+
+/** R2-4+R2-6:删除会话时的 SSE 侧收尾。
+ *  ① 逐 controller close 已打开的详情流——此前只摘集合,连接悬挂只收心跳直到客户端自行
+ *  切走(close 后连接内建心跳在下一跳 enqueue 抛错自清,无定时器泄漏)。
+ *  ② 按 `convId::` 前缀清待发节点广播——流式中删会话时 orchestrator finally 见会话已删
+ *  提前 return,跳过唯一的 clearNodeBroadcast 终态点,条目连同整棵已删会话树永久驻留;
+ *  挂着的 33ms 定时器若稍后触发,还会把已删会话的陈旧帧广播出去。 */
+export function dropConversationSse(conversationId: string): void {
+  const clients = conversationClients.get(conversationId);
+  if (clients) {
+    conversationClients.delete(conversationId);
+    for (const client of clients) {
+      try { client.close(); } catch { /* 已死连接 */ }
+    }
+  }
+  const prefix = `${conversationId}::`;
+  for (const [key, entry] of pendingBroadcasts) {
+    if (key.startsWith(prefix)) {
+      if (entry.timer) clearTimeout(entry.timer);
+      pendingBroadcasts.delete(key);
+    }
+  }
+}
+
+/** R2-4:导入清库(clearWorkingSet)配对调用——全部旧实例作废,待发广播里挂着旧会话
+ *  引用,定时器触发会把陈旧帧广播出去,必须整表清空。 */
+export function clearAllPendingBroadcasts(): void {
+  for (const entry of pendingBroadcasts.values()) {
+    if (entry.timer) clearTimeout(entry.timer);
+  }
+  pendingBroadcasts.clear();
 }
 
 // ===== 连接预算纪律(1.5.0) =====
@@ -139,13 +172,7 @@ export function openSse(
       cleanup();
     },
   });
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  });
+  return new Response(stream, { headers: sseHeaders() });
 }
 
 export function broadcastSettings() {
@@ -200,8 +227,9 @@ function broadcastNodeUpdateNow(conversation: Conversation, node: MessageNode) {
   // The conversation list only needs to refresh when the metadata it actually displays
   // changes (title, isPinned, isGenerating-state-transition, last-message-preview). Per-
   // chunk content updates don't change any of those. We now call broadcastList() at
-  // generation start (server.ts:10358), generation end (server.ts:9601), and on explicit
-  // mutations (rename, pin, delete) — not on every streamed chunk.
+  // generation start/end (conversations/orchestrator.ts, via broadcastList /
+  // broadcastConversation) and on explicit mutations (rename, pin, delete) — not on
+  // every streamed chunk.
 }
 
 // Non-streaming call sites (final flush, tool approval, etc.) flush immediately so callers see

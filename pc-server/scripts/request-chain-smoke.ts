@@ -1817,7 +1817,7 @@ async function runDeletedConversationSearchSmoke() {
 }
 
 async function runBackupRoundtripSmoke() {
-  // /api/data/export 自 2026-05 起从 JSON 改为流式 zip(修大附件库 OOM,见 server.ts:14253)。
+  // /api/data/export 自 2026-05 起从 JSON 改为流式 zip(修大附件库 OOM,见 backup/export.ts)。
   //
   // 场景一 — 真实 zip round-trip:创建 skill → 导出 zip(校验类型/魔数,不再是 JSON)→
   //   删除 skill → octet-stream 导入 zip → 校验 skill 经 pc-backup.json 路径恢复。

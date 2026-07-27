@@ -37,7 +37,7 @@ import type {
 } from "~/types/settings";
 
 // Mirrors Android's ModelType segmented selector (CHAT/IMAGE/EMBEDDING). Server-side audit
-// (pc-server/server.ts:9864) only routes "IMAGE" today — "EMBEDDING" is declared but unused.
+// (pc-server, api/handlers/settings.ts + model-providers) only routes "IMAGE" today — "EMBEDDING" is declared but unused.
 // We surface it anyway because Android has it and the upstream JSON schema accepts it.
 const TYPE_OPTIONS: { value: ModelType; labelKey: string }[] = [
   { value: "CHAT", labelKey: "model_edit.type_chat" },
@@ -48,7 +48,7 @@ const TYPE_OPTIONS: { value: ModelType; labelKey: string }[] = [
 // Android only has TEXT/IMAGE today; PC kept the wider list because some providers
 // (Gemini, GPT-4o) advertise audio/video/document inputs. Server-side, only
 // outputModalities="IMAGE" is acted on for OpenRouter; the rest is metadata-only —
-// kept for forward-compat. See server.ts:5050.
+// kept for forward-compat. See pc-server/model-providers/index.ts.
 //
 // Issue #11: 移动端 Modality 枚举只有 TEXT/IMAGE,PC 导出含 AUDIO/VIDEO/DOCUMENT 的备份
 // 会让移动端反序列化崩溃。因此:
@@ -95,7 +95,7 @@ export interface ModelEditDialogProps {
   /**
    * Locks the modelId input. True for models that came from 获取模型列表 — editing the ID
    * would silently break upstream request routing because pc-server sends modelId verbatim
-   * as the `model:` field in every request (server.ts:6158, 6168, 6313). For manually-added
+   * as the `model:` field in every request (pc-server/inference-engine/providers.ts). For manually-added
    * models the ID is editable; the user owns it.
    */
   modelIdLocked: boolean;
@@ -204,7 +204,7 @@ export function ModelEditDialog({
       return;
     }
     // Validate customHeaders/customBodies have non-empty keys — otherwise the merge code
-    // (server.ts:5429, 5484) would push `headers[""] = …` which is a footgun.
+    // (pc-server/model-providers/index.ts) would push `headers[""] = …` which is a footgun.
     const headers = toArray<CustomHeader>(draft.customHeaders);
     if (headers.some((header) => !(header.name ?? "").trim())) {
       setError(t("model_edit.error_header_name_missing"));

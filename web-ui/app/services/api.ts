@@ -27,6 +27,7 @@ export class ApiError extends Error {
 
 const WEB_AUTH_STORAGE_KEY = "rikkahub:web-auth";
 const WEB_AUTH_REQUIRED_EVENT = "rikkahub:web-auth-required";
+const STARTUP_PENDING_EVENT = "rikkahub:startup-pending";
 const WEB_AUTH_EXPIRY_SKEW_MILLIS = 10_000;
 const WEB_AUTH_QUERY_KEY = "access_token";
 
@@ -101,6 +102,11 @@ async function handleError(error: unknown): Promise<never> {
       clearWebAuthToken();
       dispatchWebAuthRequired({ message, code });
     }
+    if (code === 503) {
+      // R1-1:503 可能来自启动闸门(服务端先绑端口、迁移在后台跑,期间 /api 一律 503)。
+      // 用状态端点探明后弹出迁移进度页;普通业务 503 探测结果是 ready,不打扰。
+      void maybeDispatchStartupPending();
+    }
     throw new ApiError(message, code);
   }
   throw error;
@@ -125,6 +131,49 @@ export function getWebAuthToken(): string | null {
 export function notifyWebAuthRequired(detail: WebAuthRequiredEventDetail): void {
   clearWebAuthToken();
   dispatchWebAuthRequired(detail);
+}
+
+/** R1-1:服务端启动/迁移状态(/api/startup/status,免鉴权)。 */
+export interface StartupStatusInfo {
+  ready: boolean;
+  failed: boolean;
+  phase: string;
+  current: number;
+  total: number;
+  error: string;
+}
+
+export async function fetchStartupStatus(): Promise<StartupStatusInfo | null> {
+  try {
+    return await kyInstance.get("startup/status", { timeout: 5_000, retry: 0 }).json<StartupStatusInfo>();
+  } catch {
+    return null;
+  }
+}
+
+let startupProbeInFlight = false;
+
+/** 收到 503 后探测启动状态:确属"未就绪"才广播,让 StartupGate 弹出迁移进度页。 */
+async function maybeDispatchStartupPending(): Promise<void> {
+  if (!isBrowser() || startupProbeInFlight) return;
+  startupProbeInFlight = true;
+  try {
+    const status = await fetchStartupStatus();
+    if (status && !status.ready) {
+      window.dispatchEvent(new CustomEvent(STARTUP_PENDING_EVENT));
+    }
+  } finally {
+    startupProbeInFlight = false;
+  }
+}
+
+export function onStartupPending(listener: () => void): () => void {
+  if (!isBrowser()) return () => {};
+  const handler = () => listener();
+  window.addEventListener(STARTUP_PENDING_EVENT, handler);
+  return () => {
+    window.removeEventListener(STARTUP_PENDING_EVENT, handler);
+  };
 }
 
 export function onWebAuthRequired(
@@ -245,6 +294,12 @@ export interface SSEOptions extends Options {
   reconnect?: boolean;
 }
 
+// R6-1:SSE 客户端活性看门狗预算。服务端每 15s 发 `: heartbeat` 注释帧;45s(3×心跳)
+// 内一个字节都没有,判定连接已死(合盖睡眠/切 Wi-Fi/VPN 断开产生的半开 TCP 会让
+// reader.read() 永久挂起——不抛错、不重连),abort 当前连接走既有重连路径。与 SharedWorker
+// 判活口径(app-events-worker)一致。
+const SSE_IDLE_TIMEOUT_MS = 45_000;
+
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -280,6 +335,25 @@ async function sse<T>(
   const connectOnce = async (): Promise<"retry" | "fatal"> => {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
+    // R6-1:本次连接的看门狗。外部 signal 与看门狗都通过 controller 中断底层 fetch;
+    // 用 idleTimedOut 区分二者——外部 abort 是"用户/组件卸载"(fatal),看门狗是"连接静默
+    // 死亡"(retry,走重连)。
+    const controller = new AbortController();
+    let idleTimedOut = false;
+    const onExternalAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const armIdleWatchdog = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idleTimedOut = true;
+        controller.abort();
+      }, SSE_IDLE_TIMEOUT_MS);
+    };
+
     try {
       const response = await kyInstance.get(url, {
         ...requestOptions,
@@ -288,6 +362,7 @@ async function sse<T>(
           Accept: "text/event-stream",
         },
         timeout: false,
+        signal: controller.signal,
       });
 
       callbacks.onOpen?.();
@@ -303,9 +378,11 @@ async function sse<T>(
       let currentData = "";
       let currentId: string | undefined;
 
+      armIdleWatchdog(); // 连上即起看门狗
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        armIdleWatchdog(); // 收到任何字节(含 `: heartbeat` 注释帧)即重置
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
@@ -340,6 +417,9 @@ async function sse<T>(
       // 服务端正常关闭流（如后端重启）→ 可重连
       return "retry";
     } catch (error) {
+      // R6-1:看门狗触发的 abort 是"连接静默死亡",走重连而非终止(必须先于下面的
+      // AbortError→fatal 判定,二者都表现为 AbortError)。
+      if (idleTimedOut) return "retry";
       if (error instanceof Error && error.name === "AbortError") {
         return "fatal";
       }
@@ -363,6 +443,8 @@ async function sse<T>(
       }
       return "retry";
     } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (signal) signal.removeEventListener("abort", onExternalAbort);
       reader?.releaseLock();
     }
   };

@@ -267,7 +267,7 @@ export function findModel(modelId: string | null | undefined) {
       // bookkeeping fields the override doesn't need to redefine. `models: []` is also
       // forced because the override carries its own (irrelevant) model list in Android;
       // we use the parent's `modelItem` regardless.
-      const overwrite = (modelItem as { providerOverwrite?: Partial<Provider> | null }).providerOverwrite;
+      const overwrite = modelItem.providerOverwrite;
       if (overwrite && typeof overwrite === "object" && overwrite.type) {
         const effectiveProvider = { ...provider, ...overwrite, id: provider.id, models: [] } as Provider;
         return { provider: effectiveProvider, model: modelItem };
@@ -310,12 +310,12 @@ export function providerHeaders(providerItem: Provider) {
 export function customHeaderRecords(assistant: Assistant, modelItem?: Model) {
   return [
     ...(Array.isArray(assistant.customHeaders) ? assistant.customHeaders : []),
-    ...(Array.isArray((modelItem as any)?.customHeaders) ? (modelItem as any).customHeaders : []),
+    ...(Array.isArray(modelItem?.customHeaders) ? modelItem.customHeaders : []),
   ].filter(isRecord);
 }
 
 export function modelCustomHeaderRecords(modelItem?: Model) {
-  return (Array.isArray((modelItem as any)?.customHeaders) ? (modelItem as any).customHeaders : []).filter(isRecord);
+  return (Array.isArray(modelItem?.customHeaders) ? modelItem.customHeaders : []).filter(isRecord);
 }
 
 export function applyModelRequestHeaders(headers: Record<string, string>, providerItem: Provider, modelItem?: Model) {
@@ -365,7 +365,7 @@ export function decodeCustomBodyValue(value: unknown): unknown {
 export function applyCustomBody<T extends Record<string, any>>(body: T, assistant: Assistant, modelItem?: Model): T {
   const entries = [
     ...(Array.isArray(assistant.customBodies) ? assistant.customBodies : []),
-    ...(Array.isArray((modelItem as any)?.customBodies) ? (modelItem as any).customBodies : []),
+    ...(Array.isArray(modelItem?.customBodies) ? modelItem.customBodies : []),
   ].filter(isRecord);
   if (entries.length === 0) return body;
   let next: Record<string, any> = { ...body };
@@ -382,7 +382,7 @@ export function applyCustomBody<T extends Record<string, any>>(body: T, assistan
 }
 
 export function applyModelCustomBody<T extends Record<string, any>>(body: T, modelItem?: Model): T {
-  const entries = (Array.isArray((modelItem as any)?.customBodies) ? (modelItem as any).customBodies : []).filter(isRecord);
+  const entries = (Array.isArray(modelItem?.customBodies) ? modelItem.customBodies : []).filter(isRecord);
   if (entries.length === 0) return body;
   let next: Record<string, any> = { ...body };
   for (const entry of entries) {
@@ -398,7 +398,7 @@ export function applyModelCustomBody<T extends Record<string, any>>(body: T, mod
 }
 
 export function customBodyEntriesForForm(modelItem?: Model) {
-  return ((Array.isArray((modelItem as any)?.customBodies) ? (modelItem as any).customBodies : []) as JsonValue[])
+  return (Array.isArray(modelItem?.customBodies) ? modelItem.customBodies : [])
     .filter(isRecord)
     .map((entry: Record<string, JsonValue>) => ({
       key: String(entry.key ?? entry.name ?? "").trim(),

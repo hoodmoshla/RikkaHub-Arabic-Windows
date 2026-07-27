@@ -1,5 +1,5 @@
-// tool-loop 骨架单测（P1-5 批A）：轮次推进 / 工具分发 / pending bail / 超限 /
-// 非流式降级 / 文本累积模式 / 建卡模式 / abort 冻结点位。
+// tool-loop 骨架单测（P1-5 批A + 批次三 R3-4）：轮次推进 / 工具分发 / pending bail / 超限 /
+// 非流式降级 / 文本累积模式 / 建卡模式 / abort 检查(读流后 + 工具执行前,三家统一)。
 // mock.module 隔离 addLog(写 state+落盘)与 touchStream(SSE)副作用。
 // 注意:bun 的 mock.module 全局生效且跨测试文件不回收,必须展开真实模块只覆盖目标
 // 导出,否则同一进程里后续加载 app-config/defaults 等会因缺 defaultRequestStats 而炸。
@@ -54,7 +54,7 @@ function baseAdapter(rounds: Round[]): Adapter {
     toolCardsCreatedInStream: true,
     finishReasoningOnFinal: false,
     exhaustedError: "exhausted",
-    abortCheckAfterRead: false,
+    headerTimeoutMs: () => 0,
   };
 }
 
@@ -141,16 +141,31 @@ describe("审批与异常", () => {
     expect(logged.some((l) => (l as { ok: boolean }).ok === false)).toBe(true);
   });
 
-  test("abortCheckAfterRead=true 时读流后中止抛 AbortError", async () => {
+  test("R3-4:读流后中止抛 AbortError(三家统一,不再依赖 adapter 开关)", async () => {
     const { hooks } = hooksFixture();
     const controller = new AbortController();
     const adapter = baseAdapter([withTool("x")]);
-    adapter.abortCheckAfterRead = true;
     adapter.readRound = async () => {
       controller.abort();
       return withTool("x");
     };
     await expect(runStreamingToolLoop(adapter, {}, assistant, controller.signal, hooks)).rejects.toThrow("Generation stopped");
+  });
+
+  test("R3-4:停止后本轮剩余工具不再执行(每迭代前查 abort)", async () => {
+    const controller = new AbortController();
+    const executed: string[] = [];
+    const { hooks } = hooksFixture(async (call) => {
+      executed.push(call.function.name);
+      controller.abort(); // 第一个工具执行后用户点停止
+      return { output: [] };
+    });
+    // 一批两个工具:第一个执行后 abort,第二个必须被拦下
+    const adapter = baseAdapter([
+      { text: "批", toolCalls: [{ id: "t1", name: "tool_a", arguments: "{}" }, { id: "t2", name: "tool_b", arguments: "{}" }], replay: null },
+    ]);
+    await expect(runStreamingToolLoop(adapter, {}, assistant, controller.signal, hooks)).rejects.toThrow("Generation stopped");
+    expect(executed).toEqual(["tool_a"]);
   });
 });
 

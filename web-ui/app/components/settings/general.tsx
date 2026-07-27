@@ -6,6 +6,7 @@ import { UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { AvatarCropper } from "~/components/avatar-cropper";
 import { FontPickerPair } from "~/components/font-picker";
+import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import { KeybindingSettings } from "~/components/keybinding-settings";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -30,7 +31,18 @@ export function GeneralSection({
     display.userAvatar ?? { type: "dummy" },
   );
   const [saving, setSaving] = React.useState(false);
-  const profileDirtyRef = React.useRef(false);
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      setSaving(true);
+      try {
+        await patchDisplay({ userNickname: name.trim(), userAvatar: avatar });
+      } finally {
+        setSaving(false);
+      }
+    },
+    { delayMs: 600, onSaveError: (error) => console.warn('Profile auto-save failed', error) },
+  );
 
   // --- 窗口行为(最小化到托盘 / 退出)—— 仅 Tauri 桌面端渲染 ---
   // 该设置存在 Rust 侧的 user-config.json(跟数据目录同处),不走后端 API/SSE,
@@ -65,9 +77,10 @@ export function GeneralSection({
   }, [uiFontSizeValue]);
 
   React.useEffect(() => {
+    // 编辑中(含保存窗口内的键击)不让 settings 回环覆盖输入(R8-2 病根)。
+    if (autosave.isDirty()) return;
     setName(textValue(display.userNickname));
     setAvatar(display.userAvatar ?? { type: "dummy" });
-    profileDirtyRef.current = false;
   }, [display.userNickname, display.userAvatar]);
 
   const patchDisplay = async (patch: Record<string, unknown>) => {
@@ -76,29 +89,6 @@ export function GeneralSection({
     onSettings({ ...settings, displaySetting: nextDisplay });
   };
 
-  const save = async (announce = false) => {
-    if (!announce && !profileDirtyRef.current) return;
-    setSaving(true);
-    try {
-      await patchDisplay({ userNickname: name.trim(), userAvatar: avatar });
-      profileDirtyRef.current = false;
-      if (announce) toast.success(t("settings:general.profile_saved"));
-    } catch (error) {
-      if (announce)
-        toast.error(error instanceof Error ? error.message : t("settings:common.save_failed"));
-      else console.warn("Profile auto-save failed", error);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  React.useEffect(() => {
-    if (!profileDirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void save(false);
-    }, 600);
-    return () => window.clearTimeout(timer);
-  }, [name, avatar]);
 
   return (
     <>
@@ -129,7 +119,7 @@ export function GeneralSection({
             <Input
               value={name}
               onChange={(event) => {
-                profileDirtyRef.current = true;
+                autosave.markDirty();
                 setName(event.target.value);
               }}
             />

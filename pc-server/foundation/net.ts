@@ -32,18 +32,26 @@ export function parseProxyServerValue(value: string): string | undefined {
   return /^https?:\/\//i.test(value) ? value : `http://${value}`;
 }
 
-export function readWindowsSystemProxy(): string | undefined {
+// R1-7:reg/gsettings 读取全部改异步(Bun.spawn),消灭"fetch 拦截器内同步 spawn 阻塞
+// 事件循环数十 ms"的病灶。运行期唯一热路径入口是缓存读(readSystemProxy);这两个函数
+// 只被启动预热、后台刷新和 settings/proxy/detect 端点调用。
+async function runCommandText(cmd: string[]): Promise<{ exitCode: number; stdout: string }> {
+  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
+  const stdout = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+  return { exitCode, stdout };
+}
+
+export async function readWindowsSystemProxy(): Promise<string | undefined> {
   if (process.platform !== "win32") return undefined;
   try {
     const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
-    const enableProc = Bun.spawnSync(["reg", "query", key, "/v", "ProxyEnable"]);
-    if (enableProc.exitCode !== 0) return undefined;
-    const enableOut = new TextDecoder().decode(enableProc.stdout ?? new Uint8Array());
-    if (!/ProxyEnable\s+REG_DWORD\s+0x1/i.test(enableOut)) return undefined;
-    const serverProc = Bun.spawnSync(["reg", "query", key, "/v", "ProxyServer"]);
-    if (serverProc.exitCode !== 0) return undefined;
-    const serverOut = new TextDecoder().decode(serverProc.stdout ?? new Uint8Array());
-    const match = serverOut.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
+    const enable = await runCommandText(["reg", "query", key, "/v", "ProxyEnable"]);
+    if (enable.exitCode !== 0) return undefined;
+    if (!/ProxyEnable\s+REG_DWORD\s+0x1/i.test(enable.stdout)) return undefined;
+    const server = await runCommandText(["reg", "query", key, "/v", "ProxyServer"]);
+    if (server.exitCode !== 0) return undefined;
+    const match = server.stdout.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
     if (!match) return undefined;
     return parseProxyServerValue(match[1].trim());
   } catch {
@@ -54,16 +62,15 @@ export function readWindowsSystemProxy(): string | undefined {
 // Linux 桌面 GNOME 代理读取（gsettings）。仅处理 mode='manual'（明确主机端口）；
 // 'none' 返回 undefined；'auto'（PAC）不支持（我们不实现 PAC 解析）。
 // KDE 暂不支持，用户可在 UI 手动填代理（mode=manual）。
-export function readGnomeProxy(): string | undefined {
+export async function readGnomeProxy(): Promise<string | undefined> {
   if (process.platform !== "linux") return undefined;
   try {
-    const run = (args: string[]) =>
-      Bun.spawnSync(["gsettings", ...args], { stdout: "pipe", stderr: "ignore" });
-    const modeRaw = run(["get", "org.gnome.system.proxy", "mode"]).stdout?.toString().trim();
+    const get = async (args: string[]) => (await runCommandText(["gsettings", ...args])).stdout.trim();
+    const modeRaw = await get(["get", "org.gnome.system.proxy", "mode"]);
     if (!modeRaw || modeRaw === "'none'") return undefined;
     if (modeRaw !== "'manual'") return undefined; // 'auto'（PAC）未实现
-    const host = run(["get", "org.gnome.system.proxy.http", "host"]).stdout?.toString().trim().replace(/^'|'$/g, "");
-    const port = run(["get", "org.gnome.system.proxy.http", "port"]).stdout?.toString().trim();
+    const host = (await get(["get", "org.gnome.system.proxy.http", "host"])).replace(/^'|'$/g, "");
+    const port = await get(["get", "org.gnome.system.proxy.http", "port"]);
     if (!host || !port || host === "''" || port === "0") return undefined;
     return `http://${host}:${port}`;
   } catch {
@@ -71,18 +78,41 @@ export function readGnomeProxy(): string | undefined {
   }
 }
 
+export async function detectSystemProxy(): Promise<string | undefined> {
+  if (RUNTIME_PLATFORM === "win") return readWindowsSystemProxy();
+  if (RUNTIME_PLATFORM === "linux" && !RUNNING_IN_CONTAINER) return readGnomeProxy();
+  return undefined;
+}
+
 let systemProxyCache: { value: string | undefined; ts: number } | null = null;
 export const SYSTEM_PROXY_TTL_MS = 2000;
+let systemProxyRefreshInFlight = false;
+
+function scheduleSystemProxyRefresh(): void {
+  if (systemProxyRefreshInFlight) return;
+  systemProxyRefreshInFlight = true;
+  void detectSystemProxy()
+    .then((value) => { systemProxyCache = { value, ts: Date.now() }; })
+    .finally(() => { systemProxyRefreshInFlight = false; });
+}
+
+/** R1-7:启动时(首个业务出站 fetch 之前,见 bootstrap 第 2 步)预热一次缓存,
+ *  之后 readSystemProxy 永不阻塞。 */
+export async function primeSystemProxyCache(): Promise<void> {
+  systemProxyCache = { value: await detectSystemProxy(), ts: Date.now() };
+}
+
+/** R1-7:同步读缓存(fetch 拦截器 per-request 调用,不能阻塞)。TTL 过期返回陈值并触发
+ *  后台单飞刷新(stale-while-revalidate)——旧实现 TTL 过期后的首个出站 fetch 要同步
+ *  spawn 两次 reg query,阻塞事件循环数十 ms,多路流式并发时表现为周期性微卡。
+ *  冷缓存(未预热,常规启动流程不会发生)返回 undefined 并触发后台刷新,该次请求按直连走。 */
 export function readSystemProxy(): string | undefined {
-  const now = Date.now();
-  if (systemProxyCache && now - systemProxyCache.ts < SYSTEM_PROXY_TTL_MS) {
-    return systemProxyCache.value;
+  if (!systemProxyCache) {
+    scheduleSystemProxyRefresh();
+    return undefined;
   }
-  let value: string | undefined;
-  if (RUNTIME_PLATFORM === "win") value = readWindowsSystemProxy();
-  else if (RUNTIME_PLATFORM === "linux" && !RUNNING_IN_CONTAINER) value = readGnomeProxy();
-  systemProxyCache = { value, ts: now };
-  return value;
+  if (Date.now() - systemProxyCache.ts >= SYSTEM_PROXY_TTL_MS) scheduleSystemProxyRefresh();
+  return systemProxyCache.value;
 }
 
 export function composeProxyUrl(base: string, username: string, password: string): string {

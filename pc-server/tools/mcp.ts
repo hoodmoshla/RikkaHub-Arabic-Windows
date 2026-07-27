@@ -56,7 +56,17 @@ function resolveMcpSseEndpoint(baseUrl: string, endpoint: string) {
 }
 
 const mcpSessionCache = new Map<string, { sessionId: string; protocolVersion?: string }>();
+// R3-3:SSE 型 MCP 的 POST endpoint 是运行时会话产物(常带 sessionId),不应持久化进
+// settings——服务器重启后旧 endpoint 失效,持久化会让重启 PC 也救不回来。改为与
+// mcpSessionCache 同级的内存 Map,与 session 同生命周期(清 session 时一并清)。
+const mcpSsePostEndpointCache = new Map<string, string>();
 const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+// R3-10:tools/call 是唯一还卡在 30s 的慢任务通道(本地生图 300s、ASR/TTS 120s、辅助流
+// 600s 都已放宽)。生成/爬取型 MCP 工具常 >30s,超时后模型反复重试烧轮次。tools/call 放宽
+// 到 300s,握手/list 等控制面仍用 30s(它们本应秒级返回,长挂即异常)。
+const MCP_DEFAULT_TIMEOUT_MS = 30_000;
+const MCP_TOOL_CALL_TIMEOUT_MS = 300_000;
 
 function mcpSessionCacheKey(server: Record<string, JsonValue>) {
   const common = isRecord(server.commonOptions) ? server.commonOptions : {};
@@ -69,23 +79,34 @@ function mcpSessionCacheKey(server: Record<string, JsonValue>) {
   });
 }
 
-async function readMcpSseUntilEndpoint(response: Response, timeoutMs = 15000) {
+export async function readMcpSseUntilEndpoint(response: Response, timeoutMs = 15000) {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("SSE MCP response has no body");
   const decoder = new TextDecoder();
   let buffer = "";
-  const started = Date.now();
+  const deadline = Date.now() + timeoutMs;
+  // R3-2:握手预算以外层 timeoutMs(15s)为准。原实现把每次 read 包一个 1s reject,服务器
+  // 静默超 1 秒即抛出"endpoint event timeout",15s 预算永远达不到——SSE 型 MCP 冷启动/跨洋
+  // 高延迟时用户配置正确却永远"连接失败"。改为 1s tick 唤醒:定时器只用于周期性复查外层
+  // 预算(resolve 一个哨兵后 continue),不再判失败。关键:必须复用同一个 pending read——
+  // Web Streams 不允许对同一 reader 并发 read(),tick 后重新 read() 会抛"already reading"。
+  let pendingRead: ReturnType<typeof reader.read> | null = null;
   try {
     for (;;) {
-      if (Date.now() - started > timeoutMs) throw new Error("SSE MCP endpoint event timeout");
-      const read = await Promise.race([
-        reader.read(),
-        new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) =>
-          setTimeout(() => reject(new Error("SSE MCP endpoint event timeout")), 1000),
-        ),
-      ]);
-      if (read.done) break;
-      buffer += decoder.decode(read.value, { stream: true });
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`SSE MCP endpoint event timeout after ${Math.round(timeoutMs / 1000)}s`);
+      const read = pendingRead ?? (pendingRead = reader.read());
+      let tick: ReturnType<typeof setTimeout> | null = null;
+      const raced = await Promise.race([
+        read.then((r) => ({ kind: "read" as const, r })),
+        new Promise<{ kind: "tick" }>((resolve) => {
+          tick = setTimeout(() => resolve({ kind: "tick" }), Math.min(1000, remaining));
+        }),
+      ]).finally(() => { if (tick) clearTimeout(tick); });
+      if (raced.kind === "tick") continue; // 醒来复查外层预算,继续等同一个 read
+      pendingRead = null; // 本次 read 已消费,下轮再发起新的
+      if (raced.r.done) break;
+      buffer += decoder.decode(raced.r.value, { stream: true });
       const events = buffer.split(/\n\n+/);
       buffer = events.pop() ?? "";
       for (const eventBlock of events) {
@@ -110,7 +131,8 @@ async function readMcpSseUntilEndpoint(response: Response, timeoutMs = 15000) {
 }
 
 async function mcpSsePostEndpoint(server: Record<string, JsonValue>, log?: McpLogCallback) {
-  const cached = String(server.ssePostEndpoint ?? "").trim();
+  const cacheKey = mcpSessionCacheKey(server);
+  const cached = mcpSsePostEndpointCache.get(cacheKey);
   if (cached) return cached;
   const target = String(server.url ?? "").trim();
   if (!/^https?:\/\//i.test(target)) throw new Error("MCP SSE server URL must be http(s)");
@@ -140,7 +162,7 @@ async function mcpSsePostEndpoint(server: Record<string, JsonValue>, log?: McpLo
     responseBody: endpoint,
     toolName: "endpoint",
   });
-  server.ssePostEndpoint = endpoint;
+  mcpSsePostEndpointCache.set(cacheKey, endpoint);
   return endpoint;
 }
 
@@ -149,9 +171,10 @@ async function postMcpJsonRpc(
   method: string,
   params: Record<string, JsonValue> | undefined,
   extraHeaders: Record<string, string> = {},
-  options: { notification?: boolean } = {},
+  options: { notification?: boolean; timeoutMs?: number } = {},
   log?: McpLogCallback,
 ) {
+  const timeoutMs = options.timeoutMs ?? MCP_DEFAULT_TIMEOUT_MS;
   const target = String(server.type ?? "streamable_http") === "sse"
     ? await mcpSsePostEndpoint(server, log)
     : String(server.url ?? "").trim();
@@ -161,7 +184,7 @@ async function postMcpJsonRpc(
     : { jsonrpc: "2.0", id: id(), method, params: params ?? {} };
   const started = Date.now();
   const ac = new AbortController();
-  const timeoutId = setTimeout(() => ac.abort(), 30_000);
+  const timeoutId = setTimeout(() => ac.abort(), timeoutMs);
   let response: Response;
   let text: string;
   const requestHeaders = { ...headersFromMcpServer(server), ...extraHeaders };
@@ -176,7 +199,7 @@ async function postMcpJsonRpc(
   } catch (err) {
     clearTimeout(timeoutId);
     const aborted = err instanceof Error && (err.name === "AbortError" || /abort/i.test(err.message));
-    const reason = aborted ? "MCP request timed out after 30s" : err instanceof Error ? err.message : String(err);
+    const reason = aborted ? `MCP request timed out after ${Math.round(timeoutMs / 1000)}s` : err instanceof Error ? err.message : String(err);
     log?.({
       id: id(),
       at: Date.now(),
@@ -249,6 +272,9 @@ async function mcpSessionHeaders(server: Record<string, JsonValue>, log?: McpLog
     }
   }
   if (!init) {
+    // R3-3:initialize 全数失败可能是 SSE POST endpoint 已失效(服务器重启)。清掉运行时
+    // 缓存,让下一次调用重新握手拿新 endpoint,而不是永远卡在旧值上。
+    mcpSsePostEndpointCache.delete(cacheKey);
     throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "MCP initialize failed"));
   }
   if (init.sessionId) mcpSessionCache.set(cacheKey, { sessionId: init.sessionId, protocolVersion: init.protocolVersion });
@@ -269,15 +295,21 @@ export async function mcpJsonRpc(
   log?: McpLogCallback,
 ) {
   const cacheKey = mcpSessionCacheKey(server);
+  // R3-10:tools/call 走放宽后的超时;控制面(list 等)仍用默认。
+  const timeoutMs = method === "tools/call" ? MCP_TOOL_CALL_TIMEOUT_MS : MCP_DEFAULT_TIMEOUT_MS;
   const headers = await mcpSessionHeaders(server, log);
   try {
-    const response = await postMcpJsonRpc(server, method, params, headers, {}, log);
+    const response = await postMcpJsonRpc(server, method, params, headers, { timeoutMs }, log);
     return response.result;
   } catch (err) {
-    if (!mcpSessionCache.has(cacheKey)) throw err;
+    // R3-3:重试前把 session 与 SSE endpoint 一并作废——服务器重启后二者同时失效,只换
+    // session 不换 endpoint 救不回来。两个缓存任一命中即说明此前握手过,值得重握手一次。
+    const hadCache = mcpSessionCache.has(cacheKey) || mcpSsePostEndpointCache.has(cacheKey);
+    if (!hadCache) throw err;
     mcpSessionCache.delete(cacheKey);
+    mcpSsePostEndpointCache.delete(cacheKey);
     const retryHeaders = await mcpSessionHeaders(server, log);
-    const response = await postMcpJsonRpc(server, method, params, retryHeaders, {}, log);
+    const response = await postMcpJsonRpc(server, method, params, retryHeaders, { timeoutMs }, log);
     return response.result;
   }
 }

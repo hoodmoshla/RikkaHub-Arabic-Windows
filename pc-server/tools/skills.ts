@@ -127,7 +127,11 @@ export function importSkills(skills: unknown) {
         const relativePath = String(file.path ?? "").replace(/\\/g, "/");
         if (!relativePath || relativePath.includes("..") || relativePath.startsWith("/")) continue;
         const target = resolve(dir, relativePath);
-        if (!target.startsWith(resolve(dir))) continue;
+        // 批次二 R1-3 同模式:前缀校验必须带分隔符。128 行拦住了 ".." 与 "/" 开头,但
+        // Windows 盘符绝对路径(如 "C:/.../<dir>X/...")能通过 resolve 落到同前缀兄弟
+        // 目录,裸 startsWith 放行。
+        const base = resolve(dir);
+        if (!target.startsWith(`${base}\\`) && !target.startsWith(`${base}/`)) continue;
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, String(file.content ?? ""));
       }

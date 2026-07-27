@@ -20,6 +20,14 @@ export interface Model {
   outputModalities: string[];
   abilities: string[];
   tools: JsonValue[];
+  // 以下为可选持久化字段(normalize/enrichModel 展开透传,老数据无此字段)。
+  // 对齐安卓 Model.kt;web-ui 的 ProviderModel 是其 UI 视图形状。
+  customHeaders?: JsonValue[];
+  customBodies?: JsonValue[];
+  /** 每模型供应商覆写:非空时请求构建期整体替换父 provider(见 model-providers findModel)。 */
+  providerOverwrite?: Partial<Provider> | null;
+  /** 手动“+”添加的模型(modelId 用户可编辑);获取列表得到的模型无此标记,前端锁定 id。 */
+  manuallyAdded?: boolean;
 }
 
 export interface Provider {

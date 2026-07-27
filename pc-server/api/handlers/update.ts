@@ -16,7 +16,7 @@ import {
   UPDATE_R2_BASE,
   writeSkippedVersion,
 } from "../../updates/index";
-import { error, json, readJson } from "../request";
+import { error, json, readJson, sseHeaders } from "../request";
 
 export async function handleUpdateRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
   // -- Update check / download ---------------------------------------------------
@@ -166,6 +166,10 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
     const url = String(body.url ?? "").trim();
     if (!/^https:\/\//i.test(url)) return error("Invalid download URL", 400);
     // 只放行 GitHub 与自建 R2 镜像,缩小 URL 被篡改时的攻击面。
+    // 批次二 R5-5:R2 侧此前用 pub-[a-f0-9]+\.r2\.dev 泛匹配,等于放行【任何人】的 R2
+    // 公共桶——配合 probeCachedInstaller"文件名含版本号的 .exe 即缓存安装器",已授权
+    // 客户端可诱导下载任意 exe 并在下次检查更新时被当作"直接安装"候选。收紧为
+    // UPDATE_R2_BASE 的精确 host。
     const host = (() => {
       try {
         return new URL(url).host.toLowerCase();
@@ -173,7 +177,8 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
         return "";
       }
     })();
-    if (!/^(github\.com|.*\.githubusercontent\.com|objects\.githubusercontent\.com|pub-[a-f0-9]+\.r2\.dev)$/i.test(host)) {
+    const r2Host = new URL(UPDATE_R2_BASE).host.toLowerCase();
+    if (host !== "github.com" && host !== r2Host && !/^[a-z0-9-]+(\.[a-z0-9-]+)*\.githubusercontent\.com$/.test(host)) {
       return error(`Refusing to download from untrusted host: ${host}`, 400);
     }
     const sanitized = String(body.fileName ?? "").replace(/[^A-Za-z0-9._\-]/g, "") || "rikkahub-update";
@@ -184,14 +189,24 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
     mkdirSync(updatesCacheDir, { recursive: true });
     const targetPath = join(updatesCacheDir, fileName);
 
+    // 批次二 R5-5:下载流补 cancel 处理。此前客户端断开后 fetch/写盘循环只能靠 enqueue
+    // 抛错间接终止,Bun 的 file writer 不走 end(),半截文件+句柄一直留到 GC。现在:
+    //   cancel → abort 上游 fetch → 读循环立刻抛 AbortError → finally 统一收尾。
+    // 半截文件必须删:probeCachedInstaller 把"文件名含版本号且 size>0 的 .exe"当作可
+    // 直接安装的缓存安装器,残留的半截安装包会在下次检查更新时被当成完整品提供给用户。
+    const abort = new AbortController();
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
         const send = (obj: Record<string, unknown>) => {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+          } catch { /* 客户端已断开(cancel 已触发),丢弃事件 */ }
         };
+        let writer: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
+        let downloadComplete = false;
         try {
-          const res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "RikkaHub-PC" } });
+          const res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "RikkaHub-PC" }, signal: abort.signal });
           if (!res.ok || !res.body) {
             const text = res.ok ? "no response body" : await res.text().catch(() => "");
             send({ type: "error", message: `Download failed: ${res.status} ${String(text).slice(0, 200)}` });
@@ -199,7 +214,7 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
           }
           const total = Number(res.headers.get("content-length") || 0);
           const reader = res.body.getReader();
-          const writer = Bun.file(targetPath).writer();
+          writer = Bun.file(targetPath).writer();
           let received = 0;
           while (true) {
             const { done, value } = await reader.read();
@@ -210,6 +225,8 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
             send({ type: "progress", loaded: received, total, percent });
           }
           await writer.end();
+          writer = null;
+          downloadComplete = true;
 
           if (RUNTIME_PLATFORM === "win") {
             // targetPath 指向 .exe 安装器,前端交给 Tauri launch_installer。
@@ -238,17 +255,20 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
         } catch (err) {
           send({ type: "error", message: err instanceof Error ? err.message : String(err) });
         } finally {
-          controller.close();
+          if (writer) {
+            try { await writer.end(); } catch { /* 尽力关句柄 */ }
+          }
+          if (!downloadComplete) {
+            try { unlinkSync(targetPath); } catch { /* 可能尚未创建 */ }
+          }
+          try { controller.close(); } catch { /* cancel 后流已关闭 */ }
         }
       },
-    });
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-store",
-        Connection: "keep-alive",
+      cancel() {
+        abort.abort();
       },
     });
+    return new Response(stream, { headers: sseHeaders({ "Cache-Control": "no-store" }) });
   }
   // Linux only: 把刚下载并解压的新版本(二进制 + 前端资源)原地替换到当前应用目录。
   // download 已把 tar.gz 解压到 <tmp>/rikkahub-updates/extracted-*/rikkahub-pc/,其中含新

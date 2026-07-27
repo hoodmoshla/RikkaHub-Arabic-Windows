@@ -2,6 +2,7 @@
 // 依据:导入合并以 ...app 为基底(import.ts 七层策略第 1 条),PC 全部写路径为展开合并,
 // normalizeState/导出清洗同为展开——本测试把这条契约锁死,防未来某处改成逐字段重建时静默丢字段。
 // APP 端导入 PC 备份是全量替换语义,PC 若不携带这些字段,用户"手机→PC→手机"一轮后设置归零。
+import { waitForServerReady } from "../test-utils/e2e-server";
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -66,25 +67,6 @@ function buildStoredZip(entries: Array<{ name: string; data: Buffer }>): Buffer 
   return Buffer.concat([...localChunks, centralDir, eocd]);
 }
 
-async function waitForPortLine(proc: ReturnType<typeof Bun.spawn>): Promise<number> {
-  const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
-  const decoder = new TextDecoder();
-  let acc = "";
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    acc += decoder.decode(value, { stream: true });
-    const m = acc.match(/RIKKAHUB_PORT:(\d+)/);
-    if (m) {
-      reader.releaseLock();
-      return Number(m[1]);
-    }
-  }
-  reader.releaseLock();
-  throw new Error(`服务端未打印端口标记,输出:\n${acc.slice(0, 2000)}`);
-}
-
 describe("安卓独有字段透传(产品决策②)", () => {
   test("APP zip 导入 → /settings 可见 → PC 导出 zip 的 settings.json 原样携带", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "rkh-passthrough-e2e-"));
@@ -94,7 +76,7 @@ describe("安卓独有字段透传(产品决策②)", () => {
       stderr: "pipe",
     });
     try {
-      const port = await waitForPortLine(proc);
+      const port = await waitForServerReady(proc);
       const base = `http://127.0.0.1:${port}`;
 
       // 安卓 settings.json:PC 类型系统不认识的顶层字段 + 助手内字段

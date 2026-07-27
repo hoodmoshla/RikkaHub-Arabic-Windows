@@ -9,7 +9,7 @@ import {
   applyEffectiveProxy,
   friendlyRequestError,
   proxyStatusPayload,
-  readWindowsSystemProxy,
+  detectSystemProxy,
   resolveEffectiveProxy,
 } from "../../foundation/net";
 import { state } from "../../persistence/json-store";
@@ -22,15 +22,33 @@ import { testSearchService } from "../../search/index";
 import { callImageGeneration } from "../../media/image-gen";
 import { memoryStore } from "../../memory/index";
 import { addLog } from "../logs";
-import { error, json, readJson } from "../request";
+import { error, json, readJson, sseHeaders } from "../request";
 import { broadcastMemoryUpdate, sseFrame } from "../sse";
-import { deleteById, reorderByIds, upsertById, validateKnownJsonIds } from "../../foundation/utils";
+import { deleteById, reorderByIds, uniqueStrings, upsertById, validateKnownJsonIds } from "../../foundation/utils";
 import { normalizePreferredPort, normalizeProxyConfig } from "../../foundation/net";
 import { defaultSettings } from "../../app-config/defaults";
 import { DEFAULT_COMPRESS_PROMPT, DEFAULT_OCR_PROMPT, DEFAULT_PROMPT_OPTIMIZE_PROMPT, DEFAULT_SUGGESTION_PROMPT, DEFAULT_TITLE_PROMPT, DEFAULT_TRANSLATION_PROMPT } from "../../app-config/prompts";
 import { updateSettings } from "../../app-config";
-import { markProviderTestResult } from "../../model-providers/checks";
+import { markProviderTestResult, providerAuthChanged } from "../../model-providers/checks";
 import { endpointFor, fetchProviderBalance, fetchProviderModels, runProviderCheck } from "../../model-providers/checks";
+
+// 全面审查 R5-4:MCP 服务器写操作按 id 串行化。detail/sync 在 await 网络同步(秒级)
+// 期间存在并发写窗口——同 id 的第二个写请求先落地后,慢的那个整对象覆盖会吃掉它的改动
+// (多标签页/双窗口下真实可触发);sync 期间的 DELETE 也会被 sync 完成后的 upsert 复活。
+// per-id 队列让同一服务器的 detail/sync/delete 严格排队,彻底关掉窗口。Map 尺寸以用户
+// 配置的 MCP 服务器数为上界,无需清理。不同 id 之间不互斥(各写各的,现读现改,安全)。
+// 搜索服务的鉴权/端点字段。两处消费必须共用同一集合:detail 保存时任一变更即撤销
+// testPassed(R5-3 失效规则);service/test 落章前复核当前配置与被测 body 是否仍一致
+// (飞行竞态守卫)。改这份清单 = 同时改两处语义。
+const SEARCH_SERVICE_AUTH_FIELDS = ["type", "apiKey", "url", "customUrl", "model", "username", "password", "engines"] as const;
+
+const mcpServerWriteQueues = new Map<string, Promise<unknown>>();
+function withMcpServerWriteLock(serverId: string, task: () => Promise<Response>): Promise<Response> {
+  const prev = mcpServerWriteQueues.get(serverId) ?? Promise.resolve();
+  const run = prev.then(task, task);
+  mcpServerWriteQueues.set(serverId, run.catch(() => { /* 失败已由 task 内部/路由层处理 */ }));
+  return run;
+}
 
 export async function handleSettingsRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   if (path === "settings" && request.method === "GET") return json(state.settings);
@@ -44,7 +62,12 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
   if (path === "settings/keybindings" && request.method === "POST") {
     const body = await readJson<{ action: string; keys?: string[]; enabled?: boolean }>(request);
     const defaults = defaultSettings().keybindings;
-    if (!(body.action in defaults)) return error("Unknown keybinding action", 400);
+    // 批次二 R5-6:`in` 含原型链,"__proto__"/"constructor"/"toString" 都能过检——
+    // __proto__ 会把 current 的原型换成请求体(本次写入静默丢失),constructor 等则以
+    // 垃圾键持久化进 settings。Object.hasOwn 只认自有键。
+    if (typeof body.action !== "string" || !Object.hasOwn(defaults, body.action)) {
+      return error("Unknown keybinding action", 400);
+    }
     const current = { ...defaults, ...state.settings.keybindings } as Record<string, JsonValue>;
     const existing = isRecord(current[body.action]) ? (current[body.action] as Record<string, JsonValue>) : {};
     const next: Record<string, JsonValue> = { ...existing };
@@ -306,83 +329,96 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
   }
   if (path === "settings/mcp-server/detail" && request.method === "POST") {
     const body = await readJson<Record<string, JsonValue>>(request);
-    const common = isRecord(body.commonOptions) ? body.commonOptions : {};
-    // Read the previous server state so we can detect the user transitioning the main MCP
-    // switch from off→on, which has special "revive child switches" semantics (see below).
-    const prevServer = (state.settings.mcpServers as Array<Record<string, JsonValue>>)
-      .find((item) => String(item.id) === String(body.id ?? "")) ?? null;
-    const prevCommon = prevServer && isRecord(prevServer.commonOptions) ? prevServer.commonOptions : null;
-    const wasEnabled = prevCommon ? prevCommon.enable !== false : false;
-    const willEnable = common.enable !== false;
-    let server: Record<string, JsonValue> = {
-      type: String(body.type ?? "streamable_http") === "sse" ? "sse" : "streamable_http",
-      url: String(body.url ?? ""),
-      ...body,
-      id: String(body.id ?? id()),
-      ssePostEndpoint: String(body.ssePostEndpoint ?? ""),
-      commonOptions: {
-        enable: willEnable,
-        name: String(common.name ?? body.name ?? "MCP Server"),
-        headers: Array.isArray(common.headers) ? common.headers : [],
-        tools: Array.isArray(common.tools) ? common.tools : [],
-        lastSyncAt: typeof common.lastSyncAt === "number" ? common.lastSyncAt : null,
-        lastSyncError: String(common.lastSyncError ?? ""),
-        connected: common.connected === true,
-      },
-    };
-    if (isRecord(server.commonOptions) && server.commonOptions.enable !== false && String(server.url ?? "").trim()) {
-      server = await syncMcpServerTools(server, addLog);
-    }
-    // ── Master/child switch coupling ─────────────────────────────────────────────────
-    // The MCP server's `commonOptions.enable` is a master switch; each tool's `enable`
-    // is a child switch that persists across master toggles to preserve user intent.
-    //
-    // Transition 1 — master off → on:
-    //   If every child is currently off (i.e. there's no surviving user preference),
-    //   revive them all to ON so the freshly-enabled MCP isn't a no-op surprise. If even
-    //   one child is on, the user has expressed an intentional subset — leave it alone.
-    //
-    // Transition 2 — master is on AND user just turned every child off:
-    //   Auto-flip master to off, since an MCP with no enabled tools is a dead control.
-    //   This pairs with Transition 1: re-enabling later will revive everything.
-    //
-    // Transition 3 — master on → off (manual):
-    //   DON'T touch child states. The user might just be temporarily hiding MCP from
-    //   chat; we want their next re-enable to remember which tools were on.
-    if (isRecord(server.commonOptions)) {
-      const finalCommon = server.commonOptions as Record<string, JsonValue>;
-      const tools = Array.isArray(finalCommon.tools) ? finalCommon.tools.filter(isRecord) : [];
-      const allOff = tools.length > 0 && tools.every((tool) => tool.enable === false);
-      if (!wasEnabled && willEnable && allOff) {
-        // Transition 1: revive child switches.
-        server.commonOptions = {
-          ...finalCommon,
-          tools: tools.map((tool) => ({ ...tool, enable: true })),
-        };
-      } else if (willEnable && allOff) {
-        // Transition 2: auto-flip master off. This catches the "user turned off the last
-        // tool" case from the per-tool save path (settings/mcp-server/detail also handles
-        // tool toggle saves since the UI debounces a full server snapshot).
-        server.commonOptions = { ...finalCommon, enable: false };
+    const serverId = String(body.id ?? id());
+    return withMcpServerWriteLock(serverId, async () => {
+      const common = isRecord(body.commonOptions) ? body.commonOptions : {};
+      // Read the previous server state so we can detect the user transitioning the main MCP
+      // switch from off→on, which has special "revive child switches" semantics (see below).
+      const prevServer = (state.settings.mcpServers as Array<Record<string, JsonValue>>)
+        .find((item) => String(item.id) === String(body.id ?? "")) ?? null;
+      const prevCommon = prevServer && isRecord(prevServer.commonOptions) ? prevServer.commonOptions : null;
+      const wasEnabled = prevCommon ? prevCommon.enable !== false : false;
+      const willEnable = common.enable !== false;
+      let server: Record<string, JsonValue> = {
+        type: String(body.type ?? "streamable_http") === "sse" ? "sse" : "streamable_http",
+        url: String(body.url ?? ""),
+        ...body,
+        id: serverId,
+        commonOptions: {
+          enable: willEnable,
+          name: String(common.name ?? body.name ?? "MCP Server"),
+          headers: Array.isArray(common.headers) ? common.headers : [],
+          tools: Array.isArray(common.tools) ? common.tools : [],
+          lastSyncAt: typeof common.lastSyncAt === "number" ? common.lastSyncAt : null,
+          lastSyncError: String(common.lastSyncError ?? ""),
+          connected: common.connected === true,
+        },
+      };
+      // R3-3:ssePostEndpoint 是运行时会话缓存(见 tools/mcp.ts 的 mcpSsePostEndpointCache),
+      // 不再持久化。剥掉前端经 ...body 回传的旧值,避免它又写回 settings。
+      delete (server as Record<string, JsonValue>).ssePostEndpoint;
+      if (isRecord(server.commonOptions) && server.commonOptions.enable !== false && String(server.url ?? "").trim()) {
+        server = await syncMcpServerTools(server, addLog);
+        // 全域复审 H2:上面的内嵌工具同步是长 await,期间备份恢复/导入可整体替换 settings
+        // (不走 per-id 锁)。仅"更新既有服务器"需要防陈旧写回:保存开始时捕获的条目引用
+        // 已不在当前 settings → 结果作废;新建(prevServer 为空)保持创建语义不受影响。
+        if (prevServer && !(state.settings.mcpServers as JsonValue[]).includes(prevServer)) {
+          return error("MCP 服务器在保存期间已被删除或替换,本次保存已丢弃", 409);
+        }
       }
-      // Transition 3 needs no action — the tools array is already preserved verbatim.
-    }
-    const result = upsertById(state.settings.mcpServers as JsonValue[], server);
-    updateSettings({ ...state.settings, mcpServers: result.items });
-    return json({ status: "ok", server: result.item });
+      // ── Master/child switch coupling ─────────────────────────────────────────────────
+      // The MCP server's `commonOptions.enable` is a master switch; each tool's `enable`
+      // is a child switch that persists across master toggles to preserve user intent.
+      //
+      // Transition 1 — master off → on:
+      //   If every child is currently off (i.e. there's no surviving user preference),
+      //   revive them all to ON so the freshly-enabled MCP isn't a no-op surprise. If even
+      //   one child is on, the user has expressed an intentional subset — leave it alone.
+      //
+      // Transition 2 — master is on AND user just turned every child off:
+      //   Auto-flip master to off, since an MCP with no enabled tools is a dead control.
+      //   This pairs with Transition 1: re-enabling later will revive everything.
+      //
+      // Transition 3 — master on → off (manual):
+      //   DON'T touch child states. The user might just be temporarily hiding MCP from
+      //   chat; we want their next re-enable to remember which tools were on.
+      if (isRecord(server.commonOptions)) {
+        const finalCommon = server.commonOptions as Record<string, JsonValue>;
+        const tools = Array.isArray(finalCommon.tools) ? finalCommon.tools.filter(isRecord) : [];
+        const allOff = tools.length > 0 && tools.every((tool) => tool.enable === false);
+        if (!wasEnabled && willEnable && allOff) {
+          // Transition 1: revive child switches.
+          server.commonOptions = {
+            ...finalCommon,
+            tools: tools.map((tool) => ({ ...tool, enable: true })),
+          };
+        } else if (willEnable && allOff) {
+          // Transition 2: auto-flip master off. This catches the "user turned off the last
+          // tool" case from the per-tool save path (settings/mcp-server/detail also handles
+          // tool toggle saves since the UI debounces a full server snapshot).
+          server.commonOptions = { ...finalCommon, enable: false };
+        }
+        // Transition 3 needs no action — the tools array is already preserved verbatim.
+      }
+      const result = upsertById(state.settings.mcpServers as JsonValue[], server);
+      updateSettings({ ...state.settings, mcpServers: result.items });
+      return json({ status: "ok", server: result.item });
+    });
   }
   const mcpDelete = path.match(/^settings\/mcp-server\/([^/]+)$/);
   if (mcpDelete && request.method === "DELETE") {
     const idValue = decodeURIComponent(mcpDelete[1]);
-    updateSettings({
-      ...state.settings,
-      mcpServers: deleteById(state.settings.mcpServers as JsonValue[], idValue),
-      assistants: state.settings.assistants.map((assistant) => ({
-        ...assistant,
-        mcpServers: assistant.mcpServers.filter((serverId) => serverId !== idValue),
-      })),
+    return withMcpServerWriteLock(idValue, async () => {
+      updateSettings({
+        ...state.settings,
+        mcpServers: deleteById(state.settings.mcpServers as JsonValue[], idValue),
+        assistants: state.settings.assistants.map((assistant) => ({
+          ...assistant,
+          mcpServers: assistant.mcpServers.filter((serverId) => serverId !== idValue),
+        })),
+      });
+      return json({ status: "deleted" });
     });
-    return json({ status: "deleted" });
   }
   if (path === "settings/mcp-server/reorder" && request.method === "POST") {
     const body = await readJson<{ ids: string[] }>(request);
@@ -391,14 +427,24 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
   }
   if (path === "settings/mcp-server/sync" && request.method === "POST") {
     const body = await readJson<{ serverId: string }>(request);
-    const server = (state.settings.mcpServers as Array<Record<string, JsonValue>>).find((item) => String(item.id) === body.serverId);
-    if (!server) return error("MCP server not found", 404);
-    const nextServer = await syncMcpServerTools(server, addLog);
-    const result = upsertById(state.settings.mcpServers as JsonValue[], nextServer);
-    updateSettings({ ...state.settings, mcpServers: result.items });
-    const common = (isRecord(nextServer.commonOptions) ? nextServer.commonOptions : {}) as Record<string, JsonValue>;
-    if (common.connected === false) return error(String(common.lastSyncError ?? "MCP sync failed"), 502);
-    return json({ status: "ok", tools: Array.isArray(common.tools) ? common.tools : [], server: result.item });
+    return withMcpServerWriteLock(String(body.serverId ?? ""), async () => {
+      const server = (state.settings.mcpServers as Array<Record<string, JsonValue>>).find((item) => String(item.id) === body.serverId);
+      if (!server) return error("MCP server not found", 404);
+      const nextServer = await syncMcpServerTools(server, addLog);
+      // 全域复审 H1:per-id 写锁只串行化 detail/sync/delete,挡不住备份恢复/导入(它整体替换
+      // settings,不走锁)。同步的长 await 期间若完成了恢复,下面的 upsertById 会把旧世界的
+      // 服务器插回新 settings(复活已删/覆盖已改)。写前身份重查(同批6 G1 会话守卫):
+      // 起始捕获的条目引用已不在当前 settings → 本次结果作废。其余端点保留引用不变
+      // (upsertById/deleteById/reorderByIds 均复用未触及项),不会误伤。
+      if (!(state.settings.mcpServers as JsonValue[]).includes(server)) {
+        return error("MCP 服务器在同步期间已被删除或替换,同步结果已丢弃", 409);
+      }
+      const result = upsertById(state.settings.mcpServers as JsonValue[], nextServer);
+      updateSettings({ ...state.settings, mcpServers: result.items });
+      const common = (isRecord(nextServer.commonOptions) ? nextServer.commonOptions : {}) as Record<string, JsonValue>;
+      if (common.connected === false) return error(String(common.lastSyncError ?? "MCP sync failed"), 502);
+      return json({ status: "ok", tools: Array.isArray(common.tools) ? common.tools : [], server: result.item });
+    });
   }
   if (path === "settings/mode-injection/detail" && request.method === "POST") {
     const body = await readJson<Record<string, JsonValue>>(request);
@@ -523,8 +569,7 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
     // Invalidate testPassed when any auth/endpoint field changes. Preset types
     // (bing_local, rikkahub) don't need testPassed gating — they always show in chat.
     if (existing && existing.testPassed === true) {
-      const authFields = ["type", "apiKey", "url", "customUrl", "model", "username", "password", "engines"];
-      const changed = authFields.some((key) => String(existing[key] ?? "") !== String(service[key] ?? ""));
+      const changed = SEARCH_SERVICE_AUTH_FIELDS.some((key) => String(existing[key] ?? "") !== String(service[key] ?? ""));
       if (changed) {
         service.testPassed = false;
         service.testPassedAt = 0;
@@ -537,6 +582,9 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
       ...state.settings,
       searchServices: existing ? services.map((item) => (String(item.id) === String(service.id) ? service : item)) : [...services, service],
       searchServiceSelected: existing ? state.settings.searchServiceSelected : services.length,
+      // R1-12:手动保存/重加某 type → 撤销其删除墓碑(之后再删会重新记录)。
+      dismissedSearchServiceTypes: state.settings.dismissedSearchServiceTypes
+        .filter((t) => t !== String(service.type ?? "").toLowerCase()),
     });
     return json({ status: "ok", service });
   }
@@ -550,10 +598,15 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
         const services = state.settings.searchServices as SearchService[];
         const targetId = String(body.id ?? "");
         if (targetId) {
+          // R5-3 同型竞态:测试飞行期间用户改了该服务的鉴权/端点字段 → 结论属于旧配置,
+          // 不盖章。字段集合与 detail 保存路径的失效规则共用 SEARCH_SERVICE_AUTH_FIELDS。
           updateSettings({
             ...state.settings,
             searchServices: services.map((item) =>
-              String(item.id) === targetId ? { ...item, testPassed: true, testPassedAt: Date.now() } : item,
+              String(item.id) === targetId
+                  && SEARCH_SERVICE_AUTH_FIELDS.every((key) => String(item[key] ?? "") === String(body[key] ?? ""))
+                ? { ...item, testPassed: true, testPassedAt: Date.now() }
+                : item,
             ),
           });
         }
@@ -567,10 +620,18 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
   if (searchDelete && request.method === "DELETE") {
     const idValue = decodeURIComponent(searchDelete[1]);
     const services = state.settings.searchServices as SearchService[];
+    const removed = services.find((item) => String(item.id) === idValue) ?? null;
     const nextServices = services.filter((item) => String(item.id) !== idValue);
+    // 全面审查 R1-12:被删 type 已无存活实例 → 记删除墓碑。state-load 的内置服务补齐
+    // 与空列表回填都豁免墓碑,且墓碑随 settings 进备份——重启/备份恢复均不复活。
+    const removedType = removed ? String(removed.type ?? "").toLowerCase() : "";
+    const typeStillPresent = removedType !== "" && nextServices.some((item) => String(item.type ?? "").toLowerCase() === removedType);
     updateSettings({
       ...state.settings,
       searchServices: nextServices,
+      dismissedSearchServiceTypes: removedType && !typeStillPresent
+        ? uniqueStrings([...state.settings.dismissedSearchServiceTypes, removedType])
+        : state.settings.dismissedSearchServiceTypes,
       searchServiceSelected: Math.min(state.settings.searchServiceSelected, Math.max(0, nextServices.length - 1)),
     });
     return json({ status: "deleted" });
@@ -625,16 +686,19 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
     updateSettings({
       ...state.settings,
       providers: state.settings.providers.some((item) => item.id === body.id)
-        ? state.settings.providers.map((item) =>
-          item.id === body.id
-            ? {
-                ...item,
-                ...body,
-                testPassed: item.testPassed === true ? true : body.testPassed,
-                testPassedAt: item.testPassed === true ? item.testPassedAt : body.testPassedAt,
-              }
-            : item,
-        )
+        ? state.settings.providers.map((item) => {
+          if (item.id !== body.id) return item;
+          // 全面审查 R5-3:凭据/端点字段变更即撤销"已验证"(对齐 search/service/detail 的
+          // 失效规则)——apiKey/baseUrl 都换了,旧测试结论不再成立,徽章不能继续绿着。
+          // 未变更时保持既有语义:测过一次即保留,防止无关字段编辑抖掉测试状态。
+          if (providerAuthChanged(item, body)) return { ...item, ...body, testPassed: false, testPassedAt: 0 };
+          return {
+            ...item,
+            ...body,
+            testPassed: item.testPassed === true ? true : body.testPassed,
+            testPassedAt: item.testPassed === true ? item.testPassedAt : body.testPassedAt,
+          };
+        })
         : [...state.settings.providers, { ...body, id: body.id || id(), builtIn: false }],
     });
     return json({ status: "ok" });
@@ -774,13 +838,7 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
         }
       },
     });
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
-    });
+    return new Response(stream, { headers: sseHeaders() });
   }
   if (path === "settings/provider/models" && request.method === "POST") {
     const body = await readJson<{ providerId: string; save?: boolean }>(request);
@@ -832,7 +890,9 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
     return json({ status: "ok", preferredPort, requiresRestart: true });
   }
   if (path === "settings/proxy/detect" && request.method === "POST") {
-    const detected = readWindowsSystemProxy();
+    // R1-7:探测函数已异步化;detectSystemProxy 按平台分发(Windows 注册表 / GNOME
+    // gsettings),此前只探 Windows,Linux 桌面点"检测"永远返回空。
+    const detected = await detectSystemProxy();
     return json({ detected: detected ?? null });
   }
   if (path === "settings/proxy/status" && request.method === "GET") {

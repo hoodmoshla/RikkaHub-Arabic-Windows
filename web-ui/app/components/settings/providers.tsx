@@ -23,6 +23,7 @@ import { Input } from "~/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { Switch } from "~/components/ui/switch";
 import { ModelEditDialog } from "~/components/model-edit-dialog";
+import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import { cn } from "~/lib/utils";
 import { openExternal } from "~/lib/external-link";
 import api, { appendWebAuthQuery } from "~/services/api";
@@ -254,7 +255,20 @@ export function ProvidersSection({
     modelId: string;
     prompt: string;
   } | null>(null);
-  const dirtyRef = React.useRef(false);
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      if (!draft) return;
+      await api.post("settings/provider", draft);
+      onSettings({
+        ...settings,
+        providers: settings.providers.map((provider) =>
+          provider.id === draft.id ? draft : provider,
+        ),
+      });
+    },
+    { onSaveError: (error) => toast.error((error as Error).message || t("settings:providers.autosave_failed")) },
+  );
   const lastSelectedRef = React.useRef(selectedId);
 
   // Only honor ?providerId=... deep-link navigation when the URL parameter is actually present
@@ -279,7 +293,7 @@ export function ProvidersSection({
     const selectedChanged = lastSelectedRef.current !== selectedId;
     lastSelectedRef.current = selectedId;
     setDraft(next ? clone(next) : null);
-    dirtyRef.current = false;
+    autosave.reset();
     if (selectedChanged) {
       setFetchedModels([]);
       setModelFilter("");
@@ -364,38 +378,11 @@ export function ProvidersSection({
   const isImageTestMode = effectiveTestModelType === "IMAGE";
 
   const patchDraft = (patch: Partial<ProviderProfile>) => {
-    dirtyRef.current = true;
+    autosave.markDirty();
     setDraft({ ...draft, ...patch });
   };
-  const save = async () => {
-    const nextProvider = draft;
-    await api.post("settings/provider", nextProvider);
-    onSettings({
-      ...settings,
-      providers: settings.providers.map((provider) =>
-        provider.id === nextProvider.id ? nextProvider : provider,
-      ),
-    });
-    dirtyRef.current = false;
-  };
-  React.useEffect(() => {
-    if (!draft || !dirtyRef.current) return;
-    const timer = window.setTimeout(() => {
-      void api
-        .post("settings/provider", draft)
-        .then(() => {
-          dirtyRef.current = false;
-          onSettings({
-            ...settings,
-            providers: settings.providers.map((provider) =>
-              provider.id === draft.id ? draft : provider,
-            ),
-          });
-        })
-        .catch((error: Error) => toast.error(error.message || t("settings:providers.autosave_failed")));
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [draft, onSettings, settings]);
+  // 测试/查余额前的"确保服务端拿到当前草稿"。force:与原实现一致,无条件落一次。
+  const save = () => autosave.saveNow({ force: true });
   const test = async () => {
     setTesting(true);
     setTestChecks([]);
@@ -728,7 +715,7 @@ export function ProvidersSection({
     const source = persisted ?? model;
     // Manually-added models keep ID editable; everything else (fetched, legacy) is locked
     // because the modelId is sent verbatim to the upstream API and editing it would silently
-    // break request routing. See server.ts:6158, 6168, 6313.
+    // break request routing. See pc-server/inference-engine/providers.ts.
     const isManual = source.manuallyAdded === true;
     setModelDialog({
       mode: "edit",
@@ -865,9 +852,11 @@ export function ProvidersSection({
               <span className="text-sm font-medium">{t("settings:providers.type")}</span>
               <Select
                 value={kind}
-                onValueChange={(value) =>
-                  setDraft(normalizeKindPatch(draft, value as ProviderKind))
-                }
+                onValueChange={(value) => {
+                  // 类型切换也是编辑,必须置脏,否则永不自动保存(复审 F3 补获)
+                  autosave.markDirty();
+                  setDraft(normalizeKindPatch(draft, value as ProviderKind));
+                }}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue />
@@ -1195,6 +1184,8 @@ export function ProvidersSection({
                   variant="outline"
                   onClick={async () => {
                     if (!(await confirmDialog({ title: t("settings:providers.delete_confirm", { name: draft.name }), danger: true }))) return;
+                    // 防复活:丢弃待保存脏编辑并等在飞保存收尾,DELETE 不与迟到 POST 乱序(复审 F1)
+                    await autosave.discard();
                     await api.delete(`settings/provider/${encodeURIComponent(draft.id)}`);
                     const providers = settings.providers.filter((item) => item.id !== draft.id);
                     onSettings({ ...settings, providers });

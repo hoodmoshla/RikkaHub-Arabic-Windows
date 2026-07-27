@@ -123,6 +123,7 @@ export function defaultSettings(): Settings {
     ],
     searchCommonOptions: { resultSize: 10 },
     searchServiceSelected: 0,
+    dismissedSearchServiceTypes: [],
     mcpServers: [],
     modeInjections: [
       {

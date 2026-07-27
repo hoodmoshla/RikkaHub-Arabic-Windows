@@ -5,7 +5,7 @@ import type { ApiMessage, Assistant, Conversation, JsonValue, Message, MessageNo
 import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolExecutor } from "../inference-engine/events";
 import { id, isRecord, message, textFromParts } from "../foundation/utils";
 import { classifyProxyError } from "../foundation/net";
-import { saveState, state } from "../persistence/json-store";
+import { state } from "../persistence/json-store";
 import { addLog } from "../api/logs";
 import { broadcastConversation, broadcastList, broadcastNodeUpdate, touchStream } from "../api/sse";
 import { applyCustomBody, applyRequestHeaders, findModel } from "../model-providers";
@@ -322,7 +322,6 @@ export async function resumeApprovedToolParts(
   }
   if (changed) {
     conversation.updateAt = Date.now();
-    saveState();
     touchStream({ message: assistantMessage, conversation, node: assistantNode });
   }
   return toolMessages;
@@ -332,12 +331,24 @@ function cloneConversation(conversation: Conversation): Conversation {
   return JSON.parse(JSON.stringify(conversation)) as Conversation;
 }
 
+// 批6复审 G2:当前生成流正在写的消息(按会话)。R2-3 的入口接管 abort 后,旧流异步退出,
+// 若新流经 ensureAssistantGenerationNode 复用了同一空占位消息,旧流的收尾不得再触碰它。
+// generating 登记判定"是否被接管",本记录判定"新流是否复用了同一消息对象"。
+const activeGenerationMessages = new Map<string, Message>();
+
 function completeConversationGeneration(conversationId: string, controller: AbortController) {
-  if (generating.get(conversationId) !== controller) return;
+  const current = generating.get(conversationId);
+  if (current !== controller) {
+    // 已被接管(current 为新流 controller):所有权归新流,不得清。
+    // 登记被外部清除(stop/删会话,current 为空):顺手清所有权记录,防陈旧 Message 引用滞留。
+    if (!current) activeGenerationMessages.delete(conversationId);
+    return;
+  }
   generating.delete(conversationId);
+  activeGenerationMessages.delete(conversationId);
   // The generating Map drives the sidebar's per-conversation streaming indicator
   // (rendered via the conversations-list SSE). Now that broadcastNodeUpdateNow no
-  // longer pings the list on every chunk (see comment at server.ts:1495), we have
+  // longer pings the list on every chunk (see comment at api/sse.ts scheduleNodeBroadcast), we have
   // to explicitly refresh on the false→true and true→false transitions so the
   // indicator turns on/off. Caller `generateAnswer` calls broadcastConversation
   // at start which already touches broadcastList, and we cover the end transition
@@ -451,6 +462,12 @@ async function runGeneration(
 }
 
 export async function generateAnswer(conversation: Conversation, regenerateAtNodeId?: string) {
+  // R2-3:入口自带"先中止旧流"不变式。端点级守卫(send/edit/regenerate 的先 abort)挡不住
+  // OCR 续体窗口:两条消息的续体先后异步触发本函数时,后者若直接 generating.set 会顶掉
+  // 前者的 controller——前者成无主流,两路流式交错写同一节点(parts 交叉污染)、且无人能停。
+  // 把端点级纪律下沉为编排器不变式:同会话已有登记流,先 abort 再接管(后到者胜,与端点
+  // 语义一致)。completeConversationGeneration 按 controller 身份幂等,旧流收尾不会误删新登记。
+  generating.get(conversation.id)?.abort();
   const controller = new AbortController();
   generating.set(conversation.id, controller);
   // DB-first:整个生成期持有引用(与 finally 的 release 恰好配对一次;
@@ -470,21 +487,34 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
     assistantNode = ensureAssistantGenerationNode(conversation, picked.model.id);
   }
   const currentMessage = assistantNode.messages[assistantNode.selectIndex];
+  activeGenerationMessages.set(conversation.id, currentMessage);
   // P1-3:四条出口路径(pending/done/aborted/failed)的共同收尾序列。差异只在 parts 与
   // finishedAt 处理,由 applyParts 注入。completeConversationGeneration 幂等,finally 兜底。
   const finalizeOutcome = (applyParts: () => void) => {
+    // 批6复审 G2:接管守卫——被新流接管且新流复用同一消息对象时,旧流的收尾若继续执行,
+    // 会对新流正在写的回答做 transforms/盖 finishedAt/写估算 usage,失败分支甚至把
+    // "请求失败"文本和 model_call_error 注解追加进去。此时静默退出(消息已易主,由新流
+    // 负责收尾);新流用的是新消息对象时,旧流仍照常收尾自己的消息,行为不变。
+    const owner = generating.get(conversation.id);
+    if (owner && owner !== controller && activeGenerationMessages.get(conversation.id) === currentMessage) return;
     applyOutputTransforms(currentMessage, assistant);
     finishReasoningParts(currentMessage);
     applyParts();
     ensureUsage(currentMessage, conversation);
     conversation.updateAt = Date.now();
-    saveState();
     completeConversationGeneration(conversation.id, controller);
     broadcastNodeUpdate(conversation, assistantNode);
     broadcastConversation(conversation);
   };
   const resumingApprovedTools = hasResumableToolParts(currentMessage);
   currentMessage.finishedAt = null;
+  // R7-2:重入生成(续写/重试复用同一消息对象)时清掉上一轮的失败标记,
+  // 本轮成功后前端错误横幅不再残留;本轮再失败会在 catch 里重新落标记。
+  // 异常数据容忍:annotations 缺失(手改/极老数据)不能让生成入口崩死整个会话——
+  // 这里顺手自愈为数组,后续 push 同样安全(用户数据安全优先)。
+  currentMessage.annotations = (currentMessage.annotations ?? []).filter(
+    (item) => !(typeof item === "object" && item !== null && (item as { type?: unknown }).type === "model_call_error"),
+  );
   // Allow createdAt to be re-stamped on the first content chunk of this generation pass —
   // supports regenerate, which reuses the same message object.
   streamStartedMessages.delete(currentMessage);
@@ -495,7 +525,6 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
     setMessageLoading(currentMessage);
   }
   conversation.updateAt = Date.now();
-  saveState();
   broadcastNodeUpdate(conversation, assistantNode);
   try {
     if (resumingApprovedTools) {
@@ -600,8 +629,15 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
       completeConversationGeneration(conversation.id, controller);
       return;
     }
-    if (err instanceof DOMException && err.name === "AbortError") {
+    // 批6复审 G3:abort 意图支配错误分类——部分 fetch 实现/上游在 abort 时抛的是普通
+    // 网络错误而非 AbortError,若走失败分支会给用户主动停止的回答追加"请求失败"+错误
+    // 注解并弹全局错误。只要本流已被要求中止,一律按中止收尾。
+    if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
       finalizeOutcome(() => {
+        // 批6复审 G4:中止若发生在首个 delta 之前,loading 占位没人摘(正常路径由首个
+        // delta 摘,stop 端点手工摘,但删会话/接管等 abort 路径不经过 stop 端点),
+        // 前端"打字点"会永久残留在已完结消息上。与 stop 端点的手工摘除对齐。
+        currentMessage.parts = currentMessage.parts.filter((part) => !(isRecord(part) && part.type === "loading"));
         currentMessage.finishedAt = new Date().toISOString();
       });
       return;
@@ -619,6 +655,9 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
         appendTextPart(currentMessage, `\n\n${failureText}`);
         currentMessage.finishedAt = new Date().toISOString();
       }
+      // R7-2:结构化错误标记——前端"打开模型设置"横幅由它驱动,
+      // 不再对正文做关键词正则(讨论 HTTP 状态码/超时的正常回答不误报)。
+      currentMessage.annotations.push({ type: "model_call_error", message: failureText });
     });
   } finally {
     releaseConversation(conversation.id);

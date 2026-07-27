@@ -55,3 +55,53 @@ describe("assistant visual regex transforms", () => {
     expect(applyAssistantRegexes("user-secret", assistant, "ASSISTANT", true)).toBe("user-secret");
   });
 });
+
+// 批次二 R8-3:编译缓存与病态正则防线
+describe("assistant regex hardening", () => {
+  const makeAssistant = (findRegex: string, replaceString = "X") =>
+    ({
+      id: "hardening",
+      name: "Hardening",
+      regexes: [
+        {
+          id: "r1",
+          enabled: true,
+          visualOnly: true,
+          affectingScope: ["ASSISTANT"],
+          findRegex,
+          replaceString,
+        },
+      ],
+    }) as any;
+
+  test("invalid regex is ignored and text passes through", () => {
+    expect(applyAssistantRegexes("hello", makeAssistant("([unclosed"), "ASSISTANT", true)).toBe(
+      "hello",
+    );
+  });
+
+  test("pattern longer than the length cap is rejected", () => {
+    const longPattern = "a".repeat(501);
+    const text = "a".repeat(501);
+    expect(applyAssistantRegexes(text, makeAssistant(longPattern), "ASSISTANT", true)).toBe(text);
+  });
+
+  test("cached global regex stays correct across repeated calls (lastIndex reset)", () => {
+    const a = makeAssistant("foo", "bar");
+    expect(applyAssistantRegexes("foo foo foo", a, "ASSISTANT", true)).toBe("bar bar bar");
+    expect(applyAssistantRegexes("foo foo foo", a, "ASSISTANT", true)).toBe("bar bar bar");
+  });
+
+  test("catastrophic pattern is disabled after exceeding the time budget", () => {
+    // (a+)+$ 对 "aaa...b" 是经典灾难性回溯:26 个 a ≈ 2^26 级回溯,必然超 50ms 预算。
+    const a = makeAssistant("(a+)+$", "X");
+    const evil = `${"a".repeat(26)}b`;
+    // 首跑:超预算,pattern 被拉黑(文本无匹配,原样返回)
+    expect(applyAssistantRegexes(evil, a, "ASSISTANT", true)).toBe(evil);
+    // 复跑:更长的输入也不再执行该 pattern,立即返回
+    const longer = `${"a".repeat(40)}b`;
+    const startedAt = performance.now();
+    expect(applyAssistantRegexes(longer, a, "ASSISTANT", true)).toBe(longer);
+    expect(performance.now() - startedAt).toBeLessThan(50);
+  });
+});

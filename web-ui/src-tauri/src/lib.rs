@@ -30,13 +30,6 @@ use tauri_plugin_shell::{
     ShellExt,
 };
 
-/// Default loopback port the sidecar listens on. Matches `pc-server/server.ts`.
-const SIDECAR_PORT: u16 = 8080;
-
-/// How long we wait for the sidecar HTTP server to start accepting connections
-/// before giving up and showing an error to the user.
-const SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(20);
-
 #[derive(Default)]
 struct SidecarState {
     child: Mutex<Option<CommandChild>>,
@@ -159,50 +152,61 @@ fn exe_dir() -> PathBuf {
 }
 
 /// Block until the sidecar prints its `RIKKAHUB_PORT:<n>` marker (meaning Bun.serve bound
-/// successfully), or until the child dies / we time out. Polling the channel with a short
-/// timeout lets us notice a dead child promptly instead of waiting the full duration — this
-/// also covers the silent-orphan case where another app already owns the port range and our
-/// spawn exits on EADDRINUSE before ever printing a port marker.
+/// successfully) or the child dies. R1-1：服务端已改为"先绑端口打标记、迁移后置"，标记
+/// 正常应在数秒内到达；子进程仍存活就继续等——旧的 20s 硬超时会把正在迁移大数据的
+/// 后端连坐杀死（迁移下次从头再来），形成"每次启动都超时被杀"的死循环。真正的失败
+/// （端口耗尽/数据目录被锁/迁移崩溃）都会让子进程退出，由 child_dead 分支兜住并展示
+/// RIKKAHUB_FATAL 标记带出的真实原因（R1-4）。
 fn wait_for_sidecar_port(
     port_rx: std::sync::mpsc::Receiver<u16>,
     child_dead: &AtomicBool,
-    timeout: Duration,
+    fatal_message: &Mutex<Option<String>>,
 ) -> Result<u16, String> {
     let started = Instant::now();
+    let mut last_log = Instant::now();
     loop {
         if child_dead.load(Ordering::Acquire) {
-            return Err(format!(
-                "Rikkahub 启动失败：后端进程已退出。\n\n\
-                端口 {SIDECAR_PORT} 附近可能被其他程序占用。请关闭占用该端口的程序，\
-                或在 设置 → 代理与端口 中更换端口后重新启动 Rikkahub。"
-            ));
+            return Err(startup_failure_message(fatal_message));
         }
         match port_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(port) => return Ok(port),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if started.elapsed() >= timeout {
-                    return Err(format!(
-                        "Rikkahub 后端服务在 {timeout:?} 内未启动完成，请重试。"
-                    ));
+                if last_log.elapsed() >= Duration::from_secs(10) {
+                    last_log = Instant::now();
+                    eprintln!(
+                        "[startup] still waiting for sidecar port marker ({}s, child alive)...",
+                        started.elapsed().as_secs()
+                    );
                 }
-                // otherwise keep looping and re-check child_dead
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // stdout pump task ended without ever emitting a port marker — the sidecar
                 // process has exited. Treat it the same as child_dead.
-                return Err(format!(
-                    "Rikkahub 启动失败：后端进程意外退出。\n\n\
-                    端口 {SIDECAR_PORT} 附近可能被其他程序占用。请关闭占用该端口的程序，\
-                    或在 设置 → 代理与端口 中更换端口后重新启动 Rikkahub。"
-                ));
+                return Err(startup_failure_message(fatal_message));
             }
         }
     }
 }
 
+/// R1-4：启动失败文案分诊。优先展示 sidecar 退出前打出的 `RIKKAHUB_FATAL:<code>:<message>`
+/// 标记（端口耗尽/数据目录被另一实例锁定/迁移失败各有真实原因，服务端给的已是用户可读
+/// 中文）；没有标记才回通用文案——绝不再无条件断言"端口被占用"（那会误导用户反复改
+/// 端口陷入无解循环，而真实原因可能是实例锁）。
+fn startup_failure_message(fatal_message: &Mutex<Option<String>>) -> String {
+    if let Some(message) = fatal_message.lock().unwrap().clone() {
+        return format!("Rikkahub 启动失败：\n\n{message}");
+    }
+    "Rikkahub 启动失败：后端进程意外退出，且未留下诊断信息。\n\n\
+     可能原因：程序文件损坏、数据目录不可写、或被安全软件拦截。\n\
+     请重新启动试试；若反复出现，请重新安装 Rikkahub。"
+        .to_string()
+}
+
+type FatalMessage = Arc<Mutex<Option<String>>>;
+
 fn spawn_sidecar(
     app: &AppHandle,
-) -> Result<(CommandChild, Arc<AtomicBool>, std::sync::mpsc::Receiver<u16>), String> {
+) -> Result<(CommandChild, Arc<AtomicBool>, FatalMessage, std::sync::mpsc::Receiver<u16>), String> {
     let data_dir = resolve_data_dir(app);
     fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Failed to create data dir {}: {e}", data_dir.display()))?;
@@ -238,6 +242,11 @@ fn spawn_sidecar(
     let dead = Arc::new(AtomicBool::new(false));
     let dead_clone = dead.clone();
 
+    // R1-4：sidecar 退出前打出的单行诊断标记（RIKKAHUB_FATAL:<code>:<message>），由
+    // stdout 泵捕获；child_dead 后 startup_failure_message 用它替换通用文案。
+    let fatal: FatalMessage = Arc::new(Mutex::new(None));
+    let fatal_clone = fatal.clone();
+
     // The sidecar prints a single `RIKKAHUB_PORT:<n>` line on stdout once Bun.serve binds.
     // We parse it here and forward the value over a channel so the setup routine can navigate
     // the webview to the correct port — the static window URL is still 8080, so when the
@@ -259,6 +268,17 @@ fn spawn_sidecar(
                         if let Some(rest) = trimmed.strip_prefix("RIKKAHUB_PORT:") {
                             if let Ok(p) = rest.trim().parse::<u16>() {
                                 let _ = port_tx_clone.send(p);
+                            }
+                        }
+                        // R1-4：`RIKKAHUB_FATAL:<code>:<message>`。code 对齐退出码，目前
+                        // 仅进日志；文案由服务端给出（已是用户可读中文）。
+                        if let Some(rest) = trimmed.strip_prefix("RIKKAHUB_FATAL:") {
+                            let message = rest
+                                .split_once(':')
+                                .map(|(_, m)| m.trim().to_string())
+                                .unwrap_or_else(|| rest.to_string());
+                            if !message.is_empty() {
+                                *fatal_clone.lock().unwrap() = Some(message);
                             }
                         }
                     }
@@ -283,7 +303,7 @@ fn spawn_sidecar(
         dead_clone.store(true, Ordering::Release);
     });
 
-    Ok((child, dead, port_rx))
+    Ok((child, dead, fatal, port_rx))
 }
 
 /// On Windows, putting the sidecar into a Job Object with `KILL_ON_JOB_CLOSE` ensures the OS
@@ -569,12 +589,12 @@ pub fn run() {
             // can't know which one until that line arrives. If the sidecar dies early — most
             // commonly EADDRINUSE because the whole candidate range is busy — show an error
             // dialog and quit; otherwise the webview would sit on a dead/orphan URL.
-            let (port_rx, child_dead) = match spawn_sidecar(&handle) {
-                Ok((child, dead, port_rx)) => {
+            let (port_rx, child_dead, fatal_message) = match spawn_sidecar(&handle) {
+                Ok((child, dead, fatal, port_rx)) => {
                     if let Some(state) = handle.try_state::<SidecarState>() {
                         *state.child.lock().unwrap() = Some(child);
                     }
-                    (port_rx, dead)
+                    (port_rx, dead, fatal)
                 }
                 Err(err) => {
                     show_startup_error(&handle, &format!("Rikkahub 后端启动失败：\n\n{err}"));
@@ -583,40 +603,42 @@ pub fn run() {
                 }
             };
 
-            let actual_port =
-                match wait_for_sidecar_port(port_rx, &child_dead, SIDECAR_READY_TIMEOUT) {
+            // R1-1：就绪等待移出 setup 主线程。服务端"先绑端口"后标记正常数秒内到达，
+            // 但极端情况（安全软件拦截、磁盘极慢）下可能更久——在主线程上等会冻结窗口。
+            let wait_handle = handle.clone();
+            thread::spawn(move || {
+                let actual_port = match wait_for_sidecar_port(port_rx, &child_dead, &fatal_message)
+                {
                     Ok(port) => port,
                     Err(msg) => {
-                        show_startup_error(&handle, &msg);
-                        handle.exit(1);
-                        return Ok(());
+                        show_startup_error(&wait_handle, &msg);
+                        wait_handle.exit(1);
+                        return;
                     }
                 };
 
-            if let Some(state) = handle.try_state::<SidecarState>() {
-                state.port.store(actual_port, Ordering::Relaxed);
-            }
+                if let Some(state) = wait_handle.try_state::<SidecarState>() {
+                    state.port.store(actual_port, Ordering::Relaxed);
+                }
 
-            handle.emit("sidecar://ready", true).ok();
+                wait_handle.emit("sidecar://ready", true).ok();
 
-            // The window's static URL (tauri.conf.json) is http://localhost:8080. When the
-            // sidecar had to use a different port, re-navigate the webview there. The eval'd
-            // script guards with an "already on this port" check so repeated attempts don't
-            // interrupt a navigation that has already succeeded; the short retry loop covers
-            // the case where the initial load landed on a connection-refused error page and
-            // the very first eval didn't take effect immediately.
-            if actual_port != SIDECAR_PORT {
-                if let Some(window) = handle.get_webview_window("main") {
+                // 端口标记到达 = Bun.serve 已在监听。窗口的静态 URL（tauri.conf.json）固定
+                // 是 8080：初始加载可能早于绑定而落在连接失败页（任何端口都会，包括 8080
+                // 本身），也可能端口顺延去了别处。守卫用 SPA 在 <head> 内联脚本设置的
+                // __RIKKAHUB_APP__ 旗标：旗标在且端口对 → 页面活着，不打扰；否则重导航。
+                // （旧实现只在非 8080 时导航、用 location.href 猜测，修不了 8080 死页。）
+                if let Some(window) = wait_handle.get_webview_window("main") {
                     let js = format!(
-                        "(function(){{var t='http://localhost:{p}';try{{if(location.href.indexOf(':{p}')===-1)location.replace(t)}}catch(e){{}}}})()",
+                        "(function(){{var t='http://localhost:{p}';try{{if(!window.__RIKKAHUB_APP__||location.port!=='{p}'){{location.replace(t)}}}}catch(e){{location.replace(t)}}}})()",
                         p = actual_port
                     );
-                    for _ in 0..6 {
+                    for _ in 0..3 {
                         let _ = window.eval(&js);
-                        thread::sleep(Duration::from_millis(250));
+                        thread::sleep(Duration::from_millis(700));
                     }
                 }
-            }
+            });
 
             if let Err(err) = build_tray(&handle) {
                 eprintln!("[tray] failed to build tray icon: {err}");

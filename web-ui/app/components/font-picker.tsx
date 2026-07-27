@@ -25,6 +25,7 @@ import {
 } from "~/components/ui/popover";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { useTranslation } from "react-i18next";
+import { confirmDialog } from "~/stores/confirm-store";
 
 // 通用 CSS 栈选项(无字体文件,前端固定)。id 保持稳定以兼容老用户已存的 uiFontFamily 值。
 interface GenericFontOption {
@@ -342,6 +343,8 @@ export function FontManagerDialog({ open, onClose, onChanged }: FontManagerDialo
   }
 
   async function handleDelete(fileName: string) {
+    // R8-1 同模式收口:自定义字体文件删除也是破坏性动作,必须确认
+    if (!(await confirmDialog({ title: t("font_picker.delete_confirm", { name: fileName }), danger: true }))) return;
     setDeletingName(fileName);
     try {
       await api.delete(`fonts/custom/${encodeURIComponent(fileName)}`);

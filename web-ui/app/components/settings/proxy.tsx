@@ -3,25 +3,14 @@
 import * as React from "react";
 import { useTranslation } from "react-i18next";
 import { Eye, EyeOff, Globe, Loader2, RefreshCw, Zap } from "lucide-react";
-import type { Settings } from "~/types";
+import type { ProxyConfig, ProxyMode, Settings } from "~/types";
 import { toast } from "sonner";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
+import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import api from "~/services/api";
 import { SectionHeader } from "~/components/settings/shared";
-
-type ProxyMode = "auto" | "manual" | "direct" | "env";
-
-interface ProxyConfig {
-  mode: ProxyMode;
-  url: string;
-  username: string;
-  password: string;
-  // 代理绕过规则 (逗号分隔域名/通配符): 命中的 URL 直连不走代理。
-  // localhost/127.0.0.1/::1 永远 bypass (后端硬编码)。仅 auto/manual 生效。
-  bypassRules: string;
-}
 
 interface ProxyStatus {
   activeUrl: string | null;
@@ -86,7 +75,8 @@ export function ProxySection({
   onSettings: (settings: Settings) => void;
 }) {
   const { t } = useTranslation();
-  const initial = (settings.proxyConfig ?? { mode: "auto" as ProxyMode, url: "", username: "", password: "", bypassRules: "" }) as ProxyConfig;
+  // settings.proxyConfig 由服务端 normalizeState 保证在场,类型单源后无需兜底。
+  const initial = settings.proxyConfig;
   const [draft, setDraft] = React.useState<ProxyConfig>(initial);
   const [showPassword, setShowPassword] = React.useState(false);
   const [detecting, setDetecting] = React.useState(false);
@@ -104,14 +94,49 @@ export function ProxySection({
   }, []);
   const [testResult, setTestResult] = React.useState<{ ok: boolean; status?: number; latencyMs?: number; error?: string } | null>(null);
   const [status, setStatus] = React.useState<ProxyStatus | null>(null);
-  const dirtyRef = React.useRef(false);
+
+  // R8-2:防抖自动保存统一走共享三件套 hook(保存窗口内键击不丢,语义见 hook 文件头)。
+  const autosave = useAutosaveDraft(
+    async () => {
+      // P0-2: Bun fetch 静默丢弃 SOCKS 代理(表现成直连失败), 在保存前拦截 ——
+      // 否则用户保存后看到"已保存"却所有请求失败, 极难排查。仅 manual 模式需校验
+      // (其它模式 url 字段被后端忽略)。校验不过:toast 后按"本轮已处理"返回,
+      // 用户继续补全 URL 会重新置脏触发下一轮。
+      if (draft.mode === "manual") {
+        const trimmedUrl = draft.url.trim();
+        if (/^socks/i.test(trimmedUrl)) {
+          toast.error(t("settings:proxy.socks_not_supported"));
+          return;
+        }
+        if (trimmedUrl && !isValidProxyUrl(trimmedUrl)) {
+          toast.error(t("settings:proxy.url_invalid"));
+          return;
+        }
+      }
+      const result = await api.post<{ config: ProxyConfig } & ProxyStatus>("settings/proxy", draft);
+      onSettings({ ...settings, proxyConfig: result.config });
+      setStatus({
+        activeUrl: result.activeUrl,
+        source: result.source,
+        detectedSystemProxy: result.detectedSystemProxy,
+        mode: result.mode,
+        containerMode: result.containerMode,
+        runningPort: result.runningPort,
+      });
+    },
+    {
+      delayMs: 600,
+      onSaveError: (error) =>
+        toast.error(error instanceof Error ? error.message : t("settings:proxy.save_failed")),
+    },
+  );
 
   React.useEffect(() => {
     // Only adopt the settings-prop value when the user isn't mid-edit. Without this guard,
     // a save round-trip races with continued typing: the SSE push of the (older) saved
     // value arrives a few ms after the user has typed another character, and naively
     // resetting `draft` from `initial` would wipe those new keystrokes.
-    if (dirtyRef.current) return;
+    if (autosave.isDirty()) return;
     setDraft(initial);
   }, [initial.mode, initial.url, initial.username, initial.password, initial.bypassRules]);
 
@@ -134,55 +159,9 @@ export function ProxySection({
   }, [refreshStatus]);
 
   const patch = (next: Partial<ProxyConfig>) => {
-    dirtyRef.current = true;
+    autosave.markDirty();
     setDraft((prev) => ({ ...prev, ...next }));
   };
-
-  const save = React.useCallback(
-    async (announce = false) => {
-      if (!announce && !dirtyRef.current) return;
-      // P0-2: Bun fetch 静默丢弃 SOCKS 代理(表现成直连失败), 在保存前拦截 ——
-      // 否则用户保存后看到"已保存"却所有请求失败, 极难排查。仅 manual 模式需校验
-      // (其它模式 url 字段被后端忽略)。
-      if (draft.mode === "manual") {
-        const trimmedUrl = draft.url.trim();
-        if (/^socks/i.test(trimmedUrl)) {
-          toast.error(t("settings:proxy.socks_not_supported"));
-          return;
-        }
-        if (trimmedUrl && !isValidProxyUrl(trimmedUrl)) {
-          toast.error(t("settings:proxy.url_invalid"));
-          return;
-        }
-      }
-      try {
-        const result = await api.post<{ config: ProxyConfig } & ProxyStatus>(
-          "settings/proxy",
-          draft,
-        );
-        dirtyRef.current = false;
-        onSettings({ ...settings, proxyConfig: result.config } as Settings);
-        setStatus({
-          activeUrl: result.activeUrl,
-          source: result.source,
-          detectedSystemProxy: result.detectedSystemProxy,
-          mode: result.mode,
-          containerMode: result.containerMode,
-          runningPort: result.runningPort,
-        });
-        if (announce) toast.success(t("settings:proxy.saved"));
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : t("settings:proxy.save_failed"));
-      }
-    },
-    [draft, onSettings, settings],
-  );
-
-  React.useEffect(() => {
-    if (!dirtyRef.current) return;
-    const timer = window.setTimeout(() => void save(false), 600);
-    return () => window.clearTimeout(timer);
-  }, [draft, save]);
 
   const detectSystemProxy = async () => {
     setDetecting(true);
@@ -226,16 +205,8 @@ export function ProxySection({
   const [portDraft, setPortDraft] = React.useState<string>(
     initialPort == null ? "" : String(initialPort),
   );
-  const portDirtyRef = React.useRef(false);
-
-  React.useEffect(() => {
-    // 同代理 draft 的保护：用户正在输入时不让 SSE 回推覆盖，避免吞掉刚敲的字符。
-    if (portDirtyRef.current) return;
-    setPortDraft(initialPort == null ? "" : String(initialPort));
-  }, [initialPort]);
-
-  const savePort = React.useCallback(
-    async (announce = false) => {
+  const portAutosave = useAutosaveDraft(
+    async () => {
       const trimmed = portDraft.trim();
       const parsed = trimmed === "" ? null : Number(trimmed);
       if (
@@ -245,24 +216,21 @@ export function ProxySection({
         toast.error(t("settings:proxy.port_invalid"));
         return;
       }
-      if (!announce && !portDirtyRef.current) return;
-      try {
-        await api.post<{ preferredPort: number | null }>("settings/port", { port: parsed });
-        portDirtyRef.current = false;
-        onSettings({ ...settings, preferredPort: parsed } as Settings);
-        if (announce) toast.success(t("settings:proxy.port_saved"));
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : t("settings:proxy.port_save_failed"));
-      }
+      await api.post<{ preferredPort: number | null }>("settings/port", { port: parsed });
+      onSettings({ ...settings, preferredPort: parsed });
     },
-    [portDraft, onSettings, settings],
+    {
+      delayMs: 600,
+      onSaveError: (error) =>
+        toast.error(error instanceof Error ? error.message : t("settings:proxy.port_save_failed")),
+    },
   );
 
   React.useEffect(() => {
-    if (!portDirtyRef.current) return;
-    const timer = window.setTimeout(() => void savePort(false), 600);
-    return () => window.clearTimeout(timer);
-  }, [portDraft, savePort]);
+    // 同代理 draft 的保护：用户正在输入时不让 SSE 回推覆盖，避免吞掉刚敲的字符。
+    if (portAutosave.isDirty()) return;
+    setPortDraft(initialPort == null ? "" : String(initialPort));
+  }, [initialPort]);
 
   const activeDisplay = status?.activeUrl
     ? status.source === "system"
@@ -466,7 +434,7 @@ export function ProxySection({
               inputMode="numeric"
               value={portDraft}
               onChange={(event) => {
-                portDirtyRef.current = true;
+                portAutosave.markDirty();
                 setPortDraft(event.target.value);
               }}
               placeholder="8080"
