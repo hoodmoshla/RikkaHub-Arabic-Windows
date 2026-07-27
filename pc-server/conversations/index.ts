@@ -62,7 +62,6 @@ export function ensureConversationTables(db: InstanceType<typeof Database>): voi
       assistant_id    TEXT NOT NULL,
       title           TEXT NOT NULL DEFAULT '',
       system_prompt   TEXT NOT NULL DEFAULT '',
-      truncate_index  INTEGER NOT NULL DEFAULT -1,
       suggestions     TEXT NOT NULL DEFAULT '[]',
       is_pinned       INTEGER NOT NULL DEFAULT 0,
       create_at       INTEGER NOT NULL,
@@ -80,6 +79,21 @@ export function ensureConversationTables(db: InstanceType<typeof Database>): voi
   `);
 }
 
+/** 1.5.0 跟进安卓 Migration_16_17:废弃"清除上下文"机制,删除 truncate_index 列。
+ *  替代机制与安卓一致——助手级"上下文消息数量"(contextMessageSize)+ 压缩对话历史。
+ *  老库多这一列时一次性 DROP;失败仅告警(残留列有 DEFAULT,读写均不再引用,无害)。 */
+function dropTruncateIndexColumnIfPresent(db: InstanceType<typeof Database>): void {
+  try {
+    const cols = db.prepare("PRAGMA table_info(pc_conversation)").all() as { name: string }[];
+    if (cols.some((c) => c.name === "truncate_index")) {
+      db.exec("ALTER TABLE pc_conversation DROP COLUMN truncate_index");
+      console.log("[conv-db] 已删除废弃列 pc_conversation.truncate_index(跟进安卓 Migration_16_17)");
+    }
+  } catch (err) {
+    console.warn("[conv-db] truncate_index 列清理失败(残留无害,下次启动重试)", err);
+  }
+}
+
 /** 实际打开 + PRAGMA + 建表。抛错时确保关闭句柄(Windows 文件锁),否则 rename 会失败。 */
 function openConversationsDbUnsafe(): InstanceType<typeof Database> {
   const db = new Database(conversationsDbPath, { create: true, readwrite: true });
@@ -93,6 +107,7 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA busy_timeout = 5000");
     ensureConversationTables(db);
+    dropTruncateIndexColumnIfPresent(db);
     ensureMessageFtsTable(db);
     // FTS 自愈重建：老库首次升级（表刚建、空）或索引意外丢失时，从节点表全量重建。
     // 幂等：行数>0 时零成本跳过。
@@ -118,7 +133,7 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
 /** 读取全部会话元数据(不 parse 节点 JSON,messages 置空)。迁移/合并路径用。 */
 export function loadConversationMetasFromDb(db: InstanceType<typeof Database>): Conversation[] {
   const convRows = db.prepare(
-    "SELECT id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at FROM pc_conversation ORDER BY create_at DESC, id DESC",
+    "SELECT id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at FROM pc_conversation ORDER BY create_at DESC, id DESC",
   ).all() as PcConversationRow[];
   return convRows.map((row) => ({
     id: row.id,
@@ -126,7 +141,6 @@ export function loadConversationMetasFromDb(db: InstanceType<typeof Database>): 
     systemPrompt: row.system_prompt || null,
     title: row.title ?? "",
     messages: [],
-    truncateIndex: typeof row.truncate_index === "number" ? row.truncate_index : -1,
     chatSuggestions: safeParseStringArray(row.suggestions),
     isPinned: row.is_pinned === 1,
     createAt: row.create_at,
@@ -243,9 +257,9 @@ function safeParseStringArray(raw: string): string[] {
 // 该会话全部节点行被级联清空。流式期间每 200ms flush 都 upsert 会话行,等于整个流式期间
 // 磁盘上只剩正在补写的脏节点;流式中途进程死亡 = 会话历史永久丢失。
 const UPSERT_CONVERSATION_SQL =
-  "INSERT INTO pc_conversation (id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+  "INSERT INTO pc_conversation (id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
   "ON CONFLICT(id) DO UPDATE SET assistant_id = excluded.assistant_id, title = excluded.title, system_prompt = excluded.system_prompt, " +
-  "truncate_index = excluded.truncate_index, suggestions = excluded.suggestions, is_pinned = excluded.is_pinned, create_at = excluded.create_at, update_at = excluded.update_at";
+  "suggestions = excluded.suggestions, is_pinned = excluded.is_pinned, create_at = excluded.create_at, update_at = excluded.update_at";
 
 const UPSERT_NODE_SQL =
   "INSERT INTO pc_message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?) " +
@@ -258,7 +272,6 @@ export function upsertConversationRowInto(db: InstanceType<typeof Database>, con
     conv.assistantId || DEFAULT_ASSISTANT_ID,
     conv.title || "",
     conv.systemPrompt ?? "",
-    typeof conv.truncateIndex === "number" ? conv.truncateIndex : -1,
     JSON.stringify(conv.chatSuggestions ?? []),
     conv.isPinned ? 1 : 0,
     conv.createAt || Date.now(),
@@ -446,7 +459,6 @@ export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, co
         conv.assistantId || DEFAULT_ASSISTANT_ID,
         conv.title || "",
         conv.systemPrompt ?? "",
-        typeof conv.truncateIndex === "number" ? conv.truncateIndex : -1,
         JSON.stringify(conv.chatSuggestions ?? []),
         conv.isPinned ? 1 : 0,
         conv.createAt || Date.now(),
@@ -484,7 +496,6 @@ export function exportPcConversationsDump(targetPath: string): number {
         assistant_id    TEXT NOT NULL,
         title           TEXT NOT NULL DEFAULT '',
         system_prompt   TEXT NOT NULL DEFAULT '',
-        truncate_index  INTEGER NOT NULL DEFAULT -1,
         suggestions     TEXT NOT NULL DEFAULT '[]',
         is_pinned       INTEGER NOT NULL DEFAULT 0,
         create_at       INTEGER NOT NULL,
@@ -498,7 +509,7 @@ export function exportPcConversationsDump(targetPath: string): number {
         select_index    INTEGER NOT NULL DEFAULT 0
       );
       INSERT INTO pcdump.pc_dump_meta (key, value) VALUES ('format', '1'), ('exportedAt', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-      INSERT INTO pcdump.pc_conversation SELECT id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at FROM main.pc_conversation;
+      INSERT INTO pcdump.pc_conversation SELECT id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at FROM main.pc_conversation;
       INSERT INTO pcdump.pc_message_node SELECT id, conversation_id, node_index, messages, select_index FROM main.pc_message_node;
     `);
     return (db.prepare("SELECT COUNT(*) AS n FROM pcdump.pc_conversation").get() as { n: number }).n;
@@ -560,15 +571,6 @@ export function toMessageNodeDtos(nodes: MessageNode[]): MessageNodeDto[] {
 }
 
 /** 把 Conversation 转成含生成状态快照的 DTO。 */
-/** 产品决策①(2-2):truncate 端点的下一状态。显式 index 时钳制到 [-1, nodeCount];
- *  否则安卓切换语义:已截到末尾 → 撤销(-1),否则截到当前节点数。 */
-export function nextTruncateIndex(current: number, nodeCount: number, explicit?: number): number {
-  if (typeof explicit === "number" && Number.isFinite(explicit)) {
-    return Math.max(-1, Math.min(nodeCount, Math.trunc(explicit)));
-  }
-  return current === nodeCount ? -1 : nodeCount;
-}
-
 export function toConversationDto(conversation: Conversation, isGenerating: boolean): ConversationDto {
   return { ...conversation, messages: toMessageNodeDtos(conversation.messages), isGenerating };
 }

@@ -36,7 +36,6 @@ function conv(idValue: string, nodes: MessageNode[], title = "会话"): Conversa
     title,
     systemPrompt: null,
     messages: nodes,
-    truncateIndex: -1,
     chatSuggestions: [],
     isPinned: false,
     createAt: 1000,
@@ -55,8 +54,8 @@ describe("2-0 P0 缺陷复现:INSERT OR REPLACE 会话行会级联清空节点",
     expect(nodeCount(db, "c1")).toBe(3);
     // 原缺陷的 SQL 形态:对已存在主键 REPLACE = 隐式 DELETE(触发 CASCADE)+ INSERT
     db.prepare(
-      "INSERT OR REPLACE INTO pc_conversation (id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run("c1", "a1", "标题更新", "", -1, "[]", 0, 1000, 3000);
+      "INSERT OR REPLACE INTO pc_conversation (id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("c1", "a1", "标题更新", "", "[]", 0, 1000, 3000);
     expect(nodeCount(db, "c1")).toBe(0); // ← 这就是数据丢失的机制
   });
 });

@@ -12,8 +12,7 @@ export interface MessageNode {
 
 /**
  * A persistent conversation thread between the user and an assistant. The messages form a
- * tree via MessageNode for branching; nodes before truncateIndex are excluded from the
- * upstream context ("clear context" divider, aligned with Android; <=0 means no truncation).
+ * tree via MessageNode for branching.
  */
 export interface Conversation {
   id: string;
@@ -21,7 +20,6 @@ export interface Conversation {
   systemPrompt?: string | null;
   title: string;
   messageNodes: MessageNode[];
-  truncateIndex: number;
   chatSuggestions: string[];
   isPinned: boolean;
   createAt: number;

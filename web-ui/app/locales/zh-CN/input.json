@@ -112,7 +112,6 @@
   },
   "resize_handle": "拖动调整输入框大小",
   "compress_history": "压缩对话历史",
-  "clear_context": "清除上下文",
   "optimize": {
     "title": "优化提示词",
     "slow_hint": "优化模型响应较慢,正在等待…",

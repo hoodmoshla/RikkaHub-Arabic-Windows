@@ -15,16 +15,16 @@ function seededDb(): Database {
   const db = new Database(":memory:");
   db.exec(`CREATE TABLE pc_conversation (
     id TEXT PRIMARY KEY NOT NULL, assistant_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
-    system_prompt TEXT NOT NULL DEFAULT '', truncate_index INTEGER NOT NULL DEFAULT -1,
+    system_prompt TEXT NOT NULL DEFAULT '',
     suggestions TEXT NOT NULL DEFAULT '[]', is_pinned INTEGER NOT NULL DEFAULT 0,
     create_at INTEGER NOT NULL, update_at INTEGER NOT NULL
   )`);
-  const ins = db.prepare("INSERT INTO pc_conversation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const ins = db.prepare("INSERT INTO pc_conversation VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
   // a1 三个会话：c3 最新建、c1 最旧建但最近更新；b-only 属于另一助手
-  ins.run("c1", "a1", "第一", "sys", 2, '["s"]', 1, 1000, 9000);
-  ins.run("c2", "a1", "第二", "", -1, "[]", 0, 2000, 2100);
-  ins.run("c3", "a1", "第三", "", -1, "{bad json", 0, 3000, 3100);
-  ins.run("b1", "a2", "别家", "", -1, "[]", 0, 5000, 5100);
+  ins.run("c1", "a1", "第一", "sys", '["s"]', 1, 1000, 9000);
+  ins.run("c2", "a1", "第二", "", "[]", 0, 2000, 2100);
+  ins.run("c3", "a1", "第三", "", "{bad json", 0, 3000, 3100);
+  ins.run("b1", "a2", "别家", "", "[]", 0, 5000, 5100);
   return db;
 }
 
@@ -40,7 +40,6 @@ describe("listConversationMetas", () => {
     const c1 = metas.find((m) => m.id === "c1")!;
     expect(c1.isPinned).toBe(true);
     expect(c1.systemPrompt).toBe("sys");
-    expect(c1.truncateIndex).toBe(2);
     expect(c1.chatSuggestions).toEqual(["s"]);
     const c3 = metas.find((m) => m.id === "c3")!;
     expect(c3.chatSuggestions).toEqual([]);

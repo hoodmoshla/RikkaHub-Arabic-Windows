@@ -32,7 +32,6 @@ function conversation(nodes: MessageNodeDto[]): ConversationDto {
     systemPrompt: null,
     title: "标题",
     messages: nodes,
-    truncateIndex: -1,
     chatSuggestions: [],
     isPinned: false,
     createAt: 1,

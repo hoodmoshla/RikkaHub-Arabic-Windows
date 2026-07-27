@@ -61,7 +61,9 @@ console.log("\n=== 场景 1:正常迁移(回归)===");
     check("API 返回 2 条会话", Array.isArray(data) && data.length === 2, `got ${JSON.stringify(data).slice(0, 100)}`);
     const detail = await (await fetch(`${baseUrl}/api/conversations/c1`)).json();
     check("systemPrompt 保留", detail.systemPrompt === "sp1", `got ${detail.systemPrompt}`);
-    check("truncateIndex 保留", detail.truncateIndex === 3, `got ${detail.truncateIndex}`);
+    // 1.5.0 跟进安卓 Migration_16_17:truncateIndex 机制废弃。老 state.json 的该字段
+    // (种子数据保留以模拟老格式)迁移时被丢弃,活库列被 DROP,API 不再返回。
+    check("truncateIndex 已移除(安卓对齐)", !("truncateIndex" in detail), `got ${detail.truncateIndex}`);
     const s = JSON.parse(readFileSync(join(tempDir, "state.json"), "utf8"));
     check("state.json 已瘦身(无 conversations)", !Array.isArray(s.conversations));
     check("迁移标记已写", Array.isArray(s.appliedMigrations) && s.appliedMigrations.includes("conversations-sqlite-1.2.6"));

@@ -57,7 +57,6 @@ export function ensureConversation(idValue: string) {
       systemPrompt: null,
       title: "",
       messages: presetMessageNodes(assistant),
-      truncateIndex: -1,
       chatSuggestions: [],
       isPinned: false,
       createAt: now,

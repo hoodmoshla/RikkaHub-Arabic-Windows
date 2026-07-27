@@ -212,7 +212,6 @@ export interface Conversation {
   systemPrompt: string | null;
   title: string;
   messages: MessageNode[];
-  truncateIndex: number;
   chatSuggestions: string[];
   isPinned: boolean;
   createAt: number;
@@ -389,8 +388,7 @@ export interface MemorySnapshot {
 // 会话活库(SQLite,1.2.6 引入)
 //
 // 会话从 state.json 搬进 rikka_hub.db,采用 Android APP 节点级 schema 的 PC 超集
-// (pc_conversation / pc_message_node,含 system_prompt / truncate_index——Android 备份库
-// 没有这两列)。DB-first:活库是唯一运行时权威,读路径直查,内存只驻留正在使用的实例
+// (pc_conversation / pc_message_node,含 system_prompt——Android 备份库没有这列)。DB-first:活库是唯一运行时权威,读路径直查,内存只驻留正在使用的实例
 // (conversations/working-set.ts 单一权威实例注册表);运行时写路径:
 //   - 流式热路径:只 upsert 当前在长的那个 pc_message_node 行(脏标记 + 200ms 节流),
 //     SQLite 只把脏页追加进 WAL,开销与总会话数/总数据量无关——这是根除"每 200ms 全量
@@ -408,7 +406,6 @@ export interface PcConversationRow {
   assistant_id: string;
   title: string;
   system_prompt: string;
-  truncate_index: number;
   suggestions: string;
   is_pinned: number;
   create_at: number;

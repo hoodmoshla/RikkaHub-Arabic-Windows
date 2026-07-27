@@ -11,7 +11,7 @@ function seededDb(): Database {
   db.exec(`
     CREATE TABLE pc_conversation (
       id TEXT PRIMARY KEY NOT NULL, assistant_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
-      system_prompt TEXT NOT NULL DEFAULT '', truncate_index INTEGER NOT NULL DEFAULT -1,
+      system_prompt TEXT NOT NULL DEFAULT '',
       suggestions TEXT NOT NULL DEFAULT '[]', is_pinned INTEGER NOT NULL DEFAULT 0,
       create_at INTEGER NOT NULL, update_at INTEGER NOT NULL
     );
@@ -20,9 +20,9 @@ function seededDb(): Database {
       messages TEXT NOT NULL DEFAULT '[]', select_index INTEGER NOT NULL DEFAULT 0
     );
   `);
-  const conv = db.prepare("INSERT INTO pc_conversation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  conv.run("c-new", "a1", "较新会话", "", -1, '["s1"]', 1, 2000, 2100);
-  conv.run("c-old", "a1", "较旧会话", "sys", 3, "[]", 0, 1000, 1100);
+  const conv = db.prepare("INSERT INTO pc_conversation VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  conv.run("c-new", "a1", "较新会话", "", '["s1"]', 1, 2000, 2100);
+  conv.run("c-old", "a1", "较旧会话", "sys", "[]", 0, 1000, 1100);
   const node = db.prepare("INSERT INTO pc_message_node VALUES (?, ?, ?, ?, ?)");
   const msgs = (texts: string[]) => JSON.stringify(texts.map((t) => message("USER", [{ type: "text", text: t }])));
   // 故意乱序插入，验证 node_index 排序
@@ -40,7 +40,6 @@ describe("loadConversationMetasFromDb", () => {
     expect(metas[0].isPinned).toBe(true);
     expect(metas[0].chatSuggestions).toEqual(["s1"]);
     expect(metas[1].systemPrompt).toBe("sys");
-    expect(metas[1].truncateIndex).toBe(3);
   });
 });
 

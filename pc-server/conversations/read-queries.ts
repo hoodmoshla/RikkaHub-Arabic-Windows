@@ -18,7 +18,6 @@ interface MetaRow {
   assistant_id: string;
   title: string;
   system_prompt: string;
-  truncate_index: number;
   suggestions: string;
   is_pinned: number;
   create_at: number;
@@ -37,7 +36,6 @@ function rowToMeta(row: MetaRow): ConversationMeta {
     systemPrompt: row.system_prompt || null,
     title: row.title ?? "",
     messages: [],
-    truncateIndex: typeof row.truncate_index === "number" ? row.truncate_index : -1,
     chatSuggestions,
     isPinned: row.is_pinned === 1,
     createAt: row.create_at,
@@ -45,7 +43,7 @@ function rowToMeta(row: MetaRow): ConversationMeta {
   };
 }
 
-const META_COLUMNS = "id, assistant_id, title, system_prompt, truncate_index, suggestions, is_pinned, create_at, update_at";
+const META_COLUMNS = "id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at";
 
 /**
  * 某助手的全部会话元数据，ORDER BY create_at DESC, id DESC——

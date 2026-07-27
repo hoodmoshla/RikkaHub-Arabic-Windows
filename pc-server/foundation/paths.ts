@@ -22,7 +22,7 @@ export const statePath = join(dataDir, "state.json");
 // 会话活库（SQLite，WAL）。1.2.6：会话从 state.json 迁出，改用 SQLite 增量写——流式只
 // upsert 当前在长的那个节点行，不再每 200ms 全量重写 state.json。与备份库（导出时现场
 // 生成、Android 兼容）是不同文件/表名/schema：活库 pc_conversation/pc_message_node 为 PC
-// 超集（含 system_prompt / truncate_index，Android 备份库没有这两列）。
+// 超集（含 system_prompt，Android 备份库没有这列）。
 // 详见 conversation-persistence-design.md。
 export const conversationsDbPath = join(dataDir, "rikka_hub.db");
 export const skipVersionPath = join(dataDir, "skip-version.txt");

@@ -43,7 +43,6 @@ const conv = {
   title: "t",
   systemPrompt: null,
   messages: [node],
-  truncateIndex: -1,
   chatSuggestions: [],
   isPinned: false,
   createAt: 1,

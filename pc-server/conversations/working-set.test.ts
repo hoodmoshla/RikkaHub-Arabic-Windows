@@ -17,7 +17,7 @@ import type { Conversation } from "../foundation/types";
 function conv(id: string): Conversation {
   return {
     id, assistantId: "a1", systemPrompt: null, title: id, messages: [],
-    truncateIndex: -1, chatSuggestions: [], isPinned: false, createAt: 1, updateAt: 1,
+    chatSuggestions: [], isPinned: false, createAt: 1, updateAt: 1,
   };
 }
 

@@ -50,7 +50,6 @@ function makeConversation(id: string): Conversation {
         ],
       },
     ],
-    truncateIndex: -1,
     isPinned: false,
     createAt: now,
     updateAt: now,

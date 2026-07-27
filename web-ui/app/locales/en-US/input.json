@@ -112,7 +112,6 @@
   },
   "resize_handle": "Drag to resize the input box",
   "compress_history": "Compress conversation history",
-  "clear_context": "Clear context",
   "optimize": {
     "title": "Optimize prompt",
     "slow_hint": "The optimizer model is responding slowly, waiting…",

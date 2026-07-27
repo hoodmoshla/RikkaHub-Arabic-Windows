@@ -420,7 +420,6 @@ export async function compressConversation(conversation: Conversation, additiona
     ...summaries.filter(Boolean).map((summary) => ({ id: id(), messages: [message("USER", [{ type: "text", text: summary }])], selectIndex: 0 })),
     ...messagesToKeep.map((msg) => ({ id: id(), messages: [JSON.parse(JSON.stringify(msg))], selectIndex: 0 })),
   ];
-  conversation.truncateIndex = 0;
   conversation.chatSuggestions = [];
   conversation.updateAt = Date.now();
   persistConversation(conversation);
