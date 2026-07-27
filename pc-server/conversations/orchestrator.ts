@@ -2,6 +2,7 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3g），行为不变。推理引擎经 GenerationEvent sink 与本层解耦。
 
 import type { ApiMessage, Assistant, Conversation, JsonValue, Message, MessageNode, Model, Provider, StreamHooks, ToolPendingOutput } from "../foundation/types";
+import { bumpAnalyticsErrCount } from "../app-config/analytics";
 import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolExecutor } from "../inference-engine/events";
 import { id, isRecord, message, textFromParts } from "../foundation/utils";
 import { classifyProxyError } from "../foundation/net";
@@ -642,6 +643,8 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
       });
       return;
     }
+    // 匿名遥测:只记"发生了一次 provider 失败",不采集错误内容/模型/服务商。
+    bumpAnalyticsErrCount();
     const rawContent = err instanceof Error ? err.message : String(err);
     const proxyHint = classifyProxyError(err, state.settings.proxyConfig);
     const failureText = proxyHint ?? `请求失败：${rawContent}`;

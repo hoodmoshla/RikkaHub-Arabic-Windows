@@ -1,5 +1,8 @@
 // app-config/analytics.ts — 匿名 DAU 统计（一启动一 ping，绝不打扰用户，详见下方设计准则注释）
-// 纪律：纯搬迁自 server.ts（阶段 5.3h），行为不变。
+// 纪律：搬迁自 server.ts（阶段 5.3h）。仅发送当日计数——设备 UUID、日期、版本、OS,外加:
+//   mc = 消息数        hb = 心跳数(≈ 当日使用时长 / 10 分钟)
+//   er = provider 失败  fs/ft/fm/fi = 搜索 / TTS / MCP / 图像生成 使用次数
+// 不采集用户内容、IP、模型名、文件名、查询词。服务端只按 MAX 合并当日计数,每天归零。
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { deviceIdPath } from "../foundation/paths";
@@ -8,8 +11,30 @@ import { APP_VERSION } from "../updates/index";
 const ANALYTICS_ENDPOINT = "https://rikkahub-desktop.pages.dev/ping";
 let analyticsDeviceId = "";
 let analyticsMsgCount = 0;
-// 3.5c-4: 会话路由迁至 api/handlers/conversations.ts 后，经此函数递增计数（let 变量无法跨模块赋值）。
+let analyticsHbCount = 0;      // 心跳数:每次 ping +1,≈ 当日使用时长 / 10 分钟
+let analyticsErrCount = 0;     // provider 请求失败数(不含用户主动中断)
+let analyticsSearchCount = 0;  // search_web / scrape_web 执行次数
+let analyticsTtsCount = 0;     // TTS 朗读次数
+let analyticsMcpCount = 0;     // MCP 工具调用次数
+let analyticsImgCount = 0;     // 图像生成次数
+
+// 3.5c-4: 埋点分散在各域模块(会话/工具/媒体),经函数递增计数(let 变量无法跨模块赋值)。
 export function bumpAnalyticsMsgCount() { analyticsMsgCount++; }
+export function bumpAnalyticsErrCount() { analyticsErrCount++; }
+export function bumpAnalyticsSearchCount() { analyticsSearchCount++; }
+export function bumpAnalyticsTtsCount() { analyticsTtsCount++; }
+export function bumpAnalyticsMcpCount() { analyticsMcpCount++; }
+export function bumpAnalyticsImgCount() { analyticsImgCount++; }
+
+function resetAnalyticsCounters(): void {
+  analyticsMsgCount = 0;
+  analyticsHbCount = 0;
+  analyticsErrCount = 0;
+  analyticsSearchCount = 0;
+  analyticsTtsCount = 0;
+  analyticsMcpCount = 0;
+  analyticsImgCount = 0;
+}
 
 function readOrCreateDeviceId(): string {
   try { return readFileSync(deviceIdPath, "utf-8").trim(); } catch { /* not found */ }
@@ -34,11 +59,18 @@ function analyticsOs(): string {
 
 function sendAnalyticsPing(): void {
   if (!analyticsDeviceId) return;
+  analyticsHbCount++; // 每次 ping 即一跳(启动 + 每 10 分钟),服务端按 MAX 合并
   const url = `${ANALYTICS_ENDPOINT}?id=${encodeURIComponent(analyticsDeviceId)}`
     + `&d=${localDateStr()}`
     + `&v=${encodeURIComponent(APP_VERSION)}`
     + `&os=${analyticsOs()}`
-    + `&mc=${analyticsMsgCount}`;
+    + `&mc=${analyticsMsgCount}`
+    + `&hb=${analyticsHbCount}`
+    + `&er=${analyticsErrCount}`
+    + `&fs=${analyticsSearchCount}`
+    + `&ft=${analyticsTtsCount}`
+    + `&fm=${analyticsMcpCount}`
+    + `&fi=${analyticsImgCount}`;
   // 三重静默防御:
   //   (1) try/catch 包裹同步部分,防 fetch() 同步抛错(比如 URL 不合法)
   //   (2) AbortSignal.timeout 限制网络等待,DNS 失败/连接超时都会被吞
@@ -61,7 +93,7 @@ export function startAnalytics(): void {
     sendAnalyticsPing(); // startup ping
     setInterval(() => {
       const now = localDateStr();
-      if (now !== lastDate) { analyticsMsgCount = 0; lastDate = now; }
+      if (now !== lastDate) { resetAnalyticsCounters(); lastDate = now; }
       sendAnalyticsPing();
     }, 10 * 60 * 1000); // every 10 minutes
   } catch { /* analytics must never break the app */ }

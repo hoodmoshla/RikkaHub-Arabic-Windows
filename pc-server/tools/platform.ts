@@ -2,6 +2,7 @@
 // 纪律：只封装 OS 命令调用，不依赖业务状态。
 
 import { existsSync, rmSync, readFileSync } from "node:fs";
+import { bumpAnalyticsTtsCount } from "../app-config/analytics";
 import { join } from "node:path";
 import { tempDir } from "../foundation/platform";
 
@@ -82,6 +83,7 @@ let systemTtsChain: Promise<void> = Promise.resolve();
 const activeSystemTtsProcs = new Set<ReturnType<typeof Bun.spawn>>();
 
 export async function speakSystemText(text: string, speechRate = 1) {
+  bumpAnalyticsTtsCount();
   const prev = systemTtsChain;
   let release: () => void = () => {};
   systemTtsChain = new Promise<void>((resolve): void => { release = resolve; });

@@ -3,6 +3,7 @@
 // 请求日志暂经 ../server 的 addLog 记录（3.5 拆 api/ 时收敛）。
 
 import { readFileSync, statSync } from "node:fs";
+import { bumpAnalyticsImgCount } from "../app-config/analytics";
 import { fetchWithTimeout } from "../foundation/net";
 import { join } from "node:path";
 import type { GeneratedImage, JsonValue, Model, StoredFile } from "../foundation/types";
@@ -114,6 +115,7 @@ export async function callImageGeneration(input: {
    *  临时改写全局 state——并发窗口内其他生图请求会读到串味模型。 */
   overrideModelUuid?: string;
 }) {
+  bumpAnalyticsImgCount();
   const picked = findModel(input.overrideModelUuid || state.settings.imageGenerationModelId);
   const providerItem = picked.provider;
   const modelItem = picked.model;

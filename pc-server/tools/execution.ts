@@ -2,6 +2,7 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3e），行为不变。
 
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { bumpAnalyticsMcpCount, bumpAnalyticsSearchCount } from "../app-config/analytics";
 import { join } from "node:path";
 import type { Assistant, JsonValue, MessagePart, StoredFile, ToolOutputEntry } from "../foundation/types";
 import type { ToolResult } from "../inference-engine/events";
@@ -88,12 +89,14 @@ export async function executeToolCall(
         "Web search is currently disabled. Stop calling search_web and answer from your own knowledge, or ask the user to re-enable web search.",
       );
     }
+    bumpAnalyticsSearchCount();
     return runSearchWeb(args);
   }
   if (name === "scrape_web") {
     if (!state.settings.enableWebSearch) {
       throw new Error("Web search is currently disabled. Stop calling scrape_web.");
     }
+    bumpAnalyticsSearchCount();
     return runScrapeWeb(args);
   }
   if (name === "get_time_info") return runGetTimeInfoTool();
@@ -115,6 +118,7 @@ export async function executeToolCall(
     return { name: skillName, content };
   }
   if (name.startsWith("mcp__")) {
+    bumpAnalyticsMcpCount();
     return callMcpTool(assistant, name, args, state.settings.mcpServers, addLog);
   }
   throw new Error(`Unknown tool: ${name}`);
