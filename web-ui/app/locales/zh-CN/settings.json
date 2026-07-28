@@ -759,7 +759,7 @@
     "disabled": "未启用",
     "webdav_title": "WebDAV 备份",
     "chat_unsyncable": "对话不可同步",
-    "webdav_desc": "通过 WebDAV 测试连接、立即备份、列出远端备份、恢复或删除。备份内容包含本地 JSON 状态、Skills 与上传文件。",
+    "webdav_desc": "通过 WebDAV 测试连接、立即备份、列出远端备份、恢复或删除。备份内容与本地导出一致：全部配置、对话记录、附件、Skills 与字体，可在 PC 端与手机端导入。",
     "server_url": "服务器地址",
     "backup_path": "备份路径",
     "item_database": "设置与会话",

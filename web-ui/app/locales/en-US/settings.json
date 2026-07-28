@@ -759,7 +759,7 @@
     "disabled": "disabled",
     "webdav_title": "WebDAV backup",
     "chat_unsyncable": "chats not synced",
-    "webdav_desc": "Test the connection, back up now, list remote backups, restore or delete. Backups include the local JSON state, Skills and uploaded files.",
+    "webdav_desc": "Test the connection, back up now, list remote backups, restore or delete. Backups match local exports: all settings, conversations, attachments, Skills and fonts, importable on both PC and phone.",
     "server_url": "Server URL",
     "backup_path": "Backup path",
     "item_database": "Settings & conversations",
