@@ -28,7 +28,7 @@ export function defaultAssistant(): Assistant {
     systemPrompt: "",
     temperature: null,
     topP: null,
-    contextMessageSize: 0,
+    contextMessageLimit: 0,
     streamOutput: true,
     enableMemory: false,
     useGlobalMemory: false,

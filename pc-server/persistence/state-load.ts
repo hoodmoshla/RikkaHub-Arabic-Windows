@@ -26,7 +26,7 @@ import { NA_API_PRESET_MODELS, NA_API_PROVIDER_ID, SUNSET_PROVIDER_IDS, TENCENT_
 import { normalizeTtsProviders } from "../media/tts";
 import { normalizeAsrProviders } from "../media/asr";
 import { normalizeS3Config, normalizeWebDavConfig } from "../app-config/backup-config";
-import { hashFileSha256, rewritePcFileUrlsDeep } from "../backup/file-refs";
+import { hashFileSha256, rewriteAndroidFileUrlsDeep, rewritePcFileUrlsDeep } from "../backup/file-refs";
 import { writeExtractedTextSidecar } from "../files/index";
 import { rebuildFtsFromNodeTable } from "../conversations/fts";
 import { normalizeRequestStats } from "../api/logs";
@@ -97,12 +97,22 @@ export function normalizeState(input: Partial<State>): State {
   normalized.settings.assistants = mergeById(normalized.settings.assistants ?? [], defaults.assistants);
   // Backfill mcpToolOverrides for assistants saved before this field existed. Default empty
   // object = inherit all globally-enabled tools, no per-assistant overrides applied.
-  normalized.settings.assistants = normalized.settings.assistants.map((assistant) => ({
-    ...assistant,
-    mcpToolOverrides: isRecord(assistant.mcpToolOverrides)
-      ? assistant.mcpToolOverrides as Record<string, Record<string, { enable?: boolean; needsApproval?: boolean }>>
-      : {},
-  }));
+  normalized.settings.assistants = normalized.settings.assistants.map((assistant) => {
+    // 专题3 F-1:安卓把 contextMessageSize 改名为 contextMessageLimit(语义不变:上下文
+    // 最多携带的消息条数,0 = 不限),PC 同名对齐备份契约。老 state/旧备份里的旧键在此
+    // 一次性搬运并丢弃(显式解构剔除,避免残留键随导出流向安卓)。幂等:新键已存在时
+    // 旧键只被丢弃、不覆盖。
+    const { contextMessageSize: legacyLimit, ...rest } = assistant as typeof assistant & { contextMessageSize?: unknown };
+    return {
+      ...rest,
+      contextMessageLimit: typeof rest.contextMessageLimit === "number"
+        ? rest.contextMessageLimit
+        : (typeof legacyLimit === "number" ? legacyLimit : 0),
+      mcpToolOverrides: isRecord(assistant.mcpToolOverrides)
+        ? assistant.mcpToolOverrides as Record<string, Record<string, { enable?: boolean; needsApproval?: boolean }>>
+        : {},
+    };
+  });
   // memorySettings 规范化 + M1 迁移推断:老用户首次升级(settings 无 memorySettings)时,
   // 若所有助手 enableMemory=false,globalEnabled 默认 false(避免被动注入全局,违背用户意愿);
   // 否则默认 true。用户设过 memorySettings(存在)则保留,仅校验 writeStrategy 合法性。
@@ -191,6 +201,26 @@ export function normalizeState(input: Partial<State>): State {
       (a, b) => builtinProviderRank(a) - builtinProviderRank(b),
     );
     normalized.appliedMigrations = [...appliedMigrations, PROVIDER_REORDER_MIGRATION];
+  }
+  // 专题3 H-1 存量自愈:历史版本的安卓 zip 导入只改写消息里的 file:///…/upload/<name>
+  // 引用,settings(助手/用户头像等)漏改,安卓私有路径在 PC 上永远无法解析(头像丢失)。
+  // file ledger 的 fileName 保留安卓原始文件名,可精确回链成 /api/files/<id>/content。
+  // 只动 file:// 形态字符串(fileSchemeOnly),改写后不再匹配 → 天然幂等;新导入已在
+  // backup/import.ts 就地改写,此处专救存量数据。
+  if (JSON.stringify(normalized.settings).includes("file://")) {
+    const uploadNameToId = new Map<string, number>();
+    for (const f of normalized.files) {
+      if (f && typeof f.fileName === "string" && f.fileName && typeof f.id === "number" && !uploadNameToId.has(f.fileName)) {
+        uploadNameToId.set(f.fileName, f.id);
+      }
+    }
+    if (uploadNameToId.size > 0) {
+      normalized.settings = rewriteAndroidFileUrlsDeep(
+        normalized.settings as unknown as JsonValue,
+        uploadNameToId,
+        { fileSchemeOnly: true },
+      ) as unknown as State["settings"];
+    }
   }
   // 全面审查 R1-12(终极版):内置搜索服务的补齐/回填必须尊重删除墓碑。此前"按 type
   // 缺了就补"每次启动都跑,用户删掉的内置项重启必复活;一次性迁移标记也不彻底——

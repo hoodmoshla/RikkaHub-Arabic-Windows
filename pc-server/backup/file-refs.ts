@@ -32,6 +32,31 @@ export function collectPcFileRefs(jsonText: string, into: Set<number>): void {
   for (const m of jsonText.matchAll(PC_FILE_URL_RE)) into.add(Number(m[1]));
 }
 
+/** 把安卓 upload 引用改写成 PC 形态。匹配最后一段 upload/<name>(安卓原生 URI 是
+ *  file:///data/user/0/me.rerere.rikkahub/files/upload/<name>),文件名在映射里才改写,
+ *  未知 URL 原样透传。fileSchemeOnly 供 settings 场景使用:只动 file:// 开头的字符串,
+ *  避免用户提示词等普通文本里碰巧出现 "upload/<某文件名>" 被误改。 */
+export function rewriteAndroidFileUrl(url: string, map: Map<string, number>, opts: { fileSchemeOnly?: boolean } = {}): string {
+  if (opts.fileSchemeOnly && !url.startsWith("file://")) return url;
+  const match = url.match(/(?:^|[/\\])upload[/\\]([^/\\?#]+)/);
+  if (!match) return url;
+  const pcId = map.get(match[1]);
+  if (pcId === undefined) return url;
+  return `/api/files/${pcId}/content`;
+}
+
+/** 深改写任意 JSON 值中的安卓 upload 引用(语义见 rewriteAndroidFileUrl)。 */
+export function rewriteAndroidFileUrlsDeep(value: JsonValue, map: Map<string, number>, opts: { fileSchemeOnly?: boolean } = {}): JsonValue {
+  if (typeof value === "string") return rewriteAndroidFileUrl(value, map, opts);
+  if (Array.isArray(value)) return value.map((v) => rewriteAndroidFileUrlsDeep(v, map, opts));
+  if (value && typeof value === "object") {
+    const out: Record<string, JsonValue> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = rewriteAndroidFileUrlsDeep(v as JsonValue, map, opts);
+    return out;
+  }
+  return value;
+}
+
 /** 深改写任意 JSON 值中的 /api/files/<id>/content 引用;map 未命中的 id 原样保留。 */
 export function rewritePcFileUrlsDeep(value: JsonValue, idMap: Map<number, number>): JsonValue {
   if (typeof value === "string") {

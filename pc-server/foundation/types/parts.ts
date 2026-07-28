@@ -99,3 +99,13 @@ export type MessagePart =
   | ReasoningPart
   | ToolPart
   | LoadingPart;
+
+/** 专题3 批4:PC 消息 part 判别符注册表(联合类型的运行时镜像)。MessagePart 新增成员
+ *  而不登记于此 = 编译失败(下方双向断言);登记后 android-contract-sync.test.ts 会强制
+ *  声明其安卓兼容性(安卓 UIMessagePart 已知类型 or 导出过滤黑名单 PC_ONLY_MESSAGE_PART_TYPES)。 */
+export const PC_MESSAGE_PART_TYPES = ["text", "image", "video", "audio", "document", "reasoning", "tool", "loading"] as const;
+type AssertTrue<T extends true> = T;
+type MutuallyEqual<A extends string, B extends string> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+export type _PartRegistryComplete = AssertTrue<
+  MutuallyEqual<(typeof PC_MESSAGE_PART_TYPES)[number], MessagePart["type"]>
+>;

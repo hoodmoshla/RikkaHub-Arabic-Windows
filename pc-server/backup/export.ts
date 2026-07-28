@@ -16,6 +16,8 @@ import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
 import { DEFAULT_ASSISTANT_ID, exportPcConversationsDump, flushConvDirtyNow, getConversationsDb, loadConversationNodesFromDb } from "../conversations";
 import { listAllConversationMetas } from "../conversations/read-queries";
 import { collectPcFileRefs, hashFileSha256 } from "./file-refs";
+import { createZipFromDirectory } from "./zip";
+import androidSchemaV24 from "./android-schema-v24.json";
 import { exportSkills } from "../tools";
 
 export function copyDirRecursive(src: string, dest: string): number {
@@ -140,11 +142,9 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
       if (stripPcOnly) {
         // reasoningLevel: PC uses "AUTO", Android expects "auto"
         if (typeof fixed.reasoningLevel === "string") fixed.reasoningLevel = fixed.reasoningLevel.toLowerCase();
-        // presetMessages role: PC uses "USER"/"ASSISTANT", Android expects "user"/"assistant"
+        // 专题3 A-1:preset 消息统一成安卓 UIMessage 形状,详见 toAndroidPresetMessage。
         if (Array.isArray(fixed.presetMessages)) {
-          fixed.presetMessages = fixed.presetMessages.map((pm: any) =>
-            isRecord(pm) && typeof pm.role === "string" ? { ...pm, role: pm.role.toLowerCase() } : pm,
-          );
+          fixed.presetMessages = fixed.presetMessages.map(toAndroidPresetMessage);
         }
         // Strip PC-only assistant fields that Android doesn't have.
         // 安卓对齐批6:allowConversationSystemPrompt 已是安卓正式字段(Assistant.kt),
@@ -188,6 +188,20 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
     delete copy.proxyConfig;
     delete copy.preferredPort;
     delete copy.keybindings;
+    // 专题3 S-1(机制,详见 filterSearchServicesForAndroid):PC-only 搜索服务过滤 +
+    // 选中下标修正;全被过滤时删键,让安卓走自身默认值(避免空列表越界)。
+    if (Array.isArray(copy.searchServices)) {
+      const filtered = filterSearchServicesForAndroid(copy.searchServices, copy.searchServiceSelected);
+      if (filtered.services.length !== copy.searchServices.length) {
+        if (filtered.services.length === 0) {
+          delete copy.searchServices;
+          delete copy.searchServiceSelected;
+        } else {
+          copy.searchServices = filtered.services;
+          copy.searchServiceSelected = filtered.selectedIndex;
+        }
+      }
+    }
     // Fix empty-string UUID fields — Android's Uuid deserializer rejects ""
     const uuidFields = ["chatModelId", "titleModelId", "translateModeId", "suggestionModelId", "imageGenerationModelId", "ocrModelId", "compressModelId", "assistantId", "selectedTTSProviderId", "selectedASRProviderId"];
     for (const field of uuidFields) {
@@ -199,63 +213,187 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
   return copy;
 }
 
+// ── 专题3 批2:PC→APP 消息/settings 契约助手 ─────────────────────────────────
+// 安卓 JsonInstant 无 coerceInputValues:非空字段(即使有默认值)收到显式 null、密封类
+// 收到未知判别符,都直接抛 SerializationException;settings 恢复整体失败,会话解码处
+// (ConversationRepository.loadMessageNodes)更是零容错——一条脏消息 = 会话永久打不开。
+// 以下助手都是纯函数,只作用于导出产物,PC 内部数据一律不动。
+
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/** PC-only 搜索服务判别符(安卓 me.rerere.search.SearchService.kt 密封类没有的类型)。
+ *  ⚠️ 事故记录(2026-07-28):曾误把 custom_js 登记于此——它其实是安卓正式类型
+ *  (CustomJsOptions,全字段带默认值,透传完全兼容),过滤会静默丢用户配置。教训:
+ *  人工核对安卓源码会看错模块,兼容性判定必须走 android-contract-sync.test.ts 的
+ *  机械化分类(vendored 判别符全集 + 安卓仓库在场时直接从 Kotlin 源码比对)。
+ *  当前 PC 可创建的服务类型全部为安卓所知 → 集合为空,机制保留待未来登记。 */
+export const PC_ONLY_SEARCH_SERVICE_TYPES: ReadonlySet<string> = new Set<string>();
+
+/** PC-only 消息 part 判别符。loading 是生成首 token 前的占位 part,正常路径在首个增量
+ *  时摘除,但崩溃/断电会把它留在已持久化的消息里;安卓 UIMessagePart 无此判别符,
+ *  流入即"会话打不开"(A-3,与 A-2 注解同族)。 */
+export const PC_ONLY_MESSAGE_PART_TYPES: ReadonlySet<string> = new Set(["loading"]);
+
+/** S-1 机制:按 PC-only 黑名单过滤搜索服务并重定位选中下标(黑名单而非安卓白名单——
+ *  未来安卓新增类型经 PC 往返不能被误删)。pcOnlyTypes 参数化供测试注入。 */
+export function filterSearchServicesForAndroid(
+  services: unknown[],
+  selectedIndex: unknown,
+  pcOnlyTypes: ReadonlySet<string> = PC_ONLY_SEARCH_SERVICE_TYPES,
+): { services: unknown[]; selectedIndex: number } {
+  const selected = services[Number(selectedIndex) || 0];
+  const kept = services.filter((svc) => !(isRecord(svc) && pcOnlyTypes.has(String(svc.type))));
+  const idx = kept.indexOf(selected);
+  return { services: kept, selectedIndex: idx >= 0 ? idx : 0 };
+}
+
+/** A-3:导出方向的消息 part 清洗,策略与注解一致——带字符串判别符且非 PC-only 才保留
+ *  (缺判别符的脏对象同样会让安卓多态解码即炸)。 */
+export function filterMessagePartsForAndroid(
+  parts: unknown[],
+  pcOnlyTypes: ReadonlySet<string> = PC_ONLY_MESSAGE_PART_TYPES,
+): unknown[] {
+  return parts.filter((p) => isRecord(p) && typeof p.type === "string" && !pcOnlyTypes.has(p.type));
+}
+
+/** PC-only 消息注解判别符(安卓 UIMessageAnnotation 只有 url_citation;PC 生成失败时
+ *  写入的 model_call_error 若流入安卓即"会话打不开")。 */
+export const PC_ONLY_ANNOTATION_TYPES: ReadonlySet<string> = new Set(["model_call_error"]);
+
+/** A-2:导出方向的注解清洗。只保留"带字符串判别符且非 PC-only"的注解——缺判别符的
+ *  遗留脏对象与 PC-only 类型都会让安卓多态解码即炸;安卓自有/未来新增类型原样透传。 */
+export function filterAnnotationsForAndroid(
+  annotations: unknown,
+  pcOnlyTypes: ReadonlySet<string> = PC_ONLY_ANNOTATION_TYPES,
+): unknown[] {
+  if (!Array.isArray(annotations)) return [];
+  return annotations.filter(
+    (a) => isRecord(a) && typeof a.type === "string" && !pcOnlyTypes.has(a.type),
+  );
+}
+
+/** A-1:把 PC 侧 preset 消息({role, content} 简化形态)转成安卓 UIMessage 形状。
+ *  安卓 UIMessage.parts 必填(无默认值),缺失即 SerializationException;role 枚举
+ *  @SerialName 为小写。已是安卓形态(带 parts,来自 APP→PC 透传)只做 role 卫生,
+ *  不重复包装。显式 null 的 id/createdAt 删键让安卓默认值生效(非空字段拒 null)。 */
+export function toAndroidPresetMessage(pm: unknown): unknown {
+  if (!isRecord(pm)) return pm;
+  const fixed: any = { ...pm };
+  fixed.role = typeof fixed.role === "string" && fixed.role ? fixed.role.toLowerCase() : "user";
+  if (!Array.isArray(fixed.parts)) {
+    const content = typeof fixed.content === "string" ? fixed.content : "";
+    fixed.parts = content ? [{ type: "text", text: content }] : [];
+  }
+  fixed.parts = filterMessagePartsForAndroid(fixed.parts);
+  delete fixed.content;
+  if (fixed.id == null || (typeof fixed.id === "string" && !UUID_RE.test(fixed.id))) delete fixed.id;
+  if (fixed.createdAt == null) delete fixed.createdAt;
+  return fixed;
+}
+
 /** Generate a Room-compatible SQLite database from PC's conversation data so Android can
- *  restore chat history from a PC-origin backup zip. The schema matches Android's
- *  rikka_hub.db exactly (ConversationEntity + message_node + room_master_table). */
+ *  restore chat history from a PC-origin backup zip.
+ *  专题3 T-1/T-2 重构:
+ *  - 有 cached 模板(上次安卓导入的原库):以其为基底重建——PC 管理的表(会话/节点/记忆)
+ *    清空重灌,其余安卓自有表(workspaces / conversation_folder / favorites / GenMedia 等)
+ *    原样保留,ConversationEntity 上 PC 不认识的列(folder_id 等)按会话 id 回填。
+ *    此前逐表重建只搬 PC 认识的数据,APP→PC→APP 一轮往返会清洗掉安卓侧其余数据(T-2)。
+ *  - 无模板(纯 PC 用户首次导出):按 vendored 安卓 Room schema v24 全新建库。此前直接
+ *    放弃生成,静默产出"安卓导入后没有任何会话"的 zip(T-1)。 */
 function generateRikkaHubDb(dbPath: string, backupNameById?: Map<number, string>): boolean {
-  const cachedDbPath = join(dataDir, "rikka_hub_cached.db");
-  if (!existsSync(cachedDbPath)) {
-    // 模板在成功导入一次安卓备份后才存在。缺失时导出 zip 静默不含 rikka_hub.db,
-    // 安卓端导入后会话为空——至少留条日志,别让用户以为导出是完整的(DB-first 批1 验证时记录的遗留项)。
-    reportError("backup", "warn", "rikka_hub_cached.db 模板缺失,导出 zip 将不含 rikka_hub.db(安卓端导入无会话)");
+  try {
+    const cachedDbPath = join(dataDir, "rikka_hub_cached.db");
+    if (existsSync(cachedDbPath)) {
+      buildAndroidDbOnCachedBase(cachedDbPath, dbPath, backupNameById);
+    } else {
+      buildAndroidDbFromVendoredSchema(dbPath, backupNameById);
+    }
+    return true;
+  } catch (err) {
+    reportError("backup", "error", "rikka_hub.db 生成失败,导出 zip 将不含安卓会话库(安卓端导入无会话)", err);
     return false;
   }
+}
+
+/** PC 写入的 ConversationEntity 列(与 insertConversationsIntoDb 的 INSERT 列集一致,
+ *  改动必须同步)。其余列视为"安卓自有",cached 基底重建时按会话 id 回填——未来安卓
+ *  加列无需 PC 改代码。 */
+const PC_MANAGED_CONVERSATION_COLUMNS = new Set([
+  "id", "assistant_id", "title", "nodes", "create_at", "update_at", "suggestions", "is_pinned", "custom_system_prompt",
+]);
+
+/** T-2:以 cached 安卓库为基底重建。文件级拷贝到目标后只重灌 PC 管理的表,安卓自有表
+ *  与未知列全部存活。FTS5 虚拟表整表 DROP(影子表随虚拟表自动删除;陈旧索引不该跟着
+ *  新数据走,安卓 Room 会在 onOpen 重建。切勿把影子表当普通表留下——APP 端重建 FTS
+ *  虚拟表时会撞影子表名直接崩,这是旧实现用排除法换来的教训)。 */
+function buildAndroidDbOnCachedBase(cachedDbPath: string, dbPath: string, backupNameById?: Map<number, string>): void {
+  copyFileSync(cachedDbPath, dbPath);
+  const db = new Database(dbPath);
   try {
-    const cachedDb = new Database(cachedDbPath, { readonly: true });
-    const schemaRows = cachedDb.query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 1 WHEN 'index' THEN 2 ELSE 3 END, name").all() as any[];
-    const uv = (cachedDb.query("PRAGMA user_version").get() as any)?.user_version ?? 18;
-    const roomRows = cachedDb.query("SELECT id, identity_hash FROM room_master_table").all() as any[];
-    const metaRows = cachedDb.query("SELECT locale FROM android_metadata").all() as any[];
-    cachedDb.close();
-    const db = new Database(":memory:");
-    db.exec(`PRAGMA user_version = ${uv}`);
-    for (const row of schemaRows) {
-      if (row.name === 'android_metadata' || row.name === 'room_master_table') {
-        try { db.exec(row.sql); } catch { /* */ }
+    // ① 快照安卓自有列,重灌后按 id 回填。
+    const convCols = (db.prepare("PRAGMA table_info(ConversationEntity)").all() as { name: string }[]).map((c) => c.name);
+    const extraCols = convCols.filter((n) => !PC_MANAGED_CONVERSATION_COLUMNS.has(n));
+    const extrasById = new Map<string, unknown[]>();
+    if (extraCols.length > 0) {
+      const colList = extraCols.map((c) => `"${c}"`).join(", ");
+      for (const row of db.prepare(`SELECT id, ${colList} FROM ConversationEntity`).all() as Record<string, unknown>[]) {
+        extrasById.set(String(row.id), extraCols.map((c) => row[c]));
       }
     }
-    // 5-7:参数化。值来自曾导入的安卓库,字符串拼 SQL 理论上可向自己的导出产物注入。
-    for (const m of metaRows) { try { db.prepare("INSERT INTO android_metadata VALUES (?)").run(m.locale); } catch { /* */ } }
-    for (const r of roomRows as any[]) { try { db.prepare("INSERT INTO room_master_table VALUES (?, ?)").run(r.id, r.identity_hash); } catch { /* */ } }
-    // FTS5 虚拟表(message_fts)及其影子表都必须排除——APP 端 Room 会在 onOpen 自行重建。
-    // 影子表(message_fts_data / _idx / _content / _config / _docsize)在 sqlite_master 里
-    // 是普通 CREATE TABLE,不含 "USING fts5",单纯正则命中不到;若作为孤儿表落进备份 .db,
-    // APP 端 Room onOpen 执行 CREATE VIRTUAL TABLE ... USING fts5 时,FTS5 会尝试再建影子表,
-    // 撞 "table 'message_fts_data' already exists" 直接崩溃(只要做过手机端适配,之后任何带
-    // 会话的 PC 导出导入 APP 都必崩)。先收集所有 FTS5 虚拟表名,再按 <vtab>_ 前缀排除影子表。
-    const ftsVirtualTableNames = new Set<string>();
-    for (const row of schemaRows) {
-      if (row.type === "table" && row.name && /\bUSING\s+fts5\b/i.test(row.sql ?? "")) {
-        ftsVirtualTableNames.add(row.name);
-      }
+    // ② DROP FTS5 虚拟表(连同影子表)。
+    const ftsTables = (db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL").all() as { name: string; sql: string }[])
+      .filter((t) => /\bUSING\s+fts5\b/i.test(t.sql));
+    for (const t of ftsTables) db.exec(`DROP TABLE IF EXISTS "${t.name}"`);
+    // ③ 清空并重灌 PC 管理的表。
+    db.exec("DELETE FROM message_node");
+    db.exec("DELETE FROM ConversationEntity");
+    if (db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='MemoryEntity'").get()) {
+      db.exec("DELETE FROM MemoryEntity");
     }
-    const isFtsShadowTable = (name: string) =>
-      [...ftsVirtualTableNames].some((vtab) => name.startsWith(vtab + "_"));
-    for (const row of schemaRows) {
-      if (row.name === 'android_metadata' || row.name === 'room_master_table') continue;
-      if (row.name?.startsWith('sqlite_')) continue;
-      if (/\bUSING\s+fts5\b/i.test(row.sql ?? "")) continue;
-      if (row.name && isFtsShadowTable(row.name)) continue;
-      try { db.exec(row.sql); } catch { /* */ }
+    insertConversationsIntoDb(db, backupNameById);
+    insertMemoriesIntoDb(db);
+    // ④ 回填安卓自有列(UPDATE 未命中 = 会话已在 PC 删除,自然跳过)。
+    if (extraCols.length > 0 && extrasById.size > 0) {
+      const setList = extraCols.map((c) => `"${c}" = ?`).join(", ");
+      const update = db.prepare(`UPDATE ConversationEntity SET ${setList} WHERE id = ?`);
+      for (const [convId, values] of extrasById) update.run(...(values as never[]), convId);
+    }
+    // ⑤ 文件级拷贝继承了基底体积,把删掉的旧数据真正还地。
+    db.exec("VACUUM");
+  } finally {
+    db.close();
+  }
+}
+
+/** T-1:无模板时按 vendored 安卓 Room schema 全新建库。schema 文件是安卓仓库
+ *  app/schemas/…/24.json 的逐字节副本(安卓升级 Room 版本后同步替换并更新文件名);
+ *  setupQueries 自带 room_master_table 建表 + identityHash 写入(Room 打开时校验),
+ *  android_metadata 由安卓框架管理,这里按惯例补一行 locale。 */
+function buildAndroidDbFromVendoredSchema(dbPath: string, backupNameById?: Map<number, string>): void {
+  const schema = (androidSchemaV24 as {
+    database: {
+      version: number;
+      entities: Array<{ tableName: string; createSql: string; indices?: Array<{ createSql: string }> }>;
+      setupQueries?: string[];
+    };
+  }).database;
+  const db = new Database(":memory:");
+  try {
+    db.exec(`PRAGMA user_version = ${Number(schema.version)}`);
+    db.exec("CREATE TABLE android_metadata (locale TEXT)");
+    db.prepare("INSERT INTO android_metadata VALUES (?)").run("en_US");
+    for (const q of schema.setupQueries ?? []) db.exec(q);
+    for (const entity of schema.entities) {
+      db.exec(entity.createSql.replaceAll("${TABLE_NAME}", entity.tableName));
+      for (const idx of entity.indices ?? []) {
+        db.exec(idx.createSql.replaceAll("${TABLE_NAME}", entity.tableName));
+      }
     }
     insertConversationsIntoDb(db, backupNameById);
     insertMemoriesIntoDb(db);
     writeFileSync(dbPath, db.serialize());
+  } finally {
     db.close();
-    return true;
-  } catch (err) {
-    console.warn("[backup] cached db schema read failed:", err);
-    return false;
   }
 }
 
@@ -353,7 +491,26 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>, backupName
             }
             return fixed;
           });
-          const msgs = (node.messages || []).map((m: any) => ({ id: m.id || null, role: String(m.role || "user").toLowerCase(), parts: fixParts(m.parts || []), annotations: m.annotations || [], createdAt: toLocalDt(m.createdAt), finishedAt: toLocalDt(m.finishedAt), modelId: m.modelId || null, usage: m.usage || null, translation: m.translation || null }));
+          const msgs = (node.messages || []).map((m: any) => {
+            const out: Record<string, unknown> = {
+              // E-1:安卓 UIMessage.id 是非空 Uuid(有默认值但拒显式 null/非法格式),
+              // 旧实现写 id: null → 含该消息的会话在安卓端解码即炸(会话永久打不开)。
+              id: typeof m.id === "string" && UUID_RE.test(m.id) ? m.id : crypto.randomUUID(),
+              role: String(m.role || "user").toLowerCase(),
+              // A-3:PC-only part(loading 占位)与缺判别符脏对象过滤,详见助手注释。
+              parts: filterMessagePartsForAndroid(fixParts(m.parts || [])),
+              // A-2:PC-only 注解(model_call_error)与缺判别符脏对象过滤,详见助手注释。
+              annotations: filterAnnotationsForAndroid(m.annotations),
+              finishedAt: toLocalDt(m.finishedAt) ?? null,
+              modelId: typeof m.modelId === "string" && UUID_RE.test(m.modelId) ? m.modelId : null,
+              usage: m.usage || null,
+              translation: m.translation || null,
+            };
+            // createdAt 非空但有默认值:显式 null 会炸,缺键则走安卓默认(finishedAt 可空,照写)。
+            const createdAt = toLocalDt(m.createdAt);
+            if (createdAt != null) out.createdAt = createdAt;
+            return out;
+          });
           const nodeJson = JSON.stringify(msgs);
           insertNode.run(node.id, conv.id, i, backupNameById ? rewritePcUrlsToAndroidUpload(nodeJson, backupNameById) : nodeJson, node.selectIndex ?? 0);
         }
@@ -532,20 +689,28 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
   const stageDir = join(tmpRoot, "stage");
   mkdirSync(stageDir, { recursive: true });
   try {
+    // 批5:先算附件 staging 计划(引用收集 + 内容去重 + zip 内文件名分配),让每个条目的
+    // backupName 随 pc-backup.json 元数据导出,恢复端据此精确回链原 id。
+    // 专题3 H-1:计划必须先于 settings.json 落盘——settings 里的头像/生图 URL 要按
+    // backupNameById 反写成安卓 upload URI。
+    onProgress?.("正在分析附件引用...");
+    flushConvDirtyNow();
+    const uploadPlan = buildUploadStagingPlan();
     onProgress?.("正在准备配置文件...");
     console.log(`[backup] staging settings.json...`);
     // 导出时剥离移动端不兼容的模型模态(AUDIO/VIDEO/DOCUMENT),避免移动端导入崩溃
     // (Issue #11)。仅作用于备份文件内容,不改内存中的运行时 state.settings。
+    // 专题3 H-1:settings.json 里的 /api/files/<id>/content(助手/用户头像等)反写成安卓
+    // upload URI——附件字节一直都在 zip 里,唯独 settings 的 URL 此前没改写,这就是
+    // "导入 APP 后头像丢失"的根因;pc-backup.json 保持 PC 形态,PC→PC 恢复走原有回链。
     const sanitizedSettings = sanitizeModelModalitiesForExport(state.settings);
     writeFileSync(
       join(stageDir, "settings.json"),
-      safeJsonStringify(rewriteAvatarsInSettings(sanitizedSettings, PC_AVATAR_TYPE_TO_ANDROID)),
+      rewritePcUrlsToAndroidUpload(
+        safeJsonStringify(rewriteAvatarsInSettings(sanitizedSettings, PC_AVATAR_TYPE_TO_ANDROID)),
+        uploadPlan.backupNameById,
+      ),
     );
-    // 批5:先算附件 staging 计划(引用收集 + 内容去重 + zip 内文件名分配),让每个条目的
-    // backupName 随 pc-backup.json 元数据导出,恢复端据此精确回链原 id。
-    onProgress?.("正在分析附件引用...");
-    flushConvDirtyNow();
-    const uploadPlan = buildUploadStagingPlan();
     console.log(`[backup] staging pc-backup.json...`);
     writeFileSync(
       join(stageDir, "pc-backup.json"),
@@ -614,26 +779,9 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
     if (existsSync(targetZipPath)) rmSync(targetZipPath);
     const zipTimeoutMs = adaptiveZipTimeoutMs(dirSizeBytes(stageDir));
     console.log(`[backup] creating zip from ${stageDir} → ${targetZipPath} (${readdirSync(stageDir).join(", ")})`);
-    if (process.platform === "win32") {
-      const script = [
-        "Add-Type -AssemblyName System.IO.Compression.FileSystem",
-        `[System.IO.Compression.ZipFile]::CreateFromDirectory('${stageDir.replace(/'/g, "''")}', '${targetZipPath.replace(/'/g, "''")}')`,
-      ].join("; ");
-      const proc = Bun.spawnSync(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], { timeout: zipTimeoutMs });
-      if (proc.exitCode !== 0) {
-        const stderr = new TextDecoder().decode(proc.stderr ?? new Uint8Array()).slice(0, 500);
-        const stdout = new TextDecoder().decode(proc.stdout ?? new Uint8Array()).slice(0, 200);
-        console.error("[backup] zip creation failed, exit:", proc.exitCode, "stderr:", stderr, "stdout:", stdout);
-        throw new Error(`Zip creation failed (exit ${proc.exitCode}): ${stderr || stdout || "unknown error"}`);
-      }
-    } else {
-      const proc = Bun.spawnSync(["zip", "-rq", targetZipPath, "."], { cwd: stageDir, timeout: zipTimeoutMs });
-      if (proc.exitCode !== 0) {
-        const stderr = new TextDecoder().decode(proc.stderr ?? new Uint8Array()).slice(0, 500);
-        console.error("[backup] zip creation failed, exit:", proc.exitCode, "stderr:", stderr);
-        throw new Error(`Zip creation failed (exit ${proc.exitCode}): ${stderr || "unknown error"}`);
-      }
-    }
+    // Z-1:打包收敛到 backup/zip.ts 单入口(Windows 打包后按中央目录做条目名归一化)。
+    // 安卓端按 "upload/" 等前缀匹配,反斜杠条目会被静默跳过,详见 zip.ts 头注。
+    createZipFromDirectory(stageDir, targetZipPath, zipTimeoutMs);
     if (!existsSync(targetZipPath)) {
       throw new Error("Zip file was not created (file missing after archiver exited 0)");
     }

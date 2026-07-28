@@ -25,6 +25,17 @@ export type ModelCallErrorAnnotation = {
 /** 注释判别联合(对齐安卓 UIMessageAnnotation)。 */
 export type UIMessageAnnotation = UrlCitationAnnotation | ModelCallErrorAnnotation;
 
+/** 专题3 批4:PC 注解判别符注册表(联合类型的运行时镜像)。UIMessageAnnotation 新增
+ *  成员而不登记于此 = 编译失败(下方双向断言);登记后 android-contract-sync.test.ts
+ *  会强制声明其安卓兼容性(安卓已知类型 or 导出过滤黑名单)。这样"新功能忘了惦记
+ *  备份契约"会在编译/测试期爆炸,而不是在用户导入 APP 时爆炸。 */
+export const PC_MESSAGE_ANNOTATION_TYPES = ["url_citation", "model_call_error"] as const;
+type AssertTrue<T extends true> = T;
+type MutuallyEqual<A extends string, B extends string> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+export type _AnnotationRegistryComplete = AssertTrue<
+  MutuallyEqual<(typeof PC_MESSAGE_ANNOTATION_TYPES)[number], UIMessageAnnotation["type"]>
+>;
+
 /** token 用量:inference-engine 三家 provider 归一化后的统一形状(appendUsageFromRaw 等)。 */
 export type TokenUsage = {
   promptTokens: number;

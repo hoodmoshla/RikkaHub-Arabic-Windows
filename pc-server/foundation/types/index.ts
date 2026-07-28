@@ -107,7 +107,10 @@ export interface Assistant {
   systemPrompt: string;
   temperature: number | null;
   topP: number | null;
-  contextMessageSize: number;
+  // 专题3 F-1:与安卓 Assistant.contextMessageLimit 同名对齐(2026-07 安卓把
+  // contextMessageSize 改名,语义同为"上下文最多携带的消息条数",0 = 不限)。
+  // 老数据的 contextMessageSize 由 normalizeState 一次性搬运。
+  contextMessageLimit: number;
   streamOutput: boolean;
   enableMemory: boolean;
   useGlobalMemory: boolean;

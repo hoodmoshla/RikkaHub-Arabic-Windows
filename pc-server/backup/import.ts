@@ -14,7 +14,7 @@ import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveState,
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
 import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, getConversationsDb, loadAllConversationsFromDb, resetConversationsDbTo, snapshotConversationsDbBeforeImport } from "../conversations";
 import { reportError } from "../observability/app-errors";
-import { hashFileSha256, rewritePcFileUrlsDeep } from "./file-refs";
+import { hashFileSha256, rewriteAndroidFileUrlsDeep, rewritePcFileUrlsDeep } from "./file-refs";
 import { clearWorkingSet } from "../conversations/working-set";
 import { clearAllPendingBroadcasts } from "../api/sse";
 import { importSkills } from "../tools";
@@ -691,6 +691,18 @@ function applyAndroidOriginZipFromExtractDir(extractDir: string): { settingsImpo
       console.log(`[import] upload 去重:${dedupedFiles} 个文件与现有内容一致,复用原条目`);
     }
   }
+  // 专题3 H-1(导入侧):settings 里的安卓 file:///…/upload/<name> 引用(助手/用户头像等)
+  // 改写成 PC 形态。此前只改写消息 parts,settings 漏改 → 头像指向安卓私有路径,PC 前端
+  // 永远无法解析(APP→PC"头像丢失"根因)。必须在 upload 注册完成、文件名映射就绪后执行;
+  // fileSchemeOnly 只动 file:// 形态,提示词普通文本不受影响。
+  if (settingsImported && androidFilenameToPcId.size > 0) {
+    state.settings = rewriteAndroidFileUrlsDeep(
+      state.settings as unknown as JsonValue,
+      androidFilenameToPcId,
+      { fileSchemeOnly: true },
+    ) as unknown as State["settings"];
+  }
+
   importFontsDirIfPresent(extractDir);
 
   // Conversation history: Android stores them in a Room SQLite db (`rikka_hub.db`) with two
@@ -891,44 +903,6 @@ function importAndroidConversations(extractDir: string, dbPath: string, androidF
   } finally {
     db.close();
   }
-}
-
-/**
- * Deep-walk a JsonValue rewriting any string that matches Android's upload URL pattern
- * (`file:///…/upload/<filename>` or just `…/upload/<filename>`) into PC's
- * `/api/files/<id>/content` form, using the filename→pcFileId map built during the upload
- * folder copy.
- *
- * Conservative — only matches the literal segment `upload/<filename>` and only rewrites
- * when the filename is in our map. URLs we don't recognize pass through untouched, so
- * tool-output JSON with arbitrary http/https URLs is unaffected.
- */
-function rewriteAndroidFileUrlsDeep(value: JsonValue, map: Map<string, number>): JsonValue {
-  if (typeof value === "string") {
-    return rewriteAndroidFileUrl(value, map);
-  }
-  if (Array.isArray(value)) {
-    return value.map((v) => rewriteAndroidFileUrlsDeep(v, map));
-  }
-  if (value && typeof value === "object") {
-    const result: Record<string, JsonValue> = {};
-    for (const [k, v] of Object.entries(value)) {
-      result[k] = rewriteAndroidFileUrlsDeep(v as JsonValue, map);
-    }
-    return result;
-  }
-  return value;
-}
-
-function rewriteAndroidFileUrl(url: string, map: Map<string, number>): string {
-  // Match the last `upload/<filename>` segment. Android URI is `file:///data/.../files/upload/<uuid>.<ext>`;
-  // we strip everything up to and including the final `upload/` and use the trailing name.
-  const match = url.match(/(?:^|[/\\])upload[/\\]([^/\\?#]+)/);
-  if (!match) return url;
-  const filename = match[1];
-  const pcId = map.get(filename);
-  if (pcId === undefined) return url;
-  return `/api/files/${pcId}/content`;
 }
 
 /**

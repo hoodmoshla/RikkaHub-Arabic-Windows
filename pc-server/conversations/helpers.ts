@@ -165,7 +165,7 @@ export function hasResumableToolParts(msg: Message) {
 }
 
 // 是否为"正在生成"的空 ASSISTANT 占位:没有任何可发送内容(文本/思维链/工具/媒体),
-// 只有 loading 占位或完全为空。组装上下文时它不是历史消息,不应占用 contextMessageSize
+// 只有 loading 占位或完全为空。组装上下文时它不是历史消息,不应占用 contextMessageLimit
 // 名额——否则 size=1 时 slice 只取到它(空内容随后被 appendAssistantApiMessages 过滤),
 // 把用户真正的输入挤出上下文,模型只收到 system prompt(issue #16)。
 // 注意:工具恢复场景下尾部 ASSISTANT 已带 tool 部分与结果(模型续轮必须看到),故必须靠

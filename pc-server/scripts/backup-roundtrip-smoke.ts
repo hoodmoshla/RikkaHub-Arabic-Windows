@@ -1,8 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { cpSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { platform } from "node:os";
+
+import { listZipEntryNames } from "../backup/zip";
+import androidSchemaV24 from "../backup/android-schema-v24.json";
 
 type AnyRecord = Record<string, any>;
 
@@ -21,6 +24,9 @@ const MEMORY_CONTENT = "这是全局记忆，用于验证备份往返。";
 const MODEL_ID = "smoke-model";
 const PROVIDER_ID = "smoke-provider";
 const CONVERSATION_ID = "smoke-conversation";
+
+const PRESET_MESSAGE_TEXT = "预设消息:备份往返冒烟";
+const CUSTOM_JS_SERVICE_ID = "smoke-custom-js";
 
 const TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lQSCdAAAAABJRU5ErkJggg==";
 
@@ -43,6 +49,9 @@ function spawnPcServer() {
 }
 
 function startMockProvider() {
+  // 注意:本 mock 只应答 /v1/chat/completions,而 provider baseUrl 故意不带 /v1 前缀,
+  // 生成必然 404 失败——PC 会给 assistant 消息写入 model_call_error 注解(PC-only 判别符),
+  // 正是专题3 A-2"导出过滤"断言需要的真实脏数据。若把 mock 修成可用,请同步改造 A-2 断言。
   return Bun.serve({
     port: mockPort,
     async fetch(req) {
@@ -78,46 +87,6 @@ function startMockProvider() {
       return new Response("not found", { status: 404 });
     },
   });
-}
-
-function seedAndroidSchemaCache(dataDir: string) {
-  // 为备份 smoke 合成一个最小 Room 兼容 schema，使 generateRikkaHubDb 能产出 rikka_hub.db。
-  // 该 schema 仅用于验证 PC→Android DB→PC 的往返管线，不声称与真实 APP schema 逐列一致。
-  const { Database } = require("bun:sqlite");
-  const db = new Database(":memory:");
-  db.exec(`
-    CREATE TABLE android_metadata (locale TEXT);
-    CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT);
-    CREATE TABLE ConversationEntity (
-      id TEXT PRIMARY KEY,
-      assistant_id TEXT,
-      title TEXT,
-      nodes TEXT,
-      create_at INTEGER,
-      update_at INTEGER,
-      suggestions TEXT,
-      is_pinned INTEGER,
-      custom_system_prompt TEXT
-    );
-    CREATE TABLE message_node (
-      id TEXT PRIMARY KEY,
-      conversation_id TEXT,
-      node_index INTEGER,
-      messages TEXT,
-      select_index INTEGER
-    );
-    CREATE TABLE MemoryEntity (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      assistant_id TEXT,
-      content TEXT
-    );
-    INSERT INTO android_metadata VALUES ('en-US');
-    INSERT INTO room_master_table VALUES (1, 'smoke-schema-hash');
-  `);
-  const bytes = db.serialize();
-  db.close();
-  const cachedPath = join(dataDir, "rikka_hub_cached.db");
-  writeFileSync(cachedPath, Buffer.from(bytes));
 }
 
 async function waitForHealth(timeoutMs = 15_000) {
@@ -191,12 +160,32 @@ async function seedState() {
     ],
   });
 
-  // 把默认助手绑定到 mock 模型，并改名
+  // 专题3 H-1/A-1:上传头像并配置 PC 简化形态的预设消息,导出侧断言其安卓契约转换。
+  const avatarForm = new FormData();
+  // 字节必须与会话附件不同:导出按内容 sha256 去重,同字节只留一个 zip 条目。
+  avatarForm.append("files", new File([Buffer.concat([Buffer.from(TINY_PNG_BASE64, "base64"), Buffer.from("avatar-variant")])], "smoke-avatar.png", { type: "image/png" }));
+  const avatarResponse = await fetch(`${baseUrl}/api/files/upload`, { method: "POST", body: avatarForm });
+  assert(avatarResponse.ok, `头像上传失败: ${avatarResponse.status}`);
+  const avatarUrl = ((await avatarResponse.json()) as AnyRecord).files?.[0]?.url as string;
+  assert(/^\/api\/files\/\d+\/content$/.test(avatarUrl ?? ""), `头像上传未返回 PC 形态 url: ${avatarUrl}`);
+
+  // 把默认助手绑定到 mock 模型,改名,并带上头像与 {role, content} 简化形态预设消息
   await apiJson("/api/settings/assistant/detail", {
     ...assistant,
     name: ASSISTANT_NAME,
     chatModelId: MODEL_ID,
     systemPrompt: "你是一个专门用于备份往返测试的助手。",
+    avatar: { type: "url", url: avatarUrl },
+    useAssistantAvatar: true,
+    presetMessages: [{ role: "USER", content: PRESET_MESSAGE_TEXT }],
+  });
+
+  // 专题3 S-1 事故回归:custom_js 是安卓正式类型,断言导出 settings.json 原样保留(曾被误过滤)。
+  await apiJson("/api/settings/search/service/detail", {
+    id: CUSTOM_JS_SERVICE_ID,
+    type: "custom_js",
+    name: "冒烟自定义JS",
+    searchScript: "return []",
   });
 
   await apiJson("/api/settings/display", { userNickname: NICKNAME });
@@ -230,6 +219,17 @@ async function seedState() {
     if (hasAssistant) break;
     await Bun.sleep(200);
   }
+
+  // 锁死 A-2 前提:失败生成必须留下 model_call_error 注解(见 startMockProvider 注释)。
+  // 注解在失败收尾时才落库,晚于 assistant 占位消息出现,轮询等待。
+  let annotationSeen = false;
+  const annotationDeadline = Date.now() + 10_000;
+  while (Date.now() < annotationDeadline) {
+    const seeded: AnyRecord = await api(`/api/conversations/${CONVERSATION_ID}`);
+    if (JSON.stringify(seeded).includes("model_call_error")) { annotationSeen = true; break; }
+    await Bun.sleep(200);
+  }
+  assert(annotationSeen, "预期的 model_call_error 注解未出现,A-2 导出过滤断言将失去意义");
 
   return { assistantId: assistant.id };
 }
@@ -347,9 +347,21 @@ async function verifyAttachmentIntegrity(expectedCount: number, label: string) {
   assert(false, `${label}: state.files 应有 ${expectedCount} 条,实际 ${actual}(去重失效或附件丢失)`);
 }
 
-async function verifyRestoredState() {
+async function verifyRestoredState(opts: { expectCustomJs?: boolean } = {}) {
   const settings: AnyRecord = await api("/api/settings");
   assert(settings.assistants?.some((a: AnyRecord) => a.name === ASSISTANT_NAME), "助手未恢复");
+  const restoredAssistant = (settings.assistants as AnyRecord[]).find((a) => a.name === ASSISTANT_NAME)!;
+  // 专题3 H-1:恢复后头像必须回到 PC 形态且可读(安卓 file:// URI 改写/PC 回链)。
+  const restoredAvatar = String(restoredAssistant.avatar?.url ?? "");
+  assert(/^\/api\/files\/\d+\/content$/.test(restoredAvatar), `恢复后头像不是 PC 形态(头像丢失回归): ${restoredAvatar}`);
+  const avatarRes = await fetch(`${baseUrl}${restoredAvatar}`);
+  assert(avatarRes.ok, `恢复后头像不可读(${avatarRes.status}): ${restoredAvatar}`);
+  // 专题3 A-1:preset 消息往返存活(PC 简化形态或安卓 parts 形态皆可,文本必须在)。
+  assert(JSON.stringify(restoredAssistant.presetMessages ?? []).includes(PRESET_MESSAGE_TEXT), "preset 消息未在往返中存活");
+  if (opts.expectCustomJs) {
+    // 专题3 S-1:custom_js 必须在所有导入路径存活(PC→PC 走 pc-backup.json,安卓 zip 走 settings.json)。
+    assert((settings.searchServices as AnyRecord[])?.some((svc) => svc.type === "custom_js" && svc.id === CUSTOM_JS_SERVICE_ID), "custom_js 搜索服务未在 PC→PC 往返中存活");
+  }
   assert(settings.displaySetting?.userNickname === NICKNAME, "显示设置未恢复");
   assert(settings.memorySettings?.globalEnabled === true, "记忆设置未恢复");
 
@@ -369,7 +381,8 @@ async function main() {
   rmSync(workDir, { recursive: true, force: true });
   mkdirSync(tempDir, { recursive: true });
   mkdirSync(workDir, { recursive: true });
-  seedAndroidSchemaCache(tempDir);
+  // 专题3 T-1:不再合成 cached 模板——首次导出必须走 vendored 安卓 schema 路径,
+  // 下方以 room identity hash 断言锁死(纯 PC 用户导出含会话库的核心保障)。
 
   const mock = startMockProvider();
   let pc = spawnPcServer();
@@ -399,7 +412,7 @@ async function main() {
     assert(existsSync(join(extractDir, "pc-backup.json")), "备份 zip 缺少 pc-backup.json");
     assert(existsSync(join(extractDir, "pc_conversations.db")), "备份 zip 缺少 pc_conversations.db(PC 原生会话 dump,批4)");
     const uploadEntries = readdirSync(join(extractDir, "upload"));
-    assert(uploadEntries.length === 1, `upload/ 应恰有 1 个附件,实际 ${uploadEntries.length}: ${uploadEntries.join(",")}`);
+    assert(uploadEntries.length === 2, `upload/ 应恰有 2 个文件(会话附件+头像),实际 ${uploadEntries.length}: ${uploadEntries.join(",")}`);
     {
       // 批6②:导出的安卓库里不得残留 PC 形态附件 URL,必须已重写为安卓 upload URI
       const { Database } = require("bun:sqlite");
@@ -409,7 +422,52 @@ async function main() {
       assert(!nodeJson.includes("/api/files/"), "rikka_hub.db 中残留 PC 形态附件 URL(安卓端将全部裂图)");
       assert(nodeJson.includes("file:///data/user/0/me.rerere.rikkahub/files/upload/"), "rikka_hub.db 未写入安卓形态附件 URI");
     }
-    console.log("[backup-smoke] zip 结构校验通过(含 pc dump、附件去重、安卓 URL 重写)");
+    {
+      // 专题3 Z-1:zip 条目名必须全为正斜杠且无 ./ 前缀(安卓端按 "upload/" 前缀匹配,
+      // 反斜杠 = 附件/skills/fonts 全部静默丢失)。
+      const entryNames = listZipEntryNames(savedZipPath);
+      for (const name of entryNames) {
+        assert(!name.includes("\\"), `zip 条目名含反斜杠(安卓端将静默跳过): ${name}`);
+        assert(!name.startsWith("./"), `zip 条目名含 ./ 前缀(安卓端前缀匹配不中): ${name}`);
+      }
+      assert(entryNames.some((n) => n.startsWith("upload/") && !n.endsWith("/")), "zip 缺少 upload/ 正斜杠条目");
+    }
+    {
+      // 专题3 A-1/S-1/H-1:settings.json 的安卓契约。
+      const settingsText = readFileSync(join(extractDir, "settings.json"), "utf8");
+      const exported = JSON.parse(settingsText) as AnyRecord;
+      // S-1 事故回归:custom_js 是安卓正式类型(CustomJsOptions),导出决不能过滤它。
+      const exportedServices = (JSON.parse(settingsText).searchServices ?? []) as AnyRecord[];
+      assert(exportedServices.some((svc) => svc.type === "custom_js" && svc.id === CUSTOM_JS_SERVICE_ID), "custom_js 搜索服务未出现在导出 settings.json(安卓合法类型被误过滤)");
+      assert(!settingsText.includes("/api/files/"), "settings.json 残留 PC 形态附件 URL(安卓端头像丢失)");
+      const exportedAssistant = (exported.assistants as AnyRecord[]).find((a) => a.name === ASSISTANT_NAME);
+      assert(exportedAssistant, "settings.json 缺少测试助手");
+      const preset = (exportedAssistant.presetMessages as AnyRecord[])?.[0];
+      assert(Array.isArray(preset?.parts) && preset.parts[0]?.text === PRESET_MESSAGE_TEXT, "preset 消息未转换成安卓 UIMessage 形状(parts 必填)");
+      assert(!("content" in (preset ?? {})), "preset 消息残留 PC 简化形态 content 键");
+      const avatarOut = String(exportedAssistant.avatar?.url ?? "");
+      assert(avatarOut.startsWith("file:///data/user/0/me.rerere.rikkahub/files/upload/"), `助手头像未反写成安卓 upload URI: ${avatarOut}`);
+    }
+    {
+      // 专题3 T-1/E-1:无 cached 模板时 rikka_hub.db 必须按 vendored schema v24 生成;
+      // 消息 id 必须是合法 uuid(显式 null 会让安卓端会话解码即炸且无容错)。
+      const { Database } = require("bun:sqlite");
+      const rk = new Database(join(extractDir, "rikka_hub.db"), { readonly: true });
+      const identity = rk.query("SELECT identity_hash FROM room_master_table WHERE id = 42").get() as AnyRecord;
+      assert(identity?.identity_hash === (androidSchemaV24 as AnyRecord).database.identityHash, `rikka_hub.db identity hash 不符(vendored schema 未生效): ${identity?.identity_hash}`);
+      const uv = (rk.query("PRAGMA user_version").get() as AnyRecord)?.user_version;
+      assert(uv === (androidSchemaV24 as AnyRecord).database.version, `rikka_hub.db user_version 应为 v${(androidSchemaV24 as AnyRecord).database.version},实际 ${uv}`);
+      const nodeRows = rk.query("SELECT messages FROM message_node").all() as { messages: string }[];
+      rk.close();
+      assert(nodeRows.length > 0, "rikka_hub.db 无消息节点(vendored 路径未写入会话)");
+      for (const row of nodeRows) {
+        for (const m of JSON.parse(row.messages) as AnyRecord[]) {
+          assert(typeof m.id === "string" && /^[0-9a-fA-F-]{36}$/.test(m.id), `消息 id 非法(安卓端会话将打不开): ${JSON.stringify(m.id)}`);
+          assert(Array.isArray(m.annotations) && m.annotations.every((a: AnyRecord) => a?.type !== "model_call_error"), "消息残留 model_call_error 注解(安卓端会话将打不开)");
+        }
+      }
+    }
+    console.log("[backup-smoke] zip 结构校验通过(含 pc dump、附件去重、安卓 URL 重写、Z-1 条目名、A-1/S-1/H-1 settings 契约、T-1/E-1 会话库)");
 
     // 3. PC → zip → PC：清空数据后重新导入同一 zip
     pc.kill();
@@ -425,8 +483,8 @@ async function main() {
     const pcImportResult = await importZip(savedZipPath);
     assert(pcImportResult.source === "android-zip" || pcImportResult.source === "pc-zip", `未知导入来源: ${pcImportResult.source}`);
     console.log(`[backup-smoke] PC→zip→PC 导入来源: ${pcImportResult.source}`);
-    await verifyRestoredState();
-    await verifyAttachmentIntegrity(1, "PC→zip→PC");
+    await verifyRestoredState({ expectCustomJs: true });
+    await verifyAttachmentIntegrity(2, "PC→zip→PC");
     console.log("[backup-smoke] PC→zip→PC 状态校验通过(含附件回链)");
 
     // 4. PC → Android DB → PC：用 settings.json + rikka_hub.db 重新打包成 Android zip 再导入
@@ -448,13 +506,13 @@ async function main() {
     const androidImportResult = await importZip(androidZipPath);
     assert(androidImportResult.source === "android-zip", `Android zip 导入来源错误: ${androidImportResult.source}`);
     console.log(`[backup-smoke] PC→Android DB→PC 导入来源: ${androidImportResult.source}`);
-    await verifyRestoredState();
-    await verifyAttachmentIntegrity(1, "PC→Android DB→PC");
+    await verifyRestoredState({ expectCustomJs: true });
+    await verifyAttachmentIntegrity(2, "PC→Android DB→PC");
     console.log("[backup-smoke] PC→Android DB→PC 状态校验通过(含附件回链)");
 
     // 4b. 同一服务器重复导入同一 Android zip:附件必须去重复用,不得翻倍(批5 根治的 4 份冗余)
     await importZip(androidZipPath);
-    await verifyAttachmentIntegrity(1, "Android zip 重复导入");
+    await verifyAttachmentIntegrity(2, "Android zip 重复导入");
     console.log("[backup-smoke] Android zip 重复导入附件未翻倍(去重生效)");
 
     // 5. dump-only 恢复:去掉 rikka_hub.db,纯 PC 原生 dump 也能完整恢复(批4,纯 PC 用户路径)
@@ -469,8 +527,8 @@ async function main() {
     const dumpOnlyZip = join(workDir, "pc-dump-only.zip");
     repackagePcZip(extractDir, dumpOnlyZip, ["settings.json", "pc-backup.json", "pc_conversations.db", "upload"]);
     await importZip(dumpOnlyZip);
-    await verifyRestoredState();
-    await verifyAttachmentIntegrity(1, "dump-only");
+    await verifyRestoredState({ expectCustomJs: true });
+    await verifyAttachmentIntegrity(2, "dump-only");
     console.log("[backup-smoke] dump-only 恢复校验通过(无 rikka_hub.db 仍完整恢复)");
 
     // 6. settings-only 降级:两库皆无的 zip 导入后,现有会话必须原样保留(收官审查 P0-1 清库回归)

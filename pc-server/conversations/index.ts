@@ -82,7 +82,7 @@ export function ensureConversationTables(db: InstanceType<typeof Database>): voi
 }
 
 /** 1.5.0 跟进安卓 Migration_16_17:废弃"清除上下文"机制,删除 truncate_index 列。
- *  替代机制与安卓一致——助手级"上下文消息数量"(contextMessageSize)+ 压缩对话历史。
+ *  替代机制与安卓一致——助手级"上下文消息数量"(contextMessageLimit)+ 压缩对话历史。
  *  老库多这一列时一次性 DROP;失败仅告警(残留列有 DEFAULT,读写均不再引用,无害)。 */
 function dropTruncateIndexColumnIfPresent(db: InstanceType<typeof Database>): void {
   try {

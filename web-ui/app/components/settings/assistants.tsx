@@ -652,21 +652,21 @@ export function AssistantsSection({
                 max={512}
                 step={1}
                 value={[
-                  typeof draft.contextMessageSize === "number"
-                    ? draft.contextMessageSize
+                  typeof draft.contextMessageLimit === "number"
+                    ? draft.contextMessageLimit
                     : 0,
                 ]}
                 onValueChange={([next]) =>
-                  patchDraft({ contextMessageSize: next ?? 0 })
+                  patchDraft({ contextMessageLimit: next ?? 0 })
                 }
               />
               <Input
                 className="w-24"
                 inputMode="numeric"
                 value={
-                  typeof draft.contextMessageSize === "number" &&
-                  draft.contextMessageSize > 0
-                    ? String(draft.contextMessageSize)
+                  typeof draft.contextMessageLimit === "number" &&
+                  draft.contextMessageLimit > 0
+                    ? String(draft.contextMessageLimit)
                     : ""
                 }
                 placeholder={t(
@@ -675,12 +675,12 @@ export function AssistantsSection({
                 onChange={(event) => {
                   const raw = event.target.value.trim();
                   if (raw === "") {
-                    patchDraft({ contextMessageSize: 0 });
+                    patchDraft({ contextMessageLimit: 0 });
                     return;
                   }
                   const parsed = Math.floor(Number(raw));
                   patchDraft({
-                    contextMessageSize:
+                    contextMessageLimit:
                       Number.isFinite(parsed) && parsed > 0
                         ? Math.min(512, parsed)
                         : 0,

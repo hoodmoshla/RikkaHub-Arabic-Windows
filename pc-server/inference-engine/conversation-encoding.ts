@@ -98,16 +98,16 @@ export function buildGoogleRequestBody(messagesForApi: ApiMessage[], modelItem: 
 function conversationTransformedMessages(conversation: Conversation, assistant: Assistant) {
   const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
   // 1.5.0 跟进安卓 Migration_16_17:truncateIndex("清除上下文"分割线)机制废弃,
-  // 上下文裁剪只剩两条正交机制——助手级 contextMessageSize 切片 + 压缩对话历史。
+  // 上下文裁剪只剩两条正交机制——助手级 contextMessageLimit 切片 + 压缩对话历史。
   const visibleNodes = conversation.messages;
-  // 剔除尾部"正在生成"的空 ASSISTANT 占位后再按 contextMessageSize 切片,见
+  // 剔除尾部"正在生成"的空 ASSISTANT 占位后再按 contextMessageLimit 切片,见
   // isEmptyAssistantPlaceholder 的说明(issue #16 + 工具恢复兼容)。
   const contextNodes = visibleNodes.filter((node, index) => {
     if (index !== visibleNodes.length - 1) return true;
     const selected = node.messages[node.selectIndex] ?? node.messages[0];
     return !isEmptyAssistantPlaceholder(selected);
   });
-  const rawMessages = contextNodes.slice(assistant.contextMessageSize > 0 ? -assistant.contextMessageSize : undefined);
+  const rawMessages = contextNodes.slice(assistant.contextMessageLimit > 0 ? -assistant.contextMessageLimit : undefined);
   const selectedMessages = rawMessages
     .map((node) => node.messages[node.selectIndex] ?? node.messages[0])
     .filter(Boolean);
