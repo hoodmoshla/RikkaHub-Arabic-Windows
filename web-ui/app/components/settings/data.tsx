@@ -47,6 +47,12 @@ interface AndroidSchemaStatus {
   conversationCount: number;
 }
 
+// 专题3 批3(T-1)之后,PC 内置安卓 Room schema v24,备份恒含对话记录,"手机端适配"
+// 注册流程不再是必要步骤。整套 UI(卡片 + 导出弹窗"未注册"分支 + WebDAV/S3"对话不可
+// 同步"徽章)从界面隐藏但代码完整保留:后端 data/register-schema 端点与本组件的上传/
+// 状态逻辑原样在,未来若需重新引导用户注册(例如换底座到更高版本 schema),翻此开关即回。
+const ANDROID_COMPAT_CARD_ENABLED: boolean = false;
+
 // A 族闪动修复:schemaStatus 上次已知值缓存(内存 + localStorage 镜像)。
 // 病根:该状态挂载后异步 GET,首帧 null 曾被当"未注册"渲染 —— 安卓兼容卡片以
 // "琥珀徽章+注册表单全展开"闪现,查询返回后收起(用户报告的"卡片式展开→恢复")。
@@ -646,8 +652,8 @@ export function DataSection({
           >
             <h3 className="text-lg font-semibold">{t("settings:data.export_confirm_title")}</h3>
             <div className="mt-3 text-sm text-muted-foreground">
-              {schemaStatus?.hasAndroidSchema
-                ? t("settings:data.export_with_schema", { count: schemaStatus.conversationCount })
+              {!ANDROID_COMPAT_CARD_ENABLED || schemaStatus?.hasAndroidSchema
+                ? t("settings:data.export_with_schema", { count: schemaStatus?.conversationCount ?? 0 })
                 : t("settings:data.export_without_schema")}
             </div>
             <div className="mt-4 flex justify-end gap-2">
@@ -656,7 +662,7 @@ export function DataSection({
               </Button>
               <Button onClick={() => void doExport()}>
                 <Download className="mr-1 size-4" />
-                {schemaStatus?.hasAndroidSchema
+                {!ANDROID_COMPAT_CARD_ENABLED || schemaStatus?.hasAndroidSchema
                   ? t("settings:data.confirm_export")
                   : t("settings:data.export_no_chat")}
               </Button>
@@ -669,6 +675,7 @@ export function DataSection({
         title={t("settings:data.title")}
         subtitle={t("settings:data.subtitle")}
       />
+      {ANDROID_COMPAT_CARD_ENABLED && (
       <div className="mb-4 rounded-lg border p-4">
         <div
           className="flex items-center gap-2 cursor-pointer"
@@ -755,6 +762,7 @@ export function DataSection({
           </div>
         )}
       </div>
+      )}
       <div className="grid gap-4 md:grid-cols-2">
         <div className="rounded-lg border bg-card p-4">
           <div className="text-sm font-medium">{t("settings:data.backup_title")}</div>
@@ -871,7 +879,7 @@ export function DataSection({
             <div>
               <div className="flex items-center gap-2 text-sm font-medium">
                 {t("settings:data.webdav_title")}
-                {schemaStatus && !schemaStatus.hasAndroidSchema && (
+                {ANDROID_COMPAT_CARD_ENABLED && schemaStatus && !schemaStatus.hasAndroidSchema && (
                   <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[0.625rem] text-amber-700 dark:bg-amber-900 dark:text-amber-300">
                     {t("settings:data.chat_unsyncable")}
                   </span>
@@ -1074,7 +1082,7 @@ export function DataSection({
             <div>
               <div className="flex items-center gap-2 text-sm font-medium">
                 {t("settings:data.s3_title")}
-                {schemaStatus && !schemaStatus.hasAndroidSchema && (
+                {ANDROID_COMPAT_CARD_ENABLED && schemaStatus && !schemaStatus.hasAndroidSchema && (
                   <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[0.625rem] text-amber-700 dark:bg-amber-900 dark:text-amber-300">
                     {t("settings:data.chat_unsyncable")}
                   </span>
