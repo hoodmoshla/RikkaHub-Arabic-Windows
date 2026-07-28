@@ -1,24 +1,26 @@
 // api/handlers/conversations.ts — 会话路由（stream、batch-delete、列表/分页/搜索、单会话子路由）
 // 纪律：纯搬迁自 server.ts routeApi()；生成编排（generateAnswer 等）仍在 server.ts，经导入使用。
 
-import type { Conversation, JsonValue, MessagePart } from "../../foundation/types";
-import type { ConversationListDto, MessageSearchResultDto, PagedResult } from "../../foundation/types";
+import type { Conversation, ConversationSnapshotEventDto, ConversationSnapshotMetaEventDto, JsonValue, MessageNode, MessagePart } from "../../foundation/types";
+import type { ConversationListDto, ConversationNodesPageDto, MessageSearchResultDto, PagedResult } from "../../foundation/types";
 import { applyPlaceholders, id, message, textFromParts } from "../../foundation/utils";
 import { state } from "../../persistence/json-store";
 import {
   getConversation,
   persistConversation,
-  toConversationDto,
   toListDto,
+  toMessageNodeDtos,
   truncateConversationForRegenerate,
 } from "../../conversations";
 import { getConversationsDb } from "../../conversations";
 import { checkoutConversation, registerConversation, releaseConversation } from "../../conversations/working-set";
 import { searchMessageFts } from "../../conversations/fts";
-import { listConversationMetas } from "../../conversations/read-queries";
+import { listConversationMetas, pagedConversationMetas } from "../../conversations/read-queries";
 import { applyInputRegexTransformParts } from "../../assistants/index";
 import { findModel } from "../../model-providers/index";
 import { error, json, readJson } from "../request";
+import { conversationNegotiationToken } from "../snapshot-negotiation";
+import { nodeStamp, SNAPSHOT_NODE_WINDOW, toSnapshotConversationDto } from "../snapshot-window";
 import {
   broadcastConversation,
   broadcastList,
@@ -53,16 +55,25 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     const metas = db ? listConversationMetas(db, state.settings.assistantId) : [];
     return json(metas.map((item) => toListDto(item, generating.has(item.id))));
   }
+  // J 族(专题2):排序+分页全在 SQL 侧(复合索引扫描,O(页大小)),不再把该助手全部
+  // 元数据读入 JS——数千会话时列表刷新与 invalidate 风暴的单次成本与总量解耦。
+  // 旧 query 过滤参数是死代码(前端标题/内容搜索走 conversations/search 的 FTS 端点,
+  // 全仓无调用方),随本次清理移除。offset/limit 在 API 边界收敛为非负整数(SQL 绑定
+  // 不接受 NaN/负数;旧实现靠 slice 的宽容语义兜着)。
   if (path === "conversations/paged" && request.method === "GET") {
-    const offset = Number(url.searchParams.get("offset") ?? "0");
-    const limit = Number(url.searchParams.get("limit") ?? "20");
-    const query = (url.searchParams.get("query") ?? "").toLowerCase();
+    const rawOffset = Number(url.searchParams.get("offset") ?? "0");
+    const rawLimit = Number(url.searchParams.get("limit") ?? "20");
+    const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 20;
     const db = getConversationsDb();
-    const items = (db ? listConversationMetas(db, state.settings.assistantId) : [])
-      .filter((item) => !query || item.title.toLowerCase().includes(query))
-      .sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || b.updateAt - a.updateAt);
-    const page = items.slice(offset, offset + limit);
-    const paged: PagedResult<ConversationListDto> = { items: page.map((item) => toListDto(item, generating.has(item.id))), nextOffset: offset + limit < items.length ? offset + limit : null, hasMore: offset + limit < items.length };
+    const { items, total } = db
+      ? pagedConversationMetas(db, state.settings.assistantId, offset, limit)
+      : { items: [], total: 0 };
+    const paged: PagedResult<ConversationListDto> = {
+      items: items.map((item) => toListDto(item, generating.has(item.id))),
+      nextOffset: offset + limit < total ? offset + limit : null,
+      hasMore: offset + limit < total,
+    };
     return json(paged);
   }
   if (path === "conversations/search" && request.method === "GET") {
@@ -89,8 +100,17 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
   if (conversationStream) {
     const conversation = getConversation(conversationStream[1]);
     if (!conversation) return error("Conversation not found", 404);
+    // I-1(专题2)快照协商:客户端带上缓存快照的令牌,与当前令牌一致 → 首帧只发轻量
+    // snapshot_meta(客户端继续用缓存),大会话"切走再切回"不再整体重传。令牌不一致或
+    // 未携带 → 照常全量快照。令牌语义见 api/snapshot-negotiation.ts。
+    const clientToken = new URL(request.url).searchParams.get("token");
+    const currentToken = conversationNegotiationToken(conversation);
+    const initialFrame: [string, JsonValue | object] =
+      clientToken && clientToken === currentToken
+        ? ["snapshot_meta", { type: "snapshot_meta", seq: Date.now(), conversationId: conversation.id, updateAt: conversation.updateAt, isGenerating: generating.has(conversation.id), negotiationToken: currentToken, serverTime: Date.now() } satisfies ConversationSnapshotMetaEventDto]
+        : ["snapshot", { type: "snapshot", seq: Date.now(), conversation: toSnapshotConversationDto(conversation, generating.has(conversation.id)), serverTime: Date.now(), negotiationToken: currentToken } satisfies ConversationSnapshotEventDto];
     return openSse(
-      () => [["snapshot", { type: "snapshot", seq: Date.now(), conversation: toConversationDto(conversation, generating.has(conversation.id)), serverTime: Date.now() }]],
+      () => [initialFrame],
       (controller) => {
         const set = conversationClients.get(conversation.id) ?? new Set<ReadableStreamDefaultController<Uint8Array>>();
         set.add(controller);
@@ -118,7 +138,30 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     checkoutConversation(conversation.id);
     try { // 块内 300+ 行保持原缩进(纯搬迁最小 diff),与结尾 } finally 配对
 
-    if (!sub && request.method === "GET") return json(toConversationDto(conversation, generating.has(conversation.id)));
+    // I-2:REST 详情保持全量(导出/分享/轮询兜底依赖完整数据),但同样附带 stamp 清单,
+    // 客户端 detail 因此永远有清单可参与后续窗口化快照的前缀合并。
+    if (!sub && request.method === "GET") return json(toSnapshotConversationDto(conversation, generating.has(conversation.id), Infinity));
+    // I-2(专题2):窗口化快照的向上翻页分片。before/beforeId 双参防结构漂移:
+    // beforeId 必须仍是 before 位置的节点(快照后发生删除/截断则 409,客户端重开流
+    // 拿新快照与清单,自愈)。返回绝对下标 [max(0, before-limit), before) 的连续节点。
+    if (sub === "nodes" && request.method === "GET") {
+      const before = Number(url.searchParams.get("before") ?? "");
+      const beforeId = url.searchParams.get("beforeId") ?? "";
+      const rawLimit = Number(url.searchParams.get("limit") ?? "");
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : SNAPSHOT_NODE_WINDOW;
+      if (!Number.isInteger(before) || before <= 0 || conversation.messages[before]?.id !== beforeId) {
+        return error("Node window out of sync", 409);
+      }
+      const from = Math.max(0, before - limit);
+      const slice = conversation.messages.slice(from, before);
+      const page: ConversationNodesPageDto = {
+        nodes: toMessageNodeDtos(slice),
+        stamps: slice.map(nodeStamp),
+        offset: from,
+        updateAt: conversation.updateAt,
+      };
+      return json(page);
+    }
     if (sub === "messages" && request.method === "POST") {
       const body = await readJson<{ parts: JsonValue[] }>(request);
       const assistant = findAssistant(conversation.assistantId);
@@ -297,6 +340,9 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       node.selectIndex = nextIndex;
       conversation.updateAt = Date.now();
       persistConversation(conversation);
+      // I-2:老节点内容变化必须走按 id 寻址的 node_update——窗口化快照的清单比对
+      // 只能发现"变了",节点本体靠这帧送达已加载它的客户端。
+      broadcastNodeUpdate(conversation, node);
       broadcastConversation(conversation);
       return json({ status: "updated" });
     }
@@ -304,16 +350,22 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
     if (messageDelete && request.method === "DELETE") {
       const messageId = decodeURIComponent(messageDelete[1]);
       let changed = false;
+      let survivingChangedNode: MessageNode | null = null;
       conversation.messages = conversation.messages
         .map((node) => {
           const messages = node.messages.filter((msg) => msg.id !== messageId);
           if (messages.length !== node.messages.length) changed = true;
-          return { ...node, messages, selectIndex: Math.min(node.selectIndex, Math.max(messages.length - 1, 0)) };
+          const next = { ...node, messages, selectIndex: Math.min(node.selectIndex, Math.max(messages.length - 1, 0)) };
+          if (messages.length !== node.messages.length && messages.length > 0) survivingChangedNode = next;
+          return next;
         })
         .filter((node) => node.messages.length > 0);
       if (!changed) return error("Message not found", 404);
       conversation.updateAt = Date.now();
       persistConversation(conversation);
+      // I-2:删的是节点内某个分支(节点留存)时,同样按 id 推 node_update(理由同分支切换)。
+      // 整节点消失是结构变化,由快照清单比对捕获,无需单帧。
+      if (survivingChangedNode) broadcastNodeUpdate(conversation, survivingChangedNode);
       broadcastConversation(conversation);
       return json({ status: "deleted" });
     }
@@ -346,6 +398,8 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       conversation.chatSuggestions = [];
       conversation.updateAt = Date.now();
       persistConversation(conversation);
+      // I-2:被编辑节点按 id 推 node_update(理由同分支切换);其后的截断由快照清单捕获。
+      broadcastNodeUpdate(conversation, node);
       broadcastConversation(conversation);
       if (msg.role === "USER") {
         void (async () => {
@@ -424,6 +478,9 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
           if (getConversation(conversation.id) === conversation) {
             conversation.updateAt = Date.now();
             persistConversation(conversation);
+            // I-2:终帧按 id 推 node_update——33ms 节流可能吞掉最后一段流式增量,且
+            // 窗口化客户端上翻译的老节点只能靠这帧拿到最终文本。
+            broadcastNodeUpdate(conversation, node);
             broadcastConversation(conversation);
           }
           releaseConversation(conversation.id);

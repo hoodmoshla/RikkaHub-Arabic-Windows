@@ -5,10 +5,8 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
-  useLocation,
 } from "react-router";
 import * as React from "react";
-import { AnimatePresence, motion } from "motion/react";
 import i18n from "~/i18n";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -55,6 +53,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {/* R1-1:Tauri 壳(lib.rs)用此旗标区分"本应用已加载"与"连接失败错误页",
             决定是否需要重导航到 sidecar 实际端口。必须内联在 <head> 里尽早执行。 */}
         <script dangerouslySetInnerHTML={{ __html: "window.__RIKKAHUB_APP__=1" }} />
+        {/* 【预绘制·读侧】A 族闪动修复:重放上次会话由 AppContent 字体/缩放效果器
+            (本文件,搜 "rikkahub.prepaint.v1" 写侧)算出的最终 CSS 值,让首帧根字号与
+            字体链就是正确值 —— 根治"settings 快照到达后根字号突变、rem 布局(含侧边栏
+            16rem 宽度)整体跳一档"的启动闪动。本脚本零业务逻辑,只做重放;计算单源在
+            效果器,改键名/字段必须两侧同步。scale 与字体都写在 <html> 上:此刻 body 尚未
+            解析,CSS 自定义属性沿继承链生效;效果器挂载后会在 body 覆写同值字体,html
+            层仅作首帧兜底。必须内联在 <head> 里、样式表之前,保证先于首次绘制执行。 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              'try{var p=JSON.parse(localStorage.getItem("rikkahub.prepaint.v1"));if(p){var d=document.documentElement;if(typeof p.scale==="number"&&isFinite(p.scale)&&p.scale>0)d.style.setProperty("--rikkahub-ui-scale",String(p.scale));if(p.uiFont)d.style.setProperty("--rikkahub-ui-font",p.uiFont);if(p.chatFont)d.style.setProperty("--rikkahub-chat-font",p.chatFont)}}catch(e){}',
+          }}
+        />
         <Meta />
         <Links />
       </head>
@@ -106,35 +117,6 @@ function mergeCjkIntoFamily(enFamily: string, cjkFamily: string): string {
   return idx < 0 ? `${en}, ${cjkFamily}` : `${en.slice(0, idx)}, ${cjkFamily}${en.slice(idx)}`;
 }
 
-// 仅在不同顶层页面之间播放过渡动画；在同一大页内切换（如 /c/123 -> /c/456）
-// 保持连续，避免聊天界面闪烁。
-function getTopLevelPageKey(pathname: string): string {
-  if (pathname === "/" || pathname.startsWith("/c/")) return "chat";
-  if (pathname.startsWith("/settings")) return "settings";
-  if (pathname.startsWith("/images")) return "images";
-  return pathname;
-}
-
-function PageTransition({ children }: { children: React.ReactNode }) {
-  const location = useLocation();
-  const pageKey = getTopLevelPageKey(location.pathname);
-
-  return (
-    <AnimatePresence mode="wait" initial={false}>
-      <motion.div
-        key={pageKey}
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: -4 }}
-        transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-        className="contents"
-      >
-        {children}
-      </motion.div>
-    </AnimatePresence>
-  );
-}
-
 function AppContent() {
   useSettingsSubscription();
   useMemorySubscription();
@@ -167,6 +149,23 @@ function AppContent() {
     } else {
       // 显式清掉,确保从"已缩放"回到"默认"时根字号恢复 16px。
       document.documentElement.style.removeProperty("--rikkahub-ui-scale");
+    }
+    // 【预绘制·写侧】把本效果器算出的最终 CSS 值持久化,供 Layout <head> 内联脚本
+    // (搜 "rikkahub.prepaint.v1" 读侧)在下次启动首帧前原样重放。settings 尚未就绪
+    // (无镜像的首次运行)时跳过,避免用默认值覆盖上次的真实值。失败静默(尽力而为)。
+    if (displaySetting !== undefined) {
+      try {
+        localStorage.setItem(
+          "rikkahub.prepaint.v1",
+          JSON.stringify({
+            scale: Number.isFinite(uiScale) && uiScale > 0 && uiScale !== 1 ? uiScale : null,
+            uiFont,
+            chatFont,
+          }),
+        );
+      } catch {
+        /* 配额/隐私模式:预绘制缓存缺失仅退化为旧行为 */
+      }
     }
   }, [
     displaySetting?.chatFontFamily,
@@ -234,9 +233,11 @@ function AppContent() {
   return (
     <ThemeProvider defaultTheme="light">
       <TitleBar />
-      <PageTransition>
-        <Outlet />
-      </PageTransition>
+      {/* 路由切换即时呈现,不做过渡动画(专题1 B 族终案):AnimatePresence mode="wait" 的
+          串行动画(旧页淡出→新页淡入)必然穿越空白帧,在整页切换场景被感知为闪动;
+          成熟桌面应用的主区域切换均为即时切换 —— React 单次提交内旧页换新页,
+          不存在中间帧,是唯一确定性零闪的形态。 */}
+      <Outlet />
       <WebAuthGate />
       <StartupGate />
       <FontFaceInjector />

@@ -60,7 +60,10 @@ export function WebAuthGate() {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]">
+    // 不透明背景(此前 bg-black/45 半透明):settings/会话列表本地镜像落地后,未认证
+    // 首帧背后可能已画出上次会话标题/昵称,半透明遮罩会把它们透给未解锁的访客。
+    // 登录墙用实心背景是标准做法,同时消除"内容隐约可见"的廉价感。
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background p-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>{t("web_auth_gate.title")}</CardTitle>

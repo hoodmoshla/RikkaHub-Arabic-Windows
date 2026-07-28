@@ -81,6 +81,23 @@ export function recentConversationMetas(db: Database, assistantId: string, exclu
   return rows.map(rowToMeta);
 }
 
+/** 列表展示排序(J 族):置顶优先、更新时间倒序;并列回退 create_at DESC, id DESC——
+ *  与旧 JS 管线(createAt 倒序基序 + 稳定排序 isPinned/updateAt)逐元素等价,单测对照。 */
+const LIST_ORDER = "ORDER BY is_pinned DESC, update_at DESC, create_at DESC, id DESC";
+
+/**
+ * 会话列表分页(专题2 J 族):排序与分页全在 SQL 侧完成(走 idx_pc_conversation_list
+ * 复合索引),单次成本 O(页大小),与会话总数彻底解耦——数千会话时列表刷新与
+ * invalidate 风暴不再每次全表读入 JS。total 供端点算 hasMore/nextOffset。
+ */
+export function pagedConversationMetas(db: Database, assistantId: string, offset: number, limit: number): { items: ConversationMeta[]; total: number } {
+  const rows = db.prepare(
+    `SELECT ${META_COLUMNS} FROM pc_conversation WHERE assistant_id = ? ${LIST_ORDER} LIMIT ? OFFSET ?`,
+  ).all(assistantId, limit, offset) as MetaRow[];
+  const total = (db.prepare("SELECT COUNT(*) AS n FROM pc_conversation WHERE assistant_id = ?").get(assistantId) as { n: number }).n;
+  return { items: rows.map(rowToMeta), total };
+}
+
 export function countConversations(db: Database): number {
   const row = db.prepare("SELECT COUNT(*) AS n FROM pc_conversation").get() as { n: number } | null;
   return row?.n ?? 0;

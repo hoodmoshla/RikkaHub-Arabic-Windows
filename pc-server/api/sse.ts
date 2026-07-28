@@ -5,10 +5,13 @@
 import type { StreamHooksWithSink } from "../inference-engine/events";
 import { initWorkingSetSseGuard, markConversationRowDirty, markMessageNodeDirty, scheduleThrottledConvFlush } from "../conversations";
 import { initAppErrorBroadcast } from "../observability/app-errors";
-import type { Conversation, ConversationListInvalidateEventDto, ConversationNodeUpdateEventDto, ConversationSnapshotEventDto, JsonValue, MessageNode } from "../foundation/types";
+import type { Conversation, ConversationListInvalidateEventDto, ConversationNodeUpdateEventDto, ConversationSnapshotEventDto, ConversationTextDeltaEventDto, JsonValue, MessageNode } from "../foundation/types";
+import { diffFingerprints, fingerprintNode, type NodeBroadcastFingerprint } from "./node-delta";
+import { conversationNegotiationToken } from "./snapshot-negotiation";
+import { nodeStamp, toSnapshotConversationDto } from "./snapshot-window";
 import { state } from "../persistence/json-store";
 import { sseHeaders } from "./request";
-import { toConversationDto, toMessageNodeDtos } from "../conversations";
+import { toMessageNodeDtos } from "../conversations";
 import { memoryStore } from "../memory/index";
 import { generating } from "../conversations/generation-state";
 
@@ -27,7 +30,7 @@ function flushNodeBroadcast(key: string) {
     entry.timer = null;
   }
   entry.lastFlush = Date.now();
-  broadcastNodeUpdateNow(entry.conversation, entry.node);
+  broadcastNodeStreamFrame(entry.conversation, entry.node);
 }
 export function scheduleNodeBroadcast(conversation: Conversation, node: MessageNode) {
   const key = `${conversation.id}::${node.id}`;
@@ -195,14 +198,64 @@ export function broadcastConversation(conversation: Conversation, event = "snaps
   const payload: ConversationSnapshotEventDto = {
     type: "snapshot",
     seq: Date.now(),
-    conversation: toConversationDto(conversation, generating.has(conversation.id)),
+    // I-2(专题2):广播快照窗口化——大会话每轮生成结束不再整体重播,见 snapshot-window.ts
+    conversation: toSnapshotConversationDto(conversation, generating.has(conversation.id)),
     serverTime: Date.now(),
+    negotiationToken: conversationNegotiationToken(conversation),
   };
   broadcastTo(conversationClients.get(conversation.id), sseFrame(event, payload));
   broadcastList();
 }
 
+// ===== H-b(专题2):流式增量帧 =====
+// "上次已广播状态"的指纹(conv::node → 指纹)。流式 flush 据此判定发 text_delta 还是
+// node_update 关键帧;每个关键帧(含生成开场帧)都刷新指纹。指纹持有 O(文本) 字符串
+// 引用,设上限防泄漏(超出淘汰最旧;淘汰的代价只是下一帧退化为一次关键帧)。
+const MAX_NODE_FINGERPRINTS = 64;
+const lastBroadcastFingerprints = new Map<string, NodeBroadcastFingerprint>();
+
+function rememberFingerprint(key: string, fp: NodeBroadcastFingerprint | null) {
+  lastBroadcastFingerprints.delete(key);
+  if (!fp) return;
+  if (lastBroadcastFingerprints.size >= MAX_NODE_FINGERPRINTS) {
+    const oldest = lastBroadcastFingerprints.keys().next().value;
+    if (typeof oldest === "string") lastBroadcastFingerprints.delete(oldest);
+  }
+  lastBroadcastFingerprints.set(key, fp);
+}
+
+/** 流式热路径(33ms flush)专用:能增量就发 text_delta,否则退回全量关键帧。
+ *  非流式调用点一律直接走 broadcastNodeUpdate(关键帧),不经过这里。 */
+function broadcastNodeStreamFrame(conversation: Conversation, node: MessageNode) {
+  const key = conversation.id + "::" + node.id;
+  const prev = lastBroadcastFingerprints.get(key);
+  const cur = fingerprintNode(node);
+  if (prev && cur) {
+    const deltas = diffFingerprints(prev, cur);
+    if (deltas) {
+      rememberFingerprint(key, cur);
+      if (deltas.length === 0) return; // 与上次广播完全一致:不发空帧
+      const payload: ConversationTextDeltaEventDto = {
+        type: "text_delta",
+        seq: Date.now(),
+        serverTime: Date.now(),
+        conversationId: conversation.id,
+        nodeId: node.id,
+        messageId: cur.messageId,
+        deltas,
+        updateAt: conversation.updateAt,
+        isGenerating: generating.has(conversation.id),
+      };
+      broadcastTo(conversationClients.get(conversation.id), sseFrame("text_delta", payload));
+      return;
+    }
+  }
+  broadcastNodeUpdateNow(conversation, node);
+}
+
 function broadcastNodeUpdateNow(conversation: Conversation, node: MessageNode) {
+  // 关键帧即新基线:之后的 flush 相对它算增量。
+  rememberFingerprint(conversation.id + "::" + node.id, fingerprintNode(node));
   const payload: ConversationNodeUpdateEventDto = {
     type: "node_update",
     seq: Date.now(),
@@ -211,6 +264,7 @@ function broadcastNodeUpdateNow(conversation: Conversation, node: MessageNode) {
     nodeId: node.id,
     nodeIndex: conversation.messages.findIndex((item) => item.id === node.id),
     node: toMessageNodeDtos([node])[0]!,
+    stamp: nodeStamp(node),
     updateAt: conversation.updateAt,
     isGenerating: generating.has(conversation.id),
   };

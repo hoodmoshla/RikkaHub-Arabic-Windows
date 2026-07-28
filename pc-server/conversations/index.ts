@@ -8,7 +8,7 @@ import { conversationsDbPath, dataDir } from "../foundation/paths";
 import { checkoutConversation, configureWorkingSet, peekConversation, releaseConversation, startWorkingSetSweep } from "./working-set";
 import { getConversationMeta } from "./read-queries";
 import { generating } from "./generation-state";
-import type { Conversation, ConversationDto, ConversationListDto, Message, MessageNode, MessageNodeDto, PcConversationRow, PcMessageNodeRow } from "../foundation/types";
+import type { Conversation, ConversationListDto, Message, MessageNode, MessageNodeDto, PcConversationRow, PcMessageNodeRow } from "../foundation/types";
 import { clearAllFts, deleteConversationFts, ensureMessageFtsTable, ftsRowCount, rebuildFtsFromNodeTable, replaceNodeFts } from "./fts";
 import { reportError } from "../observability/app-errors";
 
@@ -76,6 +76,8 @@ export function ensureConversationTables(db: InstanceType<typeof Database>): voi
       FOREIGN KEY (conversation_id) REFERENCES pc_conversation(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_pc_msg_node_conv ON pc_message_node(conversation_id);
+    -- J 族(专题2):列表分页的覆盖排序索引(assistant 过滤 + 置顶/更新时间倒序扫描)。
+    CREATE INDEX IF NOT EXISTS idx_pc_conversation_list ON pc_conversation(assistant_id, is_pinned, update_at, create_at, id);
   `);
 }
 
@@ -285,8 +287,15 @@ export function upsertConversationRow(conv: Conversation): void {
   upsertConversationRowInto(conversationsDb, conv);
 }
 
-/** upsert 单个节点行(含 FTS 同步),显式传 db——生产包装与回归测试共用。 */
-export function upsertMessageNodeInto(db: InstanceType<typeof Database>, convId: string, node: MessageNode, nodeIndex: number): void {
+/** upsert 单个节点行(含 FTS 同步),显式传 db——生产包装与回归测试共用。
+ *  syncFts=false(专题2 H-c):流式脏 flush 专用——流式期间每 200ms 对整节点做
+ *  "删 FTS 行+全文 trigram 重分词"是纯无用功(半成品文本反复索引又删除,实测 100KB
+ *  文本 1.1ms、300KB 3.2ms,5 次/秒,成本 O(全文) 随流长累积 O(N²)),且同步占用事件
+ *  循环与 SSE 发送竞争。流结束的 persistConversation 全量 reconcile 会重建该会话全部
+ *  FTS(stop 端点亦直接 persistConversation),搜索最多晚到流结束才可见——现状本就有
+ *  200ms 滞后,语义可接受。唯一残余窗口:流式中进程被硬杀,该节点 FTS 缺最后一段,
+ *  下次任何 persistConversation 该会话即自愈;数据本身(节点行)不受影响。 */
+export function upsertMessageNodeInto(db: InstanceType<typeof Database>, convId: string, node: MessageNode, nodeIndex: number, syncFts = true): void {
   db.prepare(UPSERT_NODE_SQL).run(
     node.id,
     convId,
@@ -294,14 +303,15 @@ export function upsertMessageNodeInto(db: InstanceType<typeof Database>, convId:
     JSON.stringify(node.messages ?? []),
     node.selectIndex ?? 0,
   );
+  if (!syncFts) return;
   try { replaceNodeFts(db, convId, node); }
   catch (err) { console.warn("[conv-db] FTS 节点同步失败", node.id, err); }
 }
 
 /** upsert 单个节点行。流式热路径用,nodeIndex 由调用方提供。 */
-export function upsertMessageNode(convId: string, node: MessageNode, nodeIndex: number): void {
+export function upsertMessageNode(convId: string, node: MessageNode, nodeIndex: number, syncFts = true): void {
   if (!conversationsDb) throw new Error("conversationsDb not open");
-  upsertMessageNodeInto(conversationsDb, convId, node, nodeIndex);
+  upsertMessageNodeInto(conversationsDb, convId, node, nodeIndex, syncFts);
 }
 
 /**
@@ -397,7 +407,8 @@ export function flushConvDirty(): void {
     const idx = conv.messages.findIndex((n) => n.id === nodeId);
     if (idx < 0) continue; // 节点已被删除/替换
     try {
-      upsertMessageNode(convId, conv.messages[idx], idx);
+      // H-c:流式 flush 跳过 FTS(见 upsertMessageNodeInto 注释),流结束 reconcile 补索引。
+      upsertMessageNode(convId, conv.messages[idx], idx, false);
     } catch (err) {
       console.warn("[conv-db] upsert message node failed", convId, nodeId, err);
     }
@@ -585,11 +596,6 @@ export function getConversation(idValue: string): Conversation | undefined {
  *  这里是全工程唯一的显式窄化点。 */
 export function toMessageNodeDtos(nodes: MessageNode[]): MessageNodeDto[] {
   return nodes as unknown as MessageNodeDto[];
-}
-
-/** 把 Conversation 转成含生成状态快照的 DTO。 */
-export function toConversationDto(conversation: Conversation, isGenerating: boolean): ConversationDto {
-  return { ...conversation, messages: toMessageNodeDtos(conversation.messages), isGenerating };
 }
 
 /** 把 Conversation 转成列表项 DTO。 */

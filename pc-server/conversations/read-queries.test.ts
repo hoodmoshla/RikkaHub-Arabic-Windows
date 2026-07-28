@@ -8,6 +8,7 @@ import {
   getConversationMeta,
   listAllConversationMetas,
   listConversationMetas,
+  pagedConversationMetas,
   recentConversationMetas,
 } from "./read-queries";
 
@@ -63,5 +64,53 @@ describe("辅助查询", () => {
     expect(conversationExistsInDb(db, "nope")).toBe(false);
     expect(getConversationMeta(db, "c2")?.title).toBe("第二");
     expect(getConversationMeta(db, "nope")).toBeNull();
+  });
+});
+
+describe("pagedConversationMetas(专题2 J 族)", () => {
+  test("排序:置顶优先 → updateAt 倒序;并列回退 createAt/id 倒序", () => {
+    const db = seededDb();
+    // c1 置顶(updateAt 9000);c2/c3 未置顶,updateAt 2100/3100
+    const { items, total } = pagedConversationMetas(db, "a1", 0, 10);
+    expect(items.map((m) => m.id)).toEqual(["c1", "c3", "c2"]);
+    expect(total).toBe(3);
+  });
+
+  test("分页边界:offset/limit/total/跨页拼接完整且不重叠", () => {
+    const db = seededDb();
+    const p1 = pagedConversationMetas(db, "a1", 0, 2);
+    const p2 = pagedConversationMetas(db, "a1", 2, 2);
+    expect(p1.items.map((m) => m.id)).toEqual(["c1", "c3"]);
+    expect(p2.items.map((m) => m.id)).toEqual(["c2"]);
+    expect(p1.total).toBe(3);
+    expect(pagedConversationMetas(db, "a1", 99, 10).items).toEqual([]);
+    expect(pagedConversationMetas(db, "a2", 0, 10).items.map((m) => m.id)).toEqual(["b1"]);
+  });
+
+  test("与旧 JS 管线逐元素等价(随机数据,含 updateAt/isPinned 并列)", () => {
+    const db = new Database(":memory:");
+    db.exec(`CREATE TABLE pc_conversation (
+      id TEXT PRIMARY KEY NOT NULL, assistant_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+      system_prompt TEXT NOT NULL DEFAULT '',
+      suggestions TEXT NOT NULL DEFAULT '[]', is_pinned INTEGER NOT NULL DEFAULT 0,
+      create_at INTEGER NOT NULL, update_at INTEGER NOT NULL
+    )`);
+    const ins = db.prepare("INSERT INTO pc_conversation VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    // 刻意制造大量并列:updateAt 只取 3 个值,createAt 只取 5 个值,置顶约 1/3
+    let seed = 42;
+    const rand = (n: number) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+    for (let i = 0; i < 200; i++) {
+      ins.run(`c${String(i).padStart(3, "0")}`, "a1", `t${i}`, "", "[]", rand(3) === 0 ? 1 : 0, 1000 + rand(5), 5000 + rand(3));
+    }
+    // 旧 JS 管线:createAt DESC, id DESC 基序(listConversationMetas)+ 稳定排序
+    const reference = listConversationMetas(db, "a1")
+      .sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || b.updateAt - a.updateAt)
+      .map((m) => m.id);
+    const sql = pagedConversationMetas(db, "a1", 0, 200).items.map((m) => m.id);
+    expect(sql).toEqual(reference);
+    // 任意页切片与全量切片一致
+    for (const [off, lim] of [[0, 7], [7, 7], [50, 30], [195, 10]] as const) {
+      expect(pagedConversationMetas(db, "a1", off, lim).items.map((m) => m.id)).toEqual(reference.slice(off, off + lim));
+    }
   });
 });

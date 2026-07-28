@@ -41,6 +41,43 @@ interface WebDavBackupItem {
   lastModified: string;
 }
 
+interface AndroidSchemaStatus {
+  hasAndroidSchema: boolean;
+  schemaInfo: { identityHash: string; version: number } | null;
+  conversationCount: number;
+}
+
+// A 族闪动修复:schemaStatus 上次已知值缓存(内存 + localStorage 镜像)。
+// 病根:该状态挂载后异步 GET,首帧 null 曾被当"未注册"渲染 —— 安卓兼容卡片以
+// "琥珀徽章+注册表单全展开"闪现,查询返回后收起(用户报告的"卡片式展开→恢复")。
+// 修法:①首帧用上次已知值播种(stale-while-revalidate,权威仍是接口返回);
+// ②真未知(首次访问)时未知态不渲染徽章/表单,只留标题行,消灭"先画错再纠正"。
+const SCHEMA_STATUS_MIRROR_KEY = "rikkahub.schema-status.mirror.v1";
+
+let schemaStatusCache: AndroidSchemaStatus | null = (() => {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(SCHEMA_STATUS_MIRROR_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    if (typeof (parsed as AndroidSchemaStatus).hasAndroidSchema !== "boolean") return null;
+    return parsed as AndroidSchemaStatus;
+  } catch {
+    return null;
+  }
+})();
+
+function rememberSchemaStatus(status: AndroidSchemaStatus): void {
+  schemaStatusCache = status;
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(SCHEMA_STATUS_MIRROR_KEY, JSON.stringify(status));
+  } catch {
+    /* 尽力而为的缓存,失败静默 */
+  }
+}
+
 export function DataSection({
   settings,
   onSettings,
@@ -58,11 +95,11 @@ export function DataSection({
   const [importing, setImporting] = React.useState(false);
   const [importPhase, setImportPhase] = React.useState<"idle" | "uploading" | "processing">("idle");
   const [showExportDialog, setShowExportDialog] = React.useState(false);
-  const [schemaStatus, setSchemaStatus] = React.useState<{
-    hasAndroidSchema: boolean;
-    schemaInfo: { identityHash: string; version: number } | null;
-    conversationCount: number;
-  } | null>(null);
+  // 缓存播种 + 写穿透(下方 effect):所有 setSchemaStatus 调用点(挂载 GET/导出前刷新/
+  // 注册成功)的结果统一落缓存,回访零闪动。
+  const [schemaStatus, setSchemaStatus] = React.useState<AndroidSchemaStatus | null>(
+    schemaStatusCache,
+  );
   const [registeringSchema, setRegisteringSchema] = React.useState(false);
   const [schemaExpanded, setSchemaExpanded] = React.useState(false);
   const [importProgress, setImportProgress] = React.useState(0); // 0-100 during upload
@@ -123,6 +160,10 @@ export function DataSection({
       })
       .catch(() => {});
   }, []);
+
+  React.useEffect(() => {
+    if (schemaStatus) rememberSchemaStatus(schemaStatus);
+  }, [schemaStatus]);
 
   const consumeBackupSse = async (
     url: string,
@@ -634,15 +675,17 @@ export function DataSection({
           onClick={() => schemaStatus?.hasAndroidSchema && setSchemaExpanded(!schemaExpanded)}
         >
           <div className="text-sm font-medium">{t("settings:data.android_compat")}</div>
-          {schemaStatus?.hasAndroidSchema ? (
-            <span className="rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-700 dark:bg-green-900 dark:text-green-300">
-              {t("settings:data.ready")}
-            </span>
-          ) : (
-            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700 dark:bg-amber-900 dark:text-amber-300">
-              {t("settings:data.unregistered")}
-            </span>
-          )}
+          {/* 未知态(schemaStatus null)不渲染任何徽章:不再把"还没查到"画成"未注册" */}
+          {schemaStatus &&
+            (schemaStatus.hasAndroidSchema ? (
+              <span className="rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-700 dark:bg-green-900 dark:text-green-300">
+                {t("settings:data.ready")}
+              </span>
+            ) : (
+              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700 dark:bg-amber-900 dark:text-amber-300">
+                {t("settings:data.unregistered")}
+              </span>
+            ))}
           {schemaStatus?.hasAndroidSchema && (
             <span className="ml-auto text-xs text-muted-foreground">
               {schemaExpanded ? t("settings:data.collapse") : t("settings:data.expand")}
@@ -657,7 +700,7 @@ export function DataSection({
             })}
           </div>
         )}
-        {(!schemaStatus?.hasAndroidSchema || schemaExpanded) && (
+        {schemaStatus && (!schemaStatus.hasAndroidSchema || schemaExpanded) && (
           <div className="mt-2 space-y-2">
             {!schemaStatus?.hasAndroidSchema && (
               <div
@@ -828,7 +871,7 @@ export function DataSection({
             <div>
               <div className="flex items-center gap-2 text-sm font-medium">
                 {t("settings:data.webdav_title")}
-                {!schemaStatus?.hasAndroidSchema && (
+                {schemaStatus && !schemaStatus.hasAndroidSchema && (
                   <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[0.625rem] text-amber-700 dark:bg-amber-900 dark:text-amber-300">
                     {t("settings:data.chat_unsyncable")}
                   </span>
@@ -1031,7 +1074,7 @@ export function DataSection({
             <div>
               <div className="flex items-center gap-2 text-sm font-medium">
                 {t("settings:data.s3_title")}
-                {!schemaStatus?.hasAndroidSchema && (
+                {schemaStatus && !schemaStatus.hasAndroidSchema && (
                   <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[0.625rem] text-amber-700 dark:bg-amber-900 dark:text-amber-300">
                     {t("settings:data.chat_unsyncable")}
                   </span>

@@ -2,8 +2,8 @@
 // SSE node_update 帧如何并进当前会话快照的全部语义都钉在这里。
 import { describe, expect, test } from "bun:test";
 
-import type { ConversationDto, ConversationNodeUpdateEventDto, MessageNodeDto } from "~/types";
-import { applyNodeUpdate } from "./conversation-sync";
+import type { ConversationDto, ConversationNodesPageDto, ConversationNodeUpdateEventDto, ConversationTextDeltaEventDto, MessageNodeDto } from "~/types";
+import { applyNodeUpdate, applyTextDelta, mergeConversationSnapshot, prependOlderNodes } from "./conversation-sync";
 
 function node(id: string, text: string): MessageNodeDto {
   return {
@@ -48,6 +48,7 @@ function event(overrides: Partial<ConversationNodeUpdateEventDto>): Conversation
     nodeId: "n1",
     nodeIndex: 0,
     node: node("n1", "更新后"),
+    stamp: "s-new",
     updateAt: 200,
     isGenerating: true,
     serverTime: 300,
@@ -104,5 +105,209 @@ describe("applyNodeUpdate", () => {
   test("nodeId 未命中且 nodeIndex 为负时原样返回(防御异常帧)", () => {
     const conv = conversation([node("n1", "一")]);
     expect(applyNodeUpdate(conv, event({ nodeId: "n9", nodeIndex: -1 }))).toBe(conv);
+  });
+});
+
+function deltaEvent(overrides: Partial<ConversationTextDeltaEventDto>): ConversationTextDeltaEventDto {
+  return {
+    type: "text_delta",
+    seq: 100,
+    conversationId: "c1",
+    nodeId: "n1",
+    messageId: "n1-m",
+    deltas: [{ partIndex: 0, baseLen: 1, text: "增量" }],
+    updateAt: 200,
+    isGenerating: true,
+    serverTime: 300,
+    ...overrides,
+  };
+}
+
+describe("applyTextDelta(专题2 H-b)", () => {
+  test("非本会话事件原样返回(同引用)", () => {
+    const conv = conversation([node("n1", "旧")]);
+    expect(applyTextDelta(conv, deltaEvent({ conversationId: "other" }))).toBe(conv);
+  });
+
+  test("文本追加:目标 part 更新,未触及节点保持引用身份", () => {
+    const conv = conversation([node("n1", "你"), node("n2", "保持")]);
+    const next = applyTextDelta(conv, deltaEvent({ deltas: [{ partIndex: 0, baseLen: 1, text: "好世界" }] }));
+    if (next === "resync") throw new Error("unexpected resync");
+    expect(next.messages[0]!.messages[0]!.parts).toEqual([{ type: "text", text: "你好世界" }]);
+    expect(next.messages[1]).toBe(conv.messages[1]!);
+    expect(next.updateAt).toBe(200);
+    expect(next.isGenerating).toBe(true);
+    expect(conv.messages[0]!.messages[0]!.parts).toEqual([{ type: "text", text: "你" }]);
+  });
+
+  test("reasoning part 追加到 reasoning 字段", () => {
+    const base = node("n1", "x");
+    base.messages[0]!.parts = [{ type: "reasoning", reasoning: "想" }];
+    const conv = conversation([base]);
+    const next = applyTextDelta(conv, deltaEvent({ deltas: [{ partIndex: 0, baseLen: 1, text: "了想" }] }));
+    if (next === "resync") throw new Error("unexpected resync");
+    expect(next.messages[0]!.messages[0]!.parts).toEqual([{ type: "reasoning", reasoning: "想了想" }]);
+  });
+
+  test("快照重叠容忍:本地已含部分增量时只追加缺口(幂等)", () => {
+    const conv = conversation([node("n1", "你好")]);
+    const evt = deltaEvent({ deltas: [{ partIndex: 0, baseLen: 1, text: "好世界" }] });
+    const next = applyTextDelta(conv, evt);
+    if (next === "resync") throw new Error("unexpected resync");
+    expect(next.messages[0]!.messages[0]!.parts).toEqual([{ type: "text", text: "你好世界" }]);
+    const replay = applyTextDelta(next, evt);
+    if (replay === "resync") throw new Error("unexpected resync");
+    expect(replay.messages[0]!.messages[0]!.parts).toEqual([{ type: "text", text: "你好世界" }]);
+  });
+
+  test("本地比 baseLen 短(丢帧空洞)→ resync", () => {
+    const conv = conversation([node("n1", "")]);
+    expect(applyTextDelta(conv, deltaEvent({ deltas: [{ partIndex: 0, baseLen: 5, text: "尾" }] }))).toBe("resync");
+  });
+
+  test("本地比 baseLen+text 还长(已分叉)→ resync", () => {
+    const conv = conversation([node("n1", "本地内容非常长")]);
+    expect(applyTextDelta(conv, deltaEvent({ deltas: [{ partIndex: 0, baseLen: 0, text: "短" }] }))).toBe("resync");
+  });
+
+  test("节点/message/part 定位失败 → resync", () => {
+    const conv = conversation([node("n1", "x")]);
+    expect(applyTextDelta(conv, deltaEvent({ nodeId: "n9" }))).toBe("resync");
+    expect(applyTextDelta(conv, deltaEvent({ messageId: "m9" }))).toBe("resync");
+    expect(applyTextDelta(conv, deltaEvent({ deltas: [{ partIndex: 3, baseLen: 0, text: "x" }] }))).toBe("resync");
+  });
+
+  test("目标 part 不是 text/reasoning → resync", () => {
+    const base = node("n1", "x");
+    base.messages[0]!.parts = [{ type: "image", url: "u" } as never];
+    const conv = conversation([base]);
+    expect(applyTextDelta(conv, deltaEvent({ deltas: [{ partIndex: 0, baseLen: 0, text: "x" }] }))).toBe("resync");
+  });
+});
+
+// ===== I-2(专题2)窗口化 =====
+
+/** 窗口化会话:messages 为 [offset, offset+nodes.length) 的已加载后缀,stamps 覆盖全部节点。 */
+function windowed(
+  nodes: MessageNodeDto[],
+  offset: number,
+  stamps: string[],
+  overrides: Partial<ConversationDto> = {},
+): ConversationDto {
+  return { ...conversation(nodes), nodesOffset: offset, nodeStamps: stamps, ...overrides };
+}
+
+describe("applyNodeUpdate(窗口化,I-2)", () => {
+  test("nodeId 命中时同步更新清单对应绝对位置的内容戳", () => {
+    const conv = windowed([node("n2", "二"), node("n3", "三")], 2, ["a", "b", "c", "d"]);
+    const next = applyNodeUpdate(conv, event({ nodeId: "n3", nodeIndex: 3, stamp: "d2", node: node("n3", "新三") }));
+    expect(next.nodeStamps).toEqual(["a", "b", "c", "d2"]);
+    expect(next.messages[1]!.messages[0]!.parts).toEqual([{ type: "text", text: "新三" }]);
+  });
+
+  test("窗口下方的未加载节点:不落地节点本体,只换清单戳并推进元数据", () => {
+    const conv = windowed([node("n2", "二"), node("n3", "三")], 2, ["a", "b", "c", "d"]);
+    const next = applyNodeUpdate(conv, event({ nodeId: "n0", nodeIndex: 0, stamp: "a2", node: node("n0", "翻译后") }));
+    expect(next.messages).toBe(conv.messages); // 节点数组引用不变
+    expect(next.nodeStamps).toEqual(["a2", "b", "c", "d"]);
+    expect(next.updateAt).toBe(200);
+    expect(next.isGenerating).toBe(true);
+  });
+
+  test("nodeIndex 是绝对下标:按 offset 换算后替换/追加", () => {
+    const conv = windowed([node("n2", "二"), node("n3", "三")], 2, ["a", "b", "c", "d"]);
+    const replaced = applyNodeUpdate(conv, event({ nodeId: "n9", nodeIndex: 2, stamp: "c2", node: node("n9", "顶掉二") }));
+    expect(replaced.messages[0]!.id).toBe("n9");
+    expect(replaced.nodeStamps).toEqual(["a", "b", "c2", "d"]);
+    const appended = applyNodeUpdate(conv, event({ nodeId: "n4", nodeIndex: 4, stamp: "e", node: node("n4", "新回复") }));
+    expect(appended.messages.map((n) => n.id)).toEqual(["n2", "n3", "n4"]);
+    expect(appended.nodeStamps).toEqual(["a", "b", "c", "d", "e"]);
+  });
+});
+
+describe("mergeConversationSnapshot(I-2)", () => {
+  test("全量快照(offset 0/缺省)原样采用", () => {
+    const existing = conversation([node("n1", "旧")]);
+    const incoming = conversation([node("n1", "新")]);
+    expect(mergeConversationSnapshot(existing, incoming)).toBe(incoming);
+    const full = { ...incoming, nodesOffset: 0, nodeStamps: ["a"] };
+    expect(mergeConversationSnapshot(existing, full)).toBe(full);
+  });
+
+  test("清单一致的已加载前缀被保留(对象身份不变),offset 前移", () => {
+    const existing = windowed(
+      [node("n1", "一"), node("n2", "二"), node("n3", "三"), node("n4", "四")],
+      1,
+      ["s0", "s1", "s2", "s3", "s4"],
+    );
+    const incoming = windowed([node("n3", "三新"), node("n4", "四新")], 3, ["s0", "s1", "s2", "s3", "s4"]);
+    const merged = mergeConversationSnapshot(existing, incoming);
+    expect(merged.nodesOffset).toBe(1);
+    expect(merged.messages.map((n) => n.id)).toEqual(["n1", "n2", "n3", "n4"]);
+    // 保留的前缀保持对象身份;窗口内以新快照为准
+    expect(merged.messages[0]).toBe(existing.messages[0]!);
+    expect(merged.messages[1]).toBe(existing.messages[1]!);
+    expect(merged.messages[2]).toBe(incoming.messages[0]!);
+    expect(merged.nodeStamps).toBe(incoming.nodeStamps);
+  });
+
+  test("首个戳不一致处停止延伸,其更早的历史被丢弃(保守自愈)", () => {
+    const existing = windowed(
+      [node("n0", "零"), node("n1", "一"), node("n2", "二"), node("n3", "三")],
+      0,
+      ["s0", "s1-旧", "s2", "s3"],
+    );
+    const incoming = windowed([node("n3", "三新")], 3, ["s0", "s1-新", "s2", "s3"]);
+    const merged = mergeConversationSnapshot(existing, incoming);
+    // n2 一致保留;n1 戳不同 → 停,n0/n1 丢弃
+    expect(merged.nodesOffset).toBe(2);
+    expect(merged.messages.map((n) => n.id)).toEqual(["n2", "n3"]);
+  });
+
+  test("结构漂移(节点删除导致整体错位)时全部前缀被丢弃", () => {
+    const existing = windowed(
+      [node("n0", "零"), node("n1", "一"), node("n2", "二")],
+      0,
+      ["s0", "s1", "s2"],
+    );
+    // 服务端删除了 n1:清单错位,所有位置的戳都对不上
+    const incoming = windowed([node("n2", "二")], 1, ["s0-x", "s2-x"]);
+    const merged = mergeConversationSnapshot(existing, incoming);
+    expect(merged.nodesOffset).toBe(1);
+    expect(merged.messages.map((n) => n.id)).toEqual(["n2"]);
+  });
+
+  test("本地无清单(极老缓存形状)时原样采用新快照", () => {
+    const existing = conversation([node("n1", "一"), node("n2", "二")]);
+    const incoming = windowed([node("n2", "二")], 1, ["s0", "s1"]);
+    expect(mergeConversationSnapshot(existing, incoming)).toBe(incoming);
+  });
+});
+
+describe("prependOlderNodes(I-2)", () => {
+  function page(nodes: MessageNodeDto[], offset: number, stamps: string[]): ConversationNodesPageDto {
+    return { nodes, stamps, offset, updateAt: 500 };
+  }
+
+  test("紧邻前缀拼接:offset 前移、清单区间被分片的戳覆盖", () => {
+    const conv = windowed([node("n2", "二"), node("n3", "三")], 2, ["a", "b", "c", "d"]);
+    const next = prependOlderNodes(conv, page([node("n0", "零"), node("n1", "一")], 0, ["a2", "b2"]));
+    expect(next).not.toBe("stale");
+    if (next === "stale") return;
+    expect(next.nodesOffset).toBe(0);
+    expect(next.messages.map((n) => n.id)).toEqual(["n0", "n1", "n2", "n3"]);
+    expect(next.nodeStamps).toEqual(["a2", "b2", "c", "d"]);
+    // 已加载节点身份不变
+    expect(next.messages[2]).toBe(conv.messages[0]!);
+  });
+
+  test("与当前窗口不紧邻(拼接期间状态被推进)返回 stale", () => {
+    const conv = windowed([node("n2", "二")], 2, ["a", "b", "c"]);
+    expect(prependOlderNodes(conv, page([node("n0", "零")], 0, ["a2"]))).toBe("stale");
+  });
+
+  test("已到头(offset 0)返回 stale(调用方不应触发)", () => {
+    const conv = conversation([node("n0", "零")]);
+    expect(prependOlderNodes(conv, page([node("nx", "x")], 0, ["s"]))).toBe("stale");
   });
 });

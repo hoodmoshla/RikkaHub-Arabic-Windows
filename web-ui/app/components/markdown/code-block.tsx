@@ -14,6 +14,11 @@ import {
 } from "shiki";
 
 import { getCodePreviewLanguage } from "~/components/workbench/code-preview-language";
+import {
+  createStreamingTokenizer,
+  type StreamingTokenizer,
+  type TokenizedCode,
+} from "./incremental-shiki";
 import { Button } from "~/components/ui/button";
 import {
   Select,
@@ -38,12 +43,6 @@ interface KeyedToken {
 interface KeyedLine {
   key: string;
   tokens: KeyedToken[];
-}
-
-interface TokenizedCode {
-  bg: string;
-  fg: string;
-  tokens: ThemedToken[][];
 }
 
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
@@ -215,7 +214,7 @@ function isUnderline(fontStyle: number | undefined): boolean {
   return UNDERLINE_STYLES.has(fontStyle ?? 0);
 }
 
-export function highlightCode(
+function highlightCode(
   code: string,
   language: BundledLanguage,
   callback?: (result: TokenizedCode) => void,
@@ -282,7 +281,7 @@ export function highlightCode(
         subscribers.delete(tokensCacheKey);
       }
     })
-    .catch((e) => {
+    .catch(() => {
       const fallback = createRawTokens(code);
       writeTokensToCache(tokensCacheKey, fallback);
       const subs = subscribers.get(tokensCacheKey);
@@ -448,12 +447,55 @@ export function CodeBlockContent({
   const rawTokens = React.useMemo(() => createRawTokens(code), [code]);
   const shouldHighlight = Boolean(language) && code.length <= MAX_SHIKI_CODE_LENGTH;
 
+  // H-a(专题2):行级增量分词器,组件实例级。流式中的代码块每帧增长,全文缓存键
+  // (lang+全文)永不命中,旧路径等于每帧全量重分词(12KB tsx 实测 ~40ms,单高亮一项
+  // 超掉 33ms 帧预算)。增量器只重算未完成的尾行(实测 ~0.02ms),已完成行只分词一次。
+  const tokenizerRef = React.useRef<{
+    language: BundledLanguage;
+    tokenizer: StreamingTokenizer;
+  } | null>(null);
+  const lastResultRef = React.useRef<{ cacheKey: string; result: TokenizedCode } | null>(null);
+
+  // 同步高亮入口:全文缓存 → 增量分词器 → null(该语言高亮器尚未装载,走异步订阅)。
+  const highlightSync = React.useCallback(
+    (codeText: string, lang: BundledLanguage): TokenizedCode | null => {
+      const cacheKey = getTokensCacheKey(codeText, lang);
+      const cached = readTokensFromCache(cacheKey);
+      if (cached) {
+        // 命中全文缓存(静态块/Virtuoso 重挂载):无需增量器,也无需卸载时回写。
+        tokenizerRef.current = null;
+        lastResultRef.current = null;
+        return cached;
+      }
+      const resolved = resolvedHighlighters.get(lang);
+      if (!resolved) return null;
+      let entry = tokenizerRef.current;
+      if (!entry || entry.language !== lang) {
+        entry = {
+          language: lang,
+          tokenizer: createStreamingTokenizer(resolved, lang, {
+            light: SHIKI_THEME_LIGHT,
+            dark: SHIKI_THEME_DARK,
+          }),
+        };
+        tokenizerRef.current = entry;
+      }
+      const { result, wasFullTokenize } = entry.tokenizer.tokenize(codeText);
+      // 只在"从零全量"时写全文缓存(静态块行为与旧实现一致)。增量帧不写——旧实现
+      // 每帧写一条中间态条目,一次流式就把 200 条缓存全部挤掉(缓存污染)。
+      if (wasFullTokenize) writeTokensToCache(cacheKey, result);
+      lastResultRef.current = { cacheKey, result };
+      return result;
+    },
+    [],
+  );
+
   const [tokenized, setTokenized] = React.useState<TokenizedCode>(() => {
     if (!shouldHighlight || !language) {
       return rawTokens;
     }
 
-    return highlightCode(code, language) ?? rawTokens;
+    return highlightSync(code, language) ?? highlightCode(code, language) ?? rawTokens;
   });
 
   React.useEffect(() => {
@@ -462,6 +504,13 @@ export function CodeBlockContent({
       return;
     }
 
+    const sync = highlightSync(code, language);
+    if (sync) {
+      setTokenized(sync);
+      return;
+    }
+
+    // 该语言高亮器首次装载中:走既有订阅机制;装载完成后后续帧回到上面的同步增量路径。
     let cancelled = false;
     const tokensCacheKey = getTokensCacheKey(code, language);
     const onHighlighted = (result: TokenizedCode) => {
@@ -484,7 +533,18 @@ export function CodeBlockContent({
         subscribers.delete(tokensCacheKey);
       }
     };
-  }, [code, language, rawTokens, shouldHighlight]);
+  }, [code, language, rawTokens, shouldHighlight, highlightSync]);
+
+  // 卸载时把最终 token 写回全文缓存:Virtuoso 滚动导致的卸载/重挂载零成本恢复高亮。
+  React.useEffect(
+    () => () => {
+      const last = lastResultRef.current;
+      if (last && tokenizerRef.current) {
+        writeTokensToCache(last.cacheKey, last.result);
+      }
+    },
+    [],
+  );
 
   return (
     <div

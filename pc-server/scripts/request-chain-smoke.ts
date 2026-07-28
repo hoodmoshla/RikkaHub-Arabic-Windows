@@ -569,6 +569,9 @@ function spawnPcServer() {
       PORT: String(pcPort),
       RIKKAHUB_PC_DATA_DIR: tempDir,
       BROWSER: "none",
+      // I-2(专题2):压小快照窗口,runWindowedSnapshotSmoke 用 4 轮(8 节点)会话
+      // 触发窗口化路径;其余用例会话 ≤6 节点,行为与默认窗口(60)完全一致。
+      RIKKA_SNAPSHOT_NODE_WINDOW: "6",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -681,8 +684,8 @@ async function waitForConversation(id: string, predicate: (conversation: AnyReco
   throw new Error(`${label} timed out. Last conversation: ${JSON.stringify(last, null, 2)}`);
 }
 
-async function collectConversationEvents(id: string, stop: (events: AnyRecord[]) => boolean, timeoutMs = 20_000) {
-  const response = await fetch(`${baseUrl}/api/conversations/${id}/stream`);
+async function collectConversationEvents(id: string, stop: (events: AnyRecord[]) => boolean, timeoutMs = 20_000, query = "") {
+  const response = await fetch(`${baseUrl}/api/conversations/${id}/stream${query ? `?${query}` : ""}`);
   if (!response.ok) throw new Error(`conversation stream failed: ${response.status} ${await response.text()}`);
   const reader = response.body?.getReader();
   assert(reader, "conversation stream reader missing");
@@ -1694,8 +1697,8 @@ async function runMultiAssistantConcurrencySmoke() {
   assert(resultB.assistantId === assistantB.id, "conversation B assistantId changed during concurrent generation");
   assert(!selectedMessages(resultA).some((msg: AnyRecord) => textFromParts(msg.parts ?? []).includes("B_ONLY_REPLY")), "conversation A received conversation B content");
   assert(!selectedMessages(resultB).some((msg: AnyRecord) => textFromParts(msg.parts ?? []).includes("A_ONLY_REPLY")), "conversation B received conversation A content");
-  assert(eventsA.every((event) => event.data?.conversation?.id === conversationA || event.event === "node_update"), "conversation A stream received foreign snapshots");
-  assert(eventsB.every((event) => event.data?.conversation?.id === conversationB || event.event === "node_update"), "conversation B stream received foreign snapshots");
+  assert(eventsA.every((event) => event.data?.conversation?.id === conversationA || event.event === "node_update" || (event.event === "text_delta" && event.data?.conversationId === conversationA)), "conversation A stream received foreign snapshots");
+  assert(eventsB.every((event) => event.data?.conversation?.id === conversationB || event.event === "node_update" || (event.event === "text_delta" && event.data?.conversationId === conversationB)), "conversation B stream received foreign snapshots");
   return { assistantA: resultA.assistantId, assistantB: resultB.assistantId, eventsA: eventsA.length, eventsB: eventsB.length };
 }
 
@@ -2057,6 +2060,26 @@ async function runEpubStatsLogsSmoke() {
   return { epubTextLength: uploaded.extractedTextLength, requestGroups: groupNames, logCount: logs.length };
 }
 
+// I-1 回归防线(专题2):快照协商。带正确令牌重开流,首帧必须是轻量 snapshot_meta
+// 而非全量快照;令牌陈旧/未携带则必须回退全量快照(协商失败的安全底)。
+async function runSnapshotNegotiationSmoke() {
+  const conversationId = `smoke-negotiation-${Date.now()}`;
+  await api(`/api/conversations/${conversationId}/system-prompt`, {
+    method: "POST",
+    body: JSON.stringify({ systemPrompt: "Negotiation smoke prompt" }),
+  });
+  const first = await collectConversationEvents(conversationId, (events) => events.some((event) => event.event === "snapshot"));
+  const snapshot = first.find((event) => event.event === "snapshot");
+  const token = String(snapshot?.data?.negotiationToken ?? "");
+  assert(token.length > 0, "snapshot frame missing negotiationToken (I-1)");
+  const hit = await collectConversationEvents(conversationId, (events) => events.length > 0, 20_000, `token=${encodeURIComponent(token)}`);
+  assert(hit[0]?.event === "snapshot_meta", `negotiated reconnect did not return snapshot_meta: ${JSON.stringify(hit[0]?.event)}`);
+  assert(hit[0]?.data?.negotiationToken === token, "snapshot_meta token mismatch");
+  const miss = await collectConversationEvents(conversationId, (events) => events.length > 0, 20_000, "token=stale");
+  assert(miss[0]?.event === "snapshot", "stale-token reconnect did not return full snapshot");
+  return { metaHit: true, staleFallback: true };
+}
+
 // P0-2 回归防线:纯文本(无工具)会话必须在流式期间收到"中间态"node_update 帧。
 // mock 的"慢慢回答"分支输出 第一段/第二段/第三段(500ms 间隔);若 applyEvent 的
 // text_delta 丢失 touchStream(5.3g 曾发生),则只剩开场占位帧与收尾整段帧,不存在
@@ -2089,12 +2112,80 @@ async function runPlainTextStreamingSmoke() {
       const msg = node?.messages?.[node?.selectIndex ?? 0] ?? node?.messages?.[0];
       return textFromParts(msg?.parts ?? []);
     });
+  // H-b 后流式中间态 = 结构变化的 node_update 关键帧(首个文本 part 出现时必有一帧,
+  // 携带部分文本)+ 纯文本追加的 text_delta 帧。两类都必须出现,缺一即回归:
+  // - 无部分文本关键帧 → touchStream 丢失(P0-2)或关键帧判定失效;
+  // - 无 text_delta → 增量协议失效,退化回每帧全量(专题2 H-b 回归)。
   assert(
     nodeTexts.some((text) => text.includes("第一段") && !text.includes("第三段")),
-    `plain-text streaming emitted no incremental node_update frames (P0-2 regression): ${JSON.stringify(nodeTexts)}`,
+    `plain-text streaming emitted no partial-text keyframes (P0-2 regression): ${JSON.stringify(nodeTexts)}`,
   );
-  return nodeTexts.length;
+  const deltaText = streamEvents
+    .filter((item) => item.event === "text_delta")
+    .flatMap((item) => (item.data?.deltas ?? []) as AnyRecord[])
+    .map((delta) => String(delta.text ?? ""))
+    .join("");
+  assert(
+    deltaText.includes("第三段"),
+    `plain-text streaming emitted no text_delta frames (H-b regression): ${JSON.stringify(deltaText)}`,
+  );
+  return nodeTexts.length + streamEvents.filter((item) => item.event === "text_delta").length;
 }
+// J 族(专题2)回归护栏:paged 端点 SQL 分页后,排序(置顶优先→updateAt 倒序)、
+// 跨页拼接、hasMore/nextOffset 契约必须与全量列表推导结果一致。
+async function runPagedListSmoke() {
+  const full = (await api("/api/conversations")) as AnyRecord[];
+  assert(full.length >= 3, "paged smoke expects at least 3 conversations from prior sub-tests");
+  const expected = [...full]
+    .sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || (b.updateAt as number) - (a.updateAt as number))
+    .map((item) => item.id as string);
+  const p1 = await api("/api/conversations/paged?offset=0&limit=2");
+  const p2 = await api(`/api/conversations/paged?offset=${p1.nextOffset}&limit=${full.length}`);
+  const stitched = [...p1.items, ...p2.items].map((item: AnyRecord) => item.id as string);
+  assert(p1.items.length === 2 && p1.hasMore === true && p1.nextOffset === 2, "paged first page contract mismatch");
+  assert(p2.hasMore === false && p2.nextOffset === null, "paged last page contract mismatch");
+  assert(JSON.stringify(stitched) === JSON.stringify(expected), `paged ordering/stitching mismatch: ${JSON.stringify(stitched)} vs ${JSON.stringify(expected)}`);
+  return stitched.length;
+}
+
+// I-2(专题2)回归护栏:窗口化快照(SSE)、分片端点、REST 全量三方一致性 + 结构漂移守卫。
+async function runWindowedSnapshotSmoke() {
+  await configure(false);
+  const conversationId = `smoke-windowed-${Date.now()}`;
+  for (let i = 0; i < 4; i++) {
+    await api(`/api/conversations/${conversationId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ parts: [{ type: "text", text: `第 ${i + 1} 轮:请直接回答。` }] }),
+    });
+    await waitForConversation(
+      conversationId,
+      (item) => !item.isGenerating && ((item.messages as AnyRecord[])?.length ?? 0) === (i + 1) * 2,
+      `windowed round ${i + 1}`,
+    );
+  }
+  const full = await api(`/api/conversations/${conversationId}`);
+  assert(full.messages.length === 8, `expected 8 nodes, got ${full.messages.length}`);
+  assert(full.nodesOffset === 0 && Array.isArray(full.nodeStamps) && full.nodeStamps.length === 8, "REST detail must stay full and carry the stamps manifest");
+
+  const events = await collectConversationEvents(conversationId, (evs) => evs.some((e) => e.event === "snapshot"));
+  const snap = events.find((e) => e.event === "snapshot")!.data!.conversation as AnyRecord;
+  assert(snap.nodesOffset === 2, `windowed snapshot offset expected 2, got ${snap.nodesOffset}`);
+  assert((snap.messages as AnyRecord[]).length === 6, "windowed snapshot must carry exactly the last 6 nodes");
+  assert((snap.nodeStamps as string[]).length === 8, "snapshot manifest must cover all nodes");
+  assert((snap.messages as AnyRecord[])[0]!.id === (full.messages as AnyRecord[])[2]!.id, "window must be the tail suffix of the node list");
+  assert(JSON.stringify(snap.nodeStamps) === JSON.stringify(full.nodeStamps), "SSE and REST manifests must agree on unchanged content");
+
+  const firstLoadedId = String((snap.messages as AnyRecord[])[0]!.id);
+  const page = await api(`/api/conversations/${conversationId}/nodes?before=2&beforeId=${encodeURIComponent(firstLoadedId)}`);
+  assert(page.offset === 0 && page.nodes.length === 2 && page.stamps.length === 2, "nodes page must return the adjacent earlier prefix");
+  assert(page.nodes[0].id === (full.messages as AnyRecord[])[0]!.id, "page content must match the full detail prefix");
+  assert(JSON.stringify(page.stamps) === JSON.stringify((full.nodeStamps as string[]).slice(0, 2)), "page stamps must align with the manifest");
+
+  const conflict = await fetch(`${baseUrl}/api/conversations/${conversationId}/nodes?before=2&beforeId=wrong`);
+  assert(conflict.status === 409, `expected 409 for drifted beforeId, got ${conflict.status}`);
+  return { total: full.messages.length, window: (snap.messages as AnyRecord[]).length, offset: snap.nodesOffset as number };
+}
+
 async function main() {
   rmSync(tempDir, { recursive: true, force: true });
   mkdirSync(tempDir, { recursive: true });
@@ -2108,6 +2199,7 @@ async function main() {
     const chat = await runConversation(false);
     const response = await runConversation(true);
     const plainTextFrames = await runPlainTextStreamingSmoke();
+    const snapshotNegotiation = await runSnapshotNegotiationSmoke();
     assert(plainTextFrames >= 2, "plain-text streaming produced fewer than 2 node_update frames");
     const injections = await runInjectionChainSmoke();
     const skill = await runSkillChainSmoke();
@@ -2128,6 +2220,8 @@ async function main() {
     const translation = await runTranslationSmoke();
     const compressionSummaries = await runCompressionSmoke();
     const searchDelete = await runDeletedConversationSearchSmoke();
+    const pagedList = await runPagedListSmoke();
+    const windowedSnapshot = await runWindowedSnapshotSmoke();
     // 备份导入会重置 stats(pc-backup.json 不含统计累加器),在此之前验证前面 20+ 个
     // 子测试的请求都被持久化累加器计入了(对齐移动端"安装以来累计"语义)。
     {
@@ -2155,6 +2249,7 @@ async function main() {
       localTools,
       invalidToolArguments,
       modelRegistryParity,
+      snapshotNegotiation,
       chatStreamEvents: chat.streamEvents,
       responseStreamEvents: response.streamEvents,
       providerChecks: providerChecks.map((item) => `${item.mode}:${item.ok ? "ok" : "failed"}`),
@@ -2164,6 +2259,8 @@ async function main() {
       translation,
       compressionSummaries,
       searchDelete,
+      pagedList,
+      windowedSnapshot,
       backupRoundtrip,
       webDavBackup,
       imageGeneration,

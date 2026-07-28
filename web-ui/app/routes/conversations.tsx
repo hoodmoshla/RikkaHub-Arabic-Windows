@@ -5,6 +5,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router";
 import {
   ConversationQuickJump,
   getConversationMessageAnchorId,
+  type ConversationQuickJumpItem,
 } from "~/components/conversation-quick-jump";
 import { ConversationSidebar } from "~/components/conversation-sidebar";
 import { useTheme } from "~/components/theme-provider";
@@ -38,9 +39,8 @@ import {
 } from "~/components/ui/select";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "~/components/ui/sidebar";
 import { useIsMobile } from "~/hooks/use-mobile";
-import { toConversationSummaryUpdate, useConversationList } from "~/hooks/use-conversation-list";
+import { useConversationList } from "~/hooks/use-conversation-list";
 import { onHotkeyAction, type HotkeyBusAction } from "~/lib/hotkey-events";
-import { applyNodeUpdate } from "~/lib/conversation-sync";
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
 import { useCurrentModel } from "~/hooks/use-current-model";
 import { getAssistantDisplayName, getModelDisplayName } from "~/lib/display";
@@ -51,8 +51,14 @@ import {
 } from "~/lib/export-markdown";
 import { refreshSettingsStore } from "~/lib/settings-sync";
 import { cn } from "~/lib/utils";
-import api, { ApiError, sse } from "~/services/api";
-import { useChatInputStore, useAppStore } from "~/stores";
+import api from "~/services/api";
+import { useChatInputStore } from "~/stores";
+import {
+  evictConversations,
+  useConversationEntry,
+  useConversationStore,
+} from "~/stores/conversation-store";
+import { ensureFullConversationDetail, loadOlderConversationNodes, refreshConversation, useConversationSubscription } from "~/stores/conversation-stream";
 import { WorkbenchHost } from "~/components/workbench/workbench-host";
 import {
   useWorkbench,
@@ -60,12 +66,8 @@ import {
   WorkbenchProvider,
 } from "~/components/workbench/workbench-context";
 import {
-  type ConversationDto,
   type MessageNodeDto,
   type MessageDto,
-  type ConversationNodeUpdateEventDto,
-  type ConversationErrorEventDto,
-  type ConversationSnapshotEventDto,
   type ProviderModel,
   type Settings,
   type UIMessagePart,
@@ -78,11 +80,6 @@ import { toast } from "sonner";
 import { v4 as uuidv4 } from "uuid";
 import i18n from "~/i18n";
 import { TtsPlayBar } from "~/components/tts-play-bar";
-
-type ConversationStreamEvent =
-  | ConversationSnapshotEventDto
-  | ConversationNodeUpdateEventDto
-  | ConversationErrorEventDto;
 
 interface SelectedNodeMessage {
   node: MessageNodeDto;
@@ -158,8 +155,6 @@ function ConversationSystemPromptButton({
     </div>
   );
 }
-
-type ConversationSummaryUpdater = (update: ReturnType<typeof toConversationSummaryUpdate>) => void;
 
 const EDIT_DRAFT_ATTACHMENT_MARK = "__from_message_attachment";
 const EDIT_DRAFT_SOURCE_INDEX = "__from_message_source_index";
@@ -410,188 +405,6 @@ function buildEditedParts(session: EditingSession, draftParts: UIMessagePart[]):
 }
 
 
-// ===== 会话详情内存缓存:切换零加载态的根基 =====
-// 成熟聊天应用切换会话必须瞬时。回访会话首帧直接画缓存内容(不经任何加载态),
-// SSE 连接首帧的全量快照随即静默校正——所有数据写入点 write-through,缓存最多
-// 落后正在别处生成的增量,且在快照到达的一帧内自愈。LRU 上限 20 防内存驻留;
-// 删除会话时显式清除;导入/恢复等换库场景的短暂陈旧同样由快照自愈。
-const detailCache = new Map<string, ConversationDto>();
-const DETAIL_CACHE_MAX = 20;
-
-function rememberDetail(dto: ConversationDto): void {
-  detailCache.delete(dto.id);
-  detailCache.set(dto.id, dto);
-  if (detailCache.size > DETAIL_CACHE_MAX) {
-    const oldest = detailCache.keys().next().value;
-    if (oldest !== undefined) detailCache.delete(oldest);
-  }
-}
-
-function useConversationDetail(activeId: string | null, updateSummary: ConversationSummaryUpdater) {
-  const { t } = useTranslation("page");
-  const [detail, setDetail] = React.useState<ConversationDto | null>(null);
-  /** SSE 订阅建立中(快照未到)。对外暴露的 detailLoading 只在"且无内容可画"时为真。 */
-  const [subscribing, setSubscribing] = React.useState(false);
-  const [detailError, setDetailError] = React.useState<string | null>(null);
-  const [refreshNonce, setRefreshNonce] = React.useState(0);
-
-  // 切换会话在【render 阶段】同步换内容(React 官方 derived-state 模式):缓存命中则
-  // 首帧就是新会话的完整消息;未命中置 null 等快照。若放到 effect 里,旧会话内容会
-  // 多提交一帧——下游"已知消息集"随之锁错,新会话历史消息整屏误播入场动画。
-  const [renderedForId, setRenderedForId] = React.useState<string | null>(null);
-  if (renderedForId !== activeId) {
-    setRenderedForId(activeId);
-    setDetail(activeId ? (detailCache.get(activeId) ?? null) : null);
-    setDetailError(null);
-  }
-
-  const resetDetail = React.useCallback(() => {
-    setDetail(null);
-    setDetailError(null);
-    setSubscribing(false);
-  }, []);
-
-  const refreshDetail = React.useCallback(() => {
-    setRefreshNonce((current) => current + 1);
-  }, []);
-
-  React.useEffect(() => {
-    if (!activeId) {
-      resetDetail();
-      return;
-    }
-
-    let mounted = true;
-    setSubscribing(true);
-    setDetailError(null);
-
-    const abortController = new AbortController();
-
-    // 唯一数据路径:SSE 连接首帧即全量快照(服务端 openSse 保证)。此前还并行发一个
-    // GET /conversations/<id>——与快照完全同义的冗余请求,却多占一个连接名额:本应用
-    // 常驻 5 条 SSE 长连接,叠加它正好顶满 WebView2 对同源 HTTP/1.1 的 6 连接上限,
-    // 切换时新请求在连接池边缘排队,小会话也随机延迟数百 ms("加载中"闪现的真根源)。
-    void sse<ConversationStreamEvent>(
-      `conversations/${activeId}/stream`,
-      {
-        onMessage: ({ event, data }) => {
-          if (!mounted) return;
-
-          if (event === "error" && data.type === "error") {
-            toast.error(data.message);
-            return;
-          }
-
-          if (event === "snapshot" && data.type === "snapshot") {
-            useAppStore.getState().setClockOffset(data.serverTime);
-            rememberDetail(data.conversation);
-            setDetail(data.conversation);
-            updateSummary(toConversationSummaryUpdate(data.conversation));
-            setDetailError(null);
-            setSubscribing(false);
-            return;
-          }
-
-          if (event !== "node_update" || data.type !== "node_update") return;
-
-          useAppStore.getState().setClockOffset(data.serverTime);
-          setDetail((prev) => {
-            if (!prev) {
-              queueMicrotask(() => setRefreshNonce((current) => current + 1));
-              return prev;
-            }
-            const next = applyNodeUpdate(prev, data);
-            if (next === prev) return prev;
-            rememberDetail(next); // updater 内写 Map:幂等,StrictMode 双调无害
-            updateSummary(toConversationSummaryUpdate(next));
-            return next;
-          });
-          setDetailError(null);
-          setSubscribing(false);
-        },
-        onError: (streamError) => {
-          if (!mounted) return;
-          // sse() 对 4xx(除 408/429)停止重连:404 = 会话尚不存在,按"暂无会话"处理;
-          // 其余致命 4xx 呈现错误(此前只 console,断流后界面永远停在加载态)。
-          // 可自愈的网络错/5xx 由 sse() 内建重连兜底,不打扰用户。
-          const fatal =
-            streamError instanceof ApiError &&
-            streamError.code >= 400 &&
-            streamError.code < 500 &&
-            streamError.code !== 408 &&
-            streamError.code !== 429;
-          if (fatal && streamError instanceof ApiError && streamError.code === 404) {
-            setSubscribing(false);
-            return;
-          }
-          if (fatal) {
-            setDetailError(streamError.message || t("conversations.errors.load_detail_failed"));
-            setSubscribing(false);
-            return;
-          }
-          console.error("Conversation detail SSE error:", streamError);
-        },
-      },
-      { signal: abortController.signal },
-    );
-
-    return () => {
-      mounted = false;
-      abortController.abort();
-    };
-  }, [activeId, refreshNonce, resetDetail, t, updateSummary]);
-
-  React.useEffect(() => {
-    if (!activeId || !detail?.isGenerating) return;
-    // SSE 是主路径,这个轮询只是"丢帧兜底"。原 2s 全量快照拉取会与 SSE 增量打架
-    // (旧快照可能覆盖新帧),且每轮反序列化整个对话在长会话上开销显著。降到 10s,
-    // 既保留兜底,又把开销压到原来的 1/5。
-    const timer = window.setInterval(() => {
-      void api
-        .get<ConversationDto>(`conversations/${activeId}`)
-        .then((data) => {
-          // R7-3 单调守卫:轮询响应可能晚于 SSE 增量到达,旧快照无条件覆盖会让流式文本
-          // 闪跳一下(下一帧 SSE 才纠正)。以服务端 updateAt 为单调量:每次内容变更/流式
-          // chunk 服务端都置 updateAt=Date.now(),且随 node_update 帧同步进 prev(见
-          // applyNodeUpdate),更旧即判陈旧丢弃。原实现以"最末节点序列化长度"作进度代理,
-          // 合法的改短编辑(用户改短文本/切换更短候选分支)会被误判为旧数据拒收。
-          let accepted = false;
-          setDetail((prev) => {
-            if (prev && prev.id === data.id && data.updateAt < prev.updateAt) return prev;
-            accepted = true;
-            return data;
-          });
-          if (accepted) {
-            rememberDetail(data);
-            updateSummary(toConversationSummaryUpdate(data));
-          }
-        })
-        .catch(() => {
-          // SSE remains the primary path; polling is only a recovery path for missed stream frames.
-        });
-    }, 10000);
-    return () => window.clearInterval(timer);
-  }, [activeId, detail?.isGenerating, updateSummary]);
-
-  const selectedNodeMessages = React.useMemo<SelectedNodeMessage[]>(() => {
-    if (!detail) return [];
-    return detail.messages.map((node) => ({
-      node,
-      message: node.messages[node.selectIndex] ?? node.messages[0],
-    }));
-  }, [detail]);
-
-  return {
-    detail,
-    // 缓存命中时即使订阅尚未建立也不进加载态——内容已在屏上,快照到达后静默校正
-    detailLoading: subscribing && detail === null,
-    detailError,
-    selectedNodeMessages,
-    resetDetail,
-    refreshDetail,
-  };
-}
-
 function useDraftInputController({
   activeId,
   isHomeRoute,
@@ -777,13 +590,7 @@ const ConversationTimeline = React.memo(
   ({
     activeId,
     isHomeRoute,
-    detailLoading,
-    detailError,
-    selectedNodeMessages,
-    isGenerating,
     settings,
-    conversationAssistantId,
-    conversationTitle,
     contentClassName,
     onEdit,
     onDelete,
@@ -795,13 +602,7 @@ const ConversationTimeline = React.memo(
   }: {
     activeId: string | null;
     isHomeRoute: boolean;
-    detailLoading: boolean;
-    detailError: string | null;
-    selectedNodeMessages: SelectedNodeMessage[];
-    isGenerating: boolean;
     settings: Settings | null;
-    conversationAssistantId: string | null;
-    conversationTitle?: string;
     contentClassName?: string;
     onEdit: (message: MessageDto) => void | Promise<void>;
     onDelete: (messageId: string) => Promise<void>;
@@ -817,6 +618,30 @@ const ConversationTimeline = React.memo(
     ) => Promise<void>;
   }) => {
     const { t } = useTranslation("page");
+    // colocation(D 族支柱②):详情状态在消息面板本地订阅、本地派生 —— 流式增量
+    // 只重渲染本子树,顶层(侧边栏/顶栏/输入区)不在传播路径上。切换会话时 store
+    // 按 id 直读,缓存命中则首帧就是新会话完整内容(原 render 阶段换内容语义天然满足,
+    // 下游 knownIdsRef/滚动播种依赖这一点)。
+    const entry = useConversationEntry(activeId);
+    const detail = entry?.detail ?? null;
+    // I-2(专题2):窗口化快照——detail.messages 是绝对下标 [nodesOffset, total) 的已
+    // 加载后缀。Virtuoso 用 firstItemIndex=nodesOffset 做顶部插入的滚动锚定;本组件内
+    // 一律使用"已加载数组的本地下标",只在 itemContent/rangeChanged(回调携带全局
+    // 偏移)处换算。scrollToIndex/initialTopMostItemIndex 本就是本地坐标,无需换算。
+    const nodesOffset = detail?.nodesOffset ?? 0;
+    // 缓存命中时即使订阅尚未建立也不进加载态 —— 内容已在屏上,快照到达后静默校正
+    const detailLoading = (entry?.subscribing ?? false) && detail === null;
+    const detailError = entry?.error ?? null;
+    const isGenerating = detail?.isGenerating ?? false;
+    const conversationTitle = detail?.title ?? "";
+    const conversationAssistantId = detail?.assistantId ?? null;
+    const selectedNodeMessages = React.useMemo<SelectedNodeMessage[]>(() => {
+      if (!detail) return [];
+      return detail.messages.map((node) => ({
+        node,
+        message: node.messages[node.selectIndex] ?? node.messages[0],
+      }));
+    }, [detail]);
     const canQuickJump =
       Boolean(activeId) && !detailLoading && !detailError && selectedNodeMessages.length > 1;
     const assistant = React.useMemo(() => {
@@ -868,12 +693,48 @@ const ConversationTimeline = React.memo(
     }
     const knownMessageIds = knownIdsRef.current.ids;
 
+    // I-2:向上翻页 prepend 的老节点不是"新消息",不播入场动画——offset 变小即 prepend,
+    // 把新出现的前缀 id 并入已知集合(含"分享/导出拉全量"一次性展开的场景)。
+    const prevOffsetRef = React.useRef<{ activeId: string | null; offset: number }>({
+      activeId,
+      offset: nodesOffset,
+    });
+    if (prevOffsetRef.current.activeId !== activeId) {
+      prevOffsetRef.current = { activeId, offset: nodesOffset };
+    } else if (nodesOffset !== prevOffsetRef.current.offset) {
+      if (nodesOffset < prevOffsetRef.current.offset) {
+        const prepended = prevOffsetRef.current.offset - nodesOffset;
+        for (const item of selectedNodeMessages.slice(0, prepended)) {
+          knownIdsRef.current.ids.add(item.message.id);
+        }
+      }
+      prevOffsetRef.current = { activeId, offset: nodesOffset };
+    }
+
     const virtuosoRef = React.useRef<VirtuosoHandle>(null);
+    // I-2:滚到已加载顶部时向上翻页(去重/到头判断在 loadOlderConversationNodes 内)
+    const handleStartReached = React.useCallback(() => {
+      if (activeId) void loadOlderConversationNodes(activeId);
+    }, [activeId]);
     const [isAtBottom, setIsAtBottom] = React.useState(true);
     const [isAtTop, setIsAtTop] = React.useState(false);
     const [topVisibleIndex, setTopVisibleIndex] = React.useState(0);
     const [topEndIndex, setTopEndIndex] = React.useState(0);
     const didInitialScrollRef = React.useRef<string | null>(null);
+    const ensureFullForFocusRef = React.useRef<string | null>(null);
+
+    // C 族闪动修复:"回到底部"按钮延迟出现 —— Virtuoso 挂载稳定期可能瞬时回调
+    // atBottom=false→true,立即渲染按钮就是闪现一帧(与加载提示的 250ms 延迟同理)。
+    // 150ms 内恢复贴底则全程不可见;真离底(用户上滚)时延迟不可感知。
+    const [showJumpToBottom, setShowJumpToBottom] = React.useState(false);
+    React.useEffect(() => {
+      if (isAtBottom) {
+        setShowJumpToBottom(false);
+        return;
+      }
+      const timer = window.setTimeout(() => setShowJumpToBottom(true), 150);
+      return () => window.clearTimeout(timer);
+    }, [isAtBottom]);
 
     // 会话内分享: 点消息"分享"进入选择模式, 默认选中该消息及之前所有(对齐 APP).
     // 确认后弹出导出格式选择 (Markdown / 图片). 切换会话时清理, 避免残留选中态.
@@ -884,17 +745,28 @@ const ConversationTimeline = React.memo(
     const [shareDialogOpen, setShareDialogOpen] = React.useState(false);
 
     const handleShare = React.useCallback(
-      (messageId: string) => {
-        const idx = selectedNodeMessages.findIndex((item) => item.message.id === messageId);
+      async (messageId: string) => {
+        // I-2:默认选中"该消息及之前所有"需要完整历史;窗口化时先拉全量。拿不到完整
+        // 历史(网络失败)则放弃进入选择模式——绝不拿截断的数据当作全部内容分享。
+        let source = selectedNodeMessages;
+        if (activeId && nodesOffset > 0) {
+          const full = await ensureFullConversationDetail(activeId);
+          if (!full) return;
+          source = full.messages.map((node) => ({
+            node,
+            message: node.messages[node.selectIndex] ?? node.messages[0],
+          }));
+        }
+        const idx = source.findIndex((item) => item.message.id === messageId);
         if (idx < 0) return;
         const ids = new Set<string>();
         for (let i = 0; i <= idx; i++) {
-          ids.add(selectedNodeMessages[i].message.id);
+          ids.add(source[i].message.id);
         }
         setShareSelectedIds(ids);
         setShareSelecting(true);
       },
-      [selectedNodeMessages],
+      [activeId, nodesOffset, selectedNodeMessages],
     );
 
     const handleToggleSelect = React.useCallback((messageId: string) => {
@@ -974,7 +846,15 @@ const ConversationTimeline = React.memo(
       const nodeIdx = selectedNodeMessages.findIndex((item) =>
         item.node.messages.some((m) => m.id === focusMessageId),
       );
-      if (nodeIdx < 0) return; // snapshot 是全量,极少走到;真发生则等下一次 effect 重试
+      if (nodeIdx < 0) {
+        // I-2:命中的可能是窗口之外的老消息——按需拉全量,detail 更新后本 effect 重跑定位。
+        // 每个 focusMessageId 只拉一次,拉不到(已删)则维持现状不空转。
+        if (nodesOffset > 0 && activeId && ensureFullForFocusRef.current !== focusMessageId) {
+          ensureFullForFocusRef.current = focusMessageId;
+          void ensureFullConversationDetail(activeId);
+        }
+        return;
+      }
       const focusKey = `${activeId}:focus:${focusMessageId}`;
       if (didInitialScrollRef.current === focusKey) return;
       didInitialScrollRef.current = focusKey;
@@ -991,7 +871,7 @@ const ConversationTimeline = React.memo(
         cancelled = true;
         timers.forEach((t) => window.clearTimeout(t));
       };
-    }, [activeId, detailError, detailLoading, focusMessageId, selectedNodeMessages]);
+    }, [activeId, detailError, detailLoading, focusMessageId, nodesOffset, selectedNodeMessages]);
 
     // 首帧定位:Virtuoso 缺省从 index 0 开始渲染,挂载后再 scrollToIndex 会先画出
     // 列表中部、布局稳定后又跳一次(用户看到"中间→闪→末尾")。initialTopMostItemIndex
@@ -1007,6 +887,56 @@ const ConversationTimeline = React.memo(
       return { index: Math.max(0, selectedNodeMessages.length - 1), align: "end" as const };
       // 仅挂载时被 Virtuoso 读取(key=activeId 保证每次切会话重挂载),依赖变化无副作用
     }, [focusMessageId, selectedNodeMessages]);
+
+    // C 族闪动修复:滚动指示状态随会话切换在 render 阶段播种(与上方 knownIdsRef 同模式)。
+    // Virtuoso 以 key=activeId 重挂载并按 initialTopMostItemIndex 定位首帧,但这几个状态
+    // 属于本组件、不随之重置:挂载稳定期 rangeChanged/atBottomStateChange 尚未回调时,
+    // 旧值/初值(0)会让轮次条瞬间指向第 1 轮、"回到底部"按钮闪现 —— 即用户报告的
+    // "轮次条刚进来指第一轮,闪动后跳末轮"。播种值与 initialLocation 同源:无聚焦消息
+    // = 末条+贴底;有聚焦消息 = 该条+非贴底。详情延迟到达(切换时列表为空、快照后才有
+    // 消息)的场景在消息首次出现时补播种一次(wasEmpty 分支,同 knownIdsRef 第三条件)。
+    const scrollSeedRef = React.useRef<{ activeId: string | null; wasEmpty: boolean } | null>(
+      null,
+    );
+    if (
+      scrollSeedRef.current === null ||
+      scrollSeedRef.current.activeId !== activeId ||
+      (scrollSeedRef.current.wasEmpty && selectedNodeMessages.length > 0)
+    ) {
+      scrollSeedRef.current = { activeId, wasEmpty: selectedNodeMessages.length === 0 };
+      setIsAtBottom(!focusMessageId);
+      setIsAtTop(false);
+      setTopVisibleIndex(initialLocation.index);
+      setTopEndIndex(initialLocation.index);
+    }
+
+    // 轮次条条目身份保持(D 族支柱③):以消息对象为键的 WeakMap 缓存 ——
+    // applyNodeUpdate 保持未变节点的引用稳定,流式期间只有正在打字那条未命中、
+    // 重算 preview 并重建条目;其余条目引用原样复用,行级 memo 得以生效,
+    // 也免掉了每 chunk 对全量消息重跑 preview 提取。语言切换(t 变)整表作废重建。
+    const quickJumpCacheRef = React.useRef<{
+      t: unknown;
+      map: WeakMap<MessageDto, ConversationQuickJumpItem>;
+    } | null>(null);
+    if (quickJumpCacheRef.current === null || quickJumpCacheRef.current.t !== t) {
+      quickJumpCacheRef.current = { t, map: new WeakMap() };
+    }
+    const quickJumpCache = quickJumpCacheRef.current.map;
+    const quickJumpItems = React.useMemo(
+      () =>
+        selectedNodeMessages.map(({ message }) => {
+          const hit = quickJumpCache.get(message);
+          if (hit) return hit;
+          const item: ConversationQuickJumpItem = {
+            id: message.id,
+            role: message.role,
+            preview: getQuickJumpPreview(message, t),
+          };
+          quickJumpCache.set(message, item);
+          return item;
+        }),
+      [quickJumpCache, selectedNodeMessages, t],
+    );
 
     return (
       <div className="relative flex-1 min-h-0">
@@ -1046,14 +976,26 @@ const ConversationTimeline = React.memo(
             ref={virtuosoRef}
             className="h-full"
             data={selectedNodeMessages}
+            // I-2:顶部插入的滚动锚定。prepend 时 store 原子地同步减小 offset 与增长
+            // messages,Virtuoso 保持视口稳定;offset=0(绝大多数会话)时行为与旧版一致。
+            firstItemIndex={nodesOffset}
+            startReached={handleStartReached}
             initialTopMostItemIndex={initialLocation}
+            // 未测量条目的高度估算基准:缺省用首个渲染条目的实测值外推,长消息会话
+            // 方差极大,挂载稳定期窗口位置修正明显("瞬间显示中间位置")。给一个贴近
+            // 常见消息高度的估算值收窄首帧偏差;真实高度测得后照常精确修正。
+            defaultItemHeight={120}
             computeItemKey={(_, item) => item.message.id}
-            followOutput={(atBottom) => (focusMessageId ? false : atBottom ? "smooth" : false)}
+            // "auto" 瞬时贴底(D 族支柱④):流式每 chunk 都触发 followOutput,"smooth"
+            // 会让上一帧尚未完成的平滑滚动被反复打断重启,视觉上持续抖动;瞬时贴底
+            // 无动画可打断。点击"回到底部"按钮的平滑滚动不受影响(走 scrollToIndex)。
+            followOutput={(atBottom) => (focusMessageId ? false : atBottom ? "auto" : false)}
             atBottomStateChange={setIsAtBottom}
             atTopStateChange={setIsAtTop}
             rangeChanged={({ startIndex, endIndex }) => {
-              setTopVisibleIndex(startIndex);
-              setTopEndIndex(endIndex);
+              // I-2:firstItemIndex 使回调下标携带全局偏移;轮次条等用已加载数组的本地坐标
+              setTopVisibleIndex(startIndex - nodesOffset);
+              setTopEndIndex(endIndex - nodesOffset);
             }}
             increaseViewportBy={800}
             components={{
@@ -1064,6 +1006,8 @@ const ConversationTimeline = React.memo(
               const model = message.modelId
                 ? (modelById.get(message.modelId) ?? fallbackModel)
                 : fallbackModel;
+              // I-2:index 携带 firstItemIndex 全局偏移,换算回已加载数组的本地下标
+              const isLastLoaded = index - nodesOffset === selectedNodeMessages.length - 1;
               return (
                 <div
                   id={getConversationMessageAnchorId(message.id)}
@@ -1076,8 +1020,8 @@ const ConversationTimeline = React.memo(
                   <ChatMessage
                     node={node}
                     message={message}
-                    loading={isGenerating && index === selectedNodeMessages.length - 1}
-                    isLastMessage={index === selectedNodeMessages.length - 1}
+                    loading={isGenerating && isLastLoaded}
+                    isLastMessage={isLastLoaded}
                     assistant={assistant}
                     model={model}
                     onEdit={onEdit}
@@ -1132,7 +1076,7 @@ const ConversationTimeline = React.memo(
                 </Button>
               </div>
             ) : null}
-            {!isAtBottom ? (
+            {showJumpToBottom ? (
               <Button
                 aria-label={t("conversations.scroll_to_bottom", "滚动到底部")}
                 className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full shadow-md transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg dark:bg-background dark:hover:bg-muted"
@@ -1152,11 +1096,7 @@ const ConversationTimeline = React.memo(
             ) : null}
             {canQuickJump ? (
               <ConversationQuickJump
-                items={selectedNodeMessages.map(({ message }) => ({
-                  id: message.id,
-                  role: message.role,
-                  preview: getQuickJumpPreview(message, t),
-                }))}
+                items={quickJumpItems}
                 activeIndex={
                   isAtBottom
                     ? selectedNodeMessages.length - 1
@@ -1223,7 +1163,6 @@ function ConversationsPageInner() {
     hasMore,
     loadMore,
     refreshList,
-    updateConversationSummary,
   } = useConversationList({ currentAssistantId, routeId, autoSelectFirst: !isHomeRoute });
 
   const [homeDraftId, setHomeDraftId] = React.useState(() => createHomeDraftId());
@@ -1245,8 +1184,35 @@ function ConversationsPageInner() {
   const [systemPromptDialogOpen, setSystemPromptDialogOpen] = React.useState(false);
   const [systemPromptDraft, setSystemPromptDraft] = React.useState("");
 
-  const { detail, detailLoading, detailError, selectedNodeMessages, resetDetail, refreshDetail } =
-    useConversationDetail(activeId, updateConversationSummary);
+  // 订阅生命周期挂在顶层:会话打开即持流,与消息面板的条件渲染解耦
+  // (未来多标签页 = 每个页签容器各挂一份,同会话自动共享一条流)。
+  useConversationSubscription(activeId);
+  // 顶层只用窄选择器取标量/稳定引用 —— zustand 按 Object.is 比较选择值,流式内容
+  // 增量期间这些值不变,顶层(侧边栏/顶栏/对话框)零重渲染(D 族根治的另一半)。
+  const conversationAssistantId = useConversationStore((state) =>
+    activeId ? (state.entries[activeId]?.detail?.assistantId ?? null) : null,
+  );
+  const conversationSystemPrompt = useConversationStore((state) =>
+    activeId ? (state.entries[activeId]?.detail?.systemPrompt ?? null) : null,
+  );
+  const conversationIsGenerating = useConversationStore((state) =>
+    activeId ? (state.entries[activeId]?.detail?.isGenerating ?? false) : false,
+  );
+  const hasDetail = useConversationStore((state) =>
+    activeId ? state.entries[activeId]?.detail != null : false,
+  );
+  // 节点增删才变(流式 chunk 只改节点内部),导出/压缩入口的可用性开关
+  const hasMessages = useConversationStore((state) =>
+    activeId ? (state.entries[activeId]?.detail?.messages.length ?? 0) > 0 : false,
+  );
+  const detailLoading = useConversationStore((state) => {
+    if (!activeId) return false;
+    const entry = state.entries[activeId];
+    return (entry?.subscribing ?? false) && (entry?.detail ?? null) === null;
+  });
+  const detailError = useConversationStore((state) =>
+    activeId ? (state.entries[activeId]?.error ?? null) : null,
+  );
 
   const {
     draftKey,
@@ -1266,10 +1232,14 @@ function ConversationsPageInner() {
   });
 
   const activeConversation = conversations.find((item) => item.id === activeId);
-  const chatSuggestions = detail?.chatSuggestions ?? EMPTY_SUGGESTIONS;
+  // 快照整体替换时才换引用;node_update 展开会话对象时该字段引用原样带过,流式期间稳定
+  const chatSuggestions =
+    useConversationStore((state) =>
+      activeId ? state.entries[activeId]?.detail?.chatSuggestions : undefined,
+    ) ?? EMPTY_SUGGESTIONS;
   const activeAssistantForConversation = React.useMemo(() => {
     const assistantId =
-      detail?.assistantId ?? activeConversation?.assistantId ?? currentAssistantId;
+      conversationAssistantId ?? activeConversation?.assistantId ?? currentAssistantId;
     return (
       settings?.assistants.find((assistant) => assistant.id === assistantId) ??
       currentAssistant ??
@@ -1277,9 +1247,9 @@ function ConversationsPageInner() {
     );
   }, [
     activeConversation?.assistantId,
+    conversationAssistantId,
     currentAssistant,
     currentAssistantId,
-    detail?.assistantId,
     settings,
   ]);
   const canOverrideConversationSystemPrompt =
@@ -1288,12 +1258,12 @@ function ConversationsPageInner() {
   React.useEffect(() => {
     if (!systemPromptDialogOpen) return;
     setSystemPromptDraft(
-      detail?.systemPrompt ?? activeAssistantForConversation?.systemPrompt ?? "",
+      conversationSystemPrompt ?? activeAssistantForConversation?.systemPrompt ?? "",
     );
   }, [
     activeAssistantForConversation?.allowConversationSystemPrompt,
     activeAssistantForConversation?.systemPrompt,
-    detail?.systemPrompt,
+    conversationSystemPrompt,
     systemPromptDialogOpen,
   ]);
 
@@ -1332,13 +1302,12 @@ function ConversationsPageInner() {
       await api.post<{ status: string }>("settings/assistant", { assistantId });
       await refreshSettingsStore();
       setActiveId(null);
-      resetDetail();
       if (routeId) {
         navigate("/", { replace: true });
       }
       refreshList();
     },
-    [navigate, refreshList, resetDetail, routeId, setActiveId],
+    [navigate, refreshList, routeId, setActiveId],
   );
 
   const handleToolApproval = React.useCallback(
@@ -1413,14 +1382,14 @@ function ConversationsPageInner() {
         { targetLanguage: translationLanguage },
       );
       setTranslationDialogMessageId(null);
-      refreshDetail();
+      refreshConversation(activeId);
       refreshList();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t("conversations.translate.failed"));
     } finally {
       setTranslatingMessage(false);
     }
-  }, [activeId, refreshDetail, refreshList, translationDialogMessageId, translationLanguage]);
+  }, [activeId, refreshList, translationDialogMessageId, translationLanguage]);
 
   const handleStartEdit = React.useCallback(
     (message: MessageDto) => {
@@ -1502,12 +1471,11 @@ function ConversationsPageInner() {
         undefined,
         { timeout: 120_000 },
       );
-      if (conversationId === activeId) {
-        refreshDetail();
-      }
+      // 有活跃订阅(当前打开/未来其它页签)才需要重取,refreshConversation 对未订阅 id 空操作
+      refreshConversation(conversationId);
       refreshList();
     },
-    [activeId, refreshDetail, refreshList],
+    [refreshList],
   );
 
   const handleMoveConversation = React.useCallback(
@@ -1515,7 +1483,6 @@ function ConversationsPageInner() {
       await api.post<{ status: string }>(`conversations/${conversationId}/move`, { assistantId });
       if (conversationId === activeId) {
         setActiveId(null);
-        resetDetail();
         setHomeDraftId(createHomeDraftId());
         if (routeId === conversationId) {
           navigate("/", { replace: true });
@@ -1523,7 +1490,7 @@ function ConversationsPageInner() {
       }
       refreshList();
     },
-    [activeId, navigate, refreshList, resetDetail, routeId, setActiveId],
+    [activeId, navigate, refreshList, routeId, setActiveId],
   );
 
   const handleUpdateConversationTitle = React.useCallback(
@@ -1539,10 +1506,9 @@ function ConversationsPageInner() {
       await api.delete<Record<string, never>>(`conversations/${conversationId}`, {
         parseJson: (raw) => (raw ? JSON.parse(raw) : {}),
       });
-      detailCache.delete(conversationId);
+      evictConversations([conversationId]);
       if (conversationId === activeId) {
         setActiveId(null);
-        resetDetail();
         setHomeDraftId(createHomeDraftId());
         if (routeId === conversationId) {
           navigate("/", { replace: true });
@@ -1550,7 +1516,7 @@ function ConversationsPageInner() {
       }
       refreshList();
     },
-    [activeId, navigate, refreshList, resetDetail, routeId, setActiveId],
+    [activeId, navigate, refreshList, routeId, setActiveId],
   );
 
   const handleDeleteConversations = React.useCallback(
@@ -1558,10 +1524,9 @@ function ConversationsPageInner() {
       await api.post<{ status: string; deleted: number }>("conversations/batch-delete", {
         ids: conversationIds,
       });
-      for (const id of conversationIds) detailCache.delete(id);
+      evictConversations(conversationIds);
       if (activeId && conversationIds.includes(activeId)) {
         setActiveId(null);
-        resetDetail();
         setHomeDraftId(createHomeDraftId());
         if (routeId && conversationIds.includes(routeId)) {
           navigate("/", { replace: true });
@@ -1569,7 +1534,7 @@ function ConversationsPageInner() {
       }
       refreshList();
     },
-    [activeId, navigate, refreshList, resetDetail, routeId, setActiveId],
+    [activeId, navigate, refreshList, routeId, setActiveId],
   );
 
   const handleCompressConversation = React.useCallback(() => {
@@ -1581,10 +1546,14 @@ function ConversationsPageInner() {
   // 只取 text part —— 图片(image)、文件(document)、工具调用(tool)、思维链(reasoning)全部被
   // filter 排除,不会发给优化模型。截断到 4000 字符避免吃掉 token 预算。首条消息时返回空。
   const getOptimizeContext = React.useCallback((): string => {
-    if (selectedNodeMessages.length === 0) return "";
-    const recent = selectedNodeMessages.slice(-6);
+    // 点击优化时按需读取(不订阅):事件处理器拿最新值即可,不为它拉宽重渲染面
+    const detail = activeId ? useConversationStore.getState().entries[activeId]?.detail : null;
+    if (!detail || detail.messages.length === 0) return "";
+    const recent = detail.messages
+      .slice(-6)
+      .map((node) => node.messages[node.selectIndex] ?? node.messages[0]);
     const lines: string[] = [];
-    for (const { message } of recent) {
+    for (const message of recent) {
       if (!message) continue;
       if (message.role !== "USER" && message.role !== "ASSISTANT") continue;
       const text = message.parts
@@ -1596,7 +1565,7 @@ function ConversationsPageInner() {
       lines.push(`${message.role === "USER" ? t("conversations.optimize_context.user") : t("conversations.optimize_context.assistant")}: ${text}`);
     }
     return lines.join("\n\n").slice(0, 4000);
-  }, [selectedNodeMessages]);
+  }, [activeId]);
 
   const handleConfirmCompressConversation = React.useCallback(async () => {
     if (!activeId) return;
@@ -1614,7 +1583,7 @@ function ConversationsPageInner() {
         { timeout: false, signal: controller.signal },
       );
       setCompressDialogOpen(false);
-      await refreshDetail();
+      refreshConversation(activeId);
       refreshList();
       toast.success(t("conversations.compress.success"));
     } catch (error) {
@@ -1631,20 +1600,18 @@ function ConversationsPageInner() {
     compressAdditionalPrompt,
     compressKeepRecent,
     compressTargetTokens,
-    refreshDetail,
     refreshList,
   ]);
 
   const handleCreateConversation = React.useCallback(() => {
     closePanel();
     setActiveId(null);
-    resetDetail();
     setHomeDraftId(createHomeDraftId());
 
     if (routeId) {
       navigate("/");
     }
-  }, [closePanel, navigate, resetDetail, routeId, setActiveId]);
+  }, [closePanel, navigate, routeId, setActiveId]);
 
   // 切换到上/下个会话(按侧边栏列表顺序:置顶优先,然后按更新时间降序,与展示一致)。
   const switchConversation = (direction: -1 | 1) => {
@@ -1709,13 +1676,12 @@ function ConversationsPageInner() {
       systemPrompt: systemPromptDraft,
     });
     setSystemPromptDialogOpen(false);
-    refreshDetail();
+    refreshConversation(activeId);
     refreshList();
     toast.success(t("conversations.custom_prompt.saved"));
   }, [
     activeAssistantForConversation?.allowConversationSystemPrompt,
     activeId,
-    refreshDetail,
     refreshList,
     systemPromptDraft,
   ]);
@@ -1728,14 +1694,13 @@ function ConversationsPageInner() {
         systemPrompt,
       });
       setSystemPromptDraft(systemPrompt);
-      refreshDetail();
+      refreshConversation(activeId);
       refreshList();
       toast.success(t("conversations.custom_prompt.saved"));
     },
     [
       activeAssistantForConversation?.allowConversationSystemPrompt,
       activeId,
-      refreshDetail,
       refreshList,
     ],
   );
@@ -1762,9 +1727,9 @@ function ConversationsPageInner() {
     >
       {!isNewChat && (
         <>
-          {canOverrideConversationSystemPrompt && detail ? (
+          {canOverrideConversationSystemPrompt && hasDetail ? (
             <ConversationSystemPromptButton
-              value={detail.systemPrompt}
+              value={conversationSystemPrompt}
               onSave={handleSaveConversationSystemPromptValue}
             />
           ) : null}
@@ -1772,13 +1737,7 @@ function ConversationsPageInner() {
             <ConversationTimeline
               activeId={activeId}
               isHomeRoute={isHomeRoute}
-              detailLoading={detailLoading}
-              detailError={detailError}
-              selectedNodeMessages={selectedNodeMessages}
-              isGenerating={detail?.isGenerating ?? false}
               settings={settings}
-              conversationAssistantId={detail?.assistantId ?? null}
-              conversationTitle={detail?.title ?? ""}
               onEdit={handleStartEdit}
               onDelete={handleDeleteMessage}
               onFork={handleForkMessage}
@@ -1809,7 +1768,7 @@ function ConversationsPageInner() {
         <TtsPlayBar />
         <ChatInputArea
           draftKey={draftKey}
-          isGenerating={detail?.isGenerating ?? false}
+          isGenerating={conversationIsGenerating}
           disabled={detailLoading || Boolean(detailError)}
           isEditing={Boolean(editingSession)}
           suggestions={displaySuggestions}
@@ -1819,17 +1778,22 @@ function ConversationsPageInner() {
           onSend={handleSend}
           onStop={activeId ? handleStop : undefined}
           onExportConversation={
-            detail && detail.messages.length > 0
+            hasMessages
               ? async (includeReasoning: boolean) => {
+                  // 导出需要完整历史:窗口化(I-2)时先拉全量;拿不到完整历史则报错
+                  // 放弃,绝不导出被窗口截断的部分内容。
+                  const detail = activeId ? await ensureFullConversationDetail(activeId) : null;
+                  if (!detail) {
+                    if (activeId) toast.error(t("conversations.errors.load_detail_failed"));
+                    return;
+                  }
                   const content = await convertConversationToMarkdown(detail, includeReasoning);
                   const filename = safeMarkdownFilename(detail.title || "conversation");
                   downloadMarkdown(content, filename);
                 }
               : undefined
           }
-          onCompressConversation={
-            detail && detail.messages.length > 0 ? handleCompressConversation : undefined
-          }
+          onCompressConversation={hasMessages ? handleCompressConversation : undefined}
           getOptimizeContext={getOptimizeContext}
         />
       </div>
@@ -1897,7 +1861,7 @@ function ConversationsPageInner() {
               variant="ghost"
               size="icon-sm"
               onClick={() => setSystemPromptDialogOpen(true)}
-              disabled={!detail}
+              disabled={!hasDetail}
               aria-label={t("conversations.custom_prompt.edit_aria")}
               title={t("conversations.custom_prompt.edit_aria")}
             >

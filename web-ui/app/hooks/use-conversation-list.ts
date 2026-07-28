@@ -4,11 +4,97 @@ import i18n from "~/i18n";
 import api from "~/services/api";
 import { onAppEvent } from "~/services/app-events";
 import { mergeConversationList, refreshConversationList, sortConversationList } from "~/lib/conversation-list-ops";
-import type {
-  ConversationDto,
-  ConversationListDto,
-  PagedResult,
-} from "~/types";
+import {
+  onConversationSummaryChange,
+  type ConversationSummaryUpdate,
+} from "~/stores/conversation-stream";
+import type { ConversationListDto, PagedResult } from "~/types";
+
+// ===== 会话列表缓存(专题1 A 族闪动修复) =====
+// 与会话详情缓存(stores/conversation-store.ts 的 entries)同思路:stale-while-revalidate。
+// 挂载/换助手时先画上次已知列表(不进加载态),网络返回后静默校正 —— 消灭两类闪动:
+// ① 启动时"空列表→闪→加载出来"(以及 settings 快照到达触发 assistantChanged 的二次清空);
+// ② 设置页返回时路由整棵重挂,列表 state 清零重取("左侧边栏闪一下")。
+// 另持久化一份 localStorage 镜像(仅最后使用的助手、截断到首页规模)供冷启动播种;
+// 镜像是只读缓存,权威永远是服务端,删除/改名等陈旧残留由挂载后的静默刷新在毫秒级校正。
+interface ListCacheEntry {
+  items: ConversationListDto[];
+  hasMore: boolean;
+  nextOffset: number | null;
+}
+
+const LIST_MIRROR_KEY = "rikkahub.conversation-list.mirror.v1";
+const LIST_MIRROR_MAX_ITEMS = 50;
+
+const listCache = new Map<string, ListCacheEntry>();
+
+const keyOf = (assistantId: string | null) => assistantId ?? "";
+
+function readListCache(assistantId: string | null): ListCacheEntry | undefined {
+  return listCache.get(keyOf(assistantId));
+}
+
+/** 写穿透:items 必给;分页字段可省(沿用该助手上次的完整写入,供流式摘要更新等场景)。 */
+function rememberList(
+  assistantId: string | null,
+  items: ConversationListDto[],
+  pagination?: { hasMore: boolean; nextOffset: number | null },
+): void {
+  const key = keyOf(assistantId);
+  const previous = listCache.get(key);
+  const entry: ListCacheEntry = {
+    items,
+    hasMore: pagination ? pagination.hasMore : (previous?.hasMore ?? false),
+    nextOffset: pagination ? pagination.nextOffset : (previous?.nextOffset ?? null),
+  };
+  listCache.set(key, entry);
+  persistListMirror(assistantId, entry);
+}
+
+function persistListMirror(assistantId: string | null, entry: ListCacheEntry): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    // 截断到首页规模:分页游标随截断收敛(offset 分页,从截断处续拉语义连贯);
+    // 实际上挂载后的静默刷新会先于任何 loadMore 到达,截断只影响极端首帧。
+    const truncated = entry.items.length > LIST_MIRROR_MAX_ITEMS;
+    localStorage.setItem(
+      LIST_MIRROR_KEY,
+      JSON.stringify({
+        assistantId,
+        items: truncated ? entry.items.slice(0, LIST_MIRROR_MAX_ITEMS) : entry.items,
+        hasMore: truncated ? true : entry.hasMore,
+        nextOffset: truncated ? LIST_MIRROR_MAX_ITEMS : entry.nextOffset,
+      }),
+    );
+  } catch {
+    // 配额/隐私模式:镜像是尽力而为的缓存,失败静默(仅退化为旧行为)。
+  }
+}
+
+// 模块加载即把 localStorage 镜像灌进内存缓存:冷启动首帧与会话内重挂走同一条读取路径。
+(function hydrateListCacheFromMirror() {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const raw = localStorage.getItem(LIST_MIRROR_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return;
+    const mirror = parsed as {
+      assistantId?: string | null;
+      items?: ConversationListDto[];
+      hasMore?: boolean;
+      nextOffset?: number | null;
+    };
+    if (!Array.isArray(mirror.items) || mirror.items.length === 0) return;
+    listCache.set(keyOf(mirror.assistantId ?? null), {
+      items: mirror.items,
+      hasMore: mirror.hasMore === true,
+      nextOffset: typeof mirror.nextOffset === "number" ? mirror.nextOffset : null,
+    });
+  } catch {
+    // 损坏的镜像直接忽略,等首次成功加载重建。
+  }
+})();
 
 export interface UseConversationListOptions {
   currentAssistantId: string | null;
@@ -16,15 +102,6 @@ export interface UseConversationListOptions {
   autoSelectFirst?: boolean;
   pageSize?: number;
   maxRefreshLimit?: number;
-}
-
-interface ConversationSummaryUpdate {
-  id: string;
-  title: string;
-  isPinned: boolean;
-  createAt: number;
-  updateAt: number;
-  isGenerating: boolean;
 }
 
 export interface UseConversationListResult {
@@ -36,7 +113,6 @@ export interface UseConversationListResult {
   hasMore: boolean;
   loadMore: () => void;
   refreshList: () => void;
-  updateConversationSummary: (update: ConversationSummaryUpdate) => void;
 }
 
 export function useConversationList({
@@ -46,16 +122,34 @@ export function useConversationList({
   pageSize = 30,
   maxRefreshLimit = 100,
 }: UseConversationListOptions): UseConversationListResult {
-  const [conversations, setConversations] = React.useState<ConversationListDto[]>([]);
-  const [activeId, setActiveId] = React.useState<string | null>(routeId ?? null);
-  const [loading, setLoading] = React.useState(true);
+  // A 族修复:挂载即用缓存播种(上次已知列表)。命中则首帧就是完整列表、不进加载态;
+  // 挂载后的取数效果器照常发请求,返回后静默校正(stale-while-revalidate)。
+  const [conversations, setConversations] = React.useState<ConversationListDto[]>(
+    () => readListCache(currentAssistantId)?.items ?? [],
+  );
+  const [activeId, setActiveId] = React.useState<string | null>(() => {
+    if (routeId) return routeId;
+    if (!autoSelectFirst) return null;
+    // 与取数成功后的 autoSelectFirst 同语义:首帧就选中缓存列表的第一条,
+    // 避免"列表已画出、选中态/详情却等网络"的割裂帧。
+    return readListCache(currentAssistantId)?.items[0]?.id ?? null;
+  });
+  const [loading, setLoading] = React.useState(
+    () => (readListCache(currentAssistantId)?.items.length ?? 0) === 0,
+  );
   const [error, setError] = React.useState<string | null>(null);
-  const [hasMore, setHasMore] = React.useState(false);
+  const [hasMore, setHasMore] = React.useState(
+    () => readListCache(currentAssistantId)?.hasMore ?? false,
+  );
   const [refreshToken, setRefreshToken] = React.useState(0);
-  const nextOffsetRef = React.useRef<number | null>(0);
+  const nextOffsetRef = React.useRef<number | null>(
+    readListCache(currentAssistantId)?.nextOffset ?? 0,
+  );
   const currentAssistantIdRef = React.useRef<string | null>(currentAssistantId);
   const conversationsRef = React.useRef<ConversationListDto[]>([]);
-  const previousAssistantIdRef = React.useRef<string | null>(null);
+  // 初值即当前助手:配合缓存播种,首挂载不再走"assistantChanged 清空重取"分支
+  // (旧行为下 settings 快照到达把 null→真实 id 也会清空已加载列表 —— 启动第二次闪动)。
+  const previousAssistantIdRef = React.useRef<string | null>(currentAssistantId);
   const refreshTimerRef = React.useRef<number | null>(null);
   const listRequestEpochRef = React.useRef(0);
 
@@ -91,8 +185,8 @@ export function useConversationList({
 
   const updateConversationSummary = React.useCallback(
     (update: ConversationSummaryUpdate) => {
-      setConversations((prev) =>
-        sortConversations(
+      setConversations((prev) => {
+        const next = sortConversations(
           prev.map((item) =>
             item.id === update.id
               ? {
@@ -105,8 +199,11 @@ export function useConversationList({
                 }
               : item,
           ),
-        ),
-      );
+        );
+        // updater 内写缓存:幂等,StrictMode 双调无害。
+        rememberList(currentAssistantIdRef.current, next);
+        return next;
+      });
     },
     [sortConversations],
   );
@@ -138,20 +235,45 @@ export function useConversationList({
     [scheduleListRefresh],
   );
 
+  React.useEffect(
+    // 元数据桥(专题1 D 族):会话详情流的摘要变化(开始/结束生成、标题打字机、置顶)
+    // 由 conversation-stream 按展示字段闸门过滤后推来 —— 纯内容增量不会到达这里,
+    // 流式期间列表不再以 30Hz 重建重排。
+    () => onConversationSummaryChange(updateConversationSummary),
+    [updateConversationSummary],
+  );
+
   React.useEffect(() => {
     let active = true;
     const assistantChanged = previousAssistantIdRef.current !== currentAssistantId;
     previousAssistantIdRef.current = currentAssistantId;
 
-    const loadedCount = assistantChanged ? 0 : conversationsRef.current.length;
+    // A 族修复:换助手时先试缓存 —— 命中则立即画上次已知列表(不进加载态),
+    // 本次请求降级为静默校正;未命中才走清空+加载态(原行为)。
+    if (assistantChanged) {
+      const cached = readListCache(currentAssistantId);
+      if (cached && cached.items.length > 0) {
+        setConversations(cached.items);
+        // 直写 ref:下方 loadedCount 需在同一趟 effect 里读到播种结果
+        // (state 同步 effect 要等下一次提交才更新 ref)。
+        conversationsRef.current = cached.items;
+        nextOffsetRef.current = cached.nextOffset;
+        setHasMore(cached.hasMore);
+        setLoading(false);
+      } else {
+        setConversations([]);
+        conversationsRef.current = [];
+        nextOffsetRef.current = 0;
+        setHasMore(false);
+      }
+    }
+
+    const loadedCount = conversationsRef.current.length;
     const limit = Math.min(Math.max(pageSize, loadedCount), maxRefreshLimit);
     const requestEpoch = ++listRequestEpochRef.current;
 
-    if (assistantChanged || loadedCount === 0) {
+    if (loadedCount === 0) {
       setLoading(true);
-      setConversations([]);
-      nextOffsetRef.current = 0;
-      setHasMore(false);
     }
 
     setError(null);
@@ -163,10 +285,17 @@ export function useConversationList({
       .then((data) => {
         if (!active || requestEpoch !== listRequestEpochRef.current) return;
 
-        if (assistantChanged || loadedCount === 0) {
-          setConversations(sortConversations(data.items));
+        const pagination = { hasMore: data.hasMore, nextOffset: data.nextOffset ?? null };
+        if (loadedCount === 0) {
+          const sorted = sortConversations(data.items);
+          rememberList(currentAssistantId, sorted, pagination);
+          setConversations(sorted);
         } else {
-          setConversations((prev) => refreshConversations(prev, data.items, limit));
+          setConversations((prev) => {
+            const next = refreshConversations(prev, data.items, limit);
+            rememberList(currentAssistantId, next, pagination);
+            return next;
+          });
         }
         nextOffsetRef.current = data.nextOffset ?? null;
         setHasMore(data.hasMore);
@@ -219,7 +348,12 @@ export function useConversationList({
       .then((data) => {
         if (requestEpoch !== listRequestEpochRef.current) return;
 
-        setConversations((prev) => mergeConversations(prev, data.items));
+        const pagination = { hasMore: data.hasMore, nextOffset: data.nextOffset ?? null };
+        setConversations((prev) => {
+          const next = mergeConversations(prev, data.items);
+          rememberList(currentAssistantIdRef.current, next, pagination);
+          return next;
+        });
         nextOffsetRef.current = data.nextOffset ?? null;
         setHasMore(data.hasMore);
       })
@@ -248,19 +382,5 @@ export function useConversationList({
     hasMore,
     loadMore,
     refreshList,
-    updateConversationSummary,
-  };
-}
-
-export function toConversationSummaryUpdate(
-  conversation: ConversationDto,
-): ConversationSummaryUpdate {
-  return {
-    id: conversation.id,
-    title: conversation.title,
-    isPinned: conversation.isPinned,
-    createAt: conversation.createAt,
-    updateAt: conversation.updateAt,
-    isGenerating: conversation.isGenerating,
   };
 }
