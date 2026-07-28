@@ -17,6 +17,9 @@ export interface ChatInputSlice {
   // 并在并发上传时互斥。
   uploading: boolean;
   setUploading: (uploading: boolean) => void;
+  // 专题4:上传百分比(0-100);null = 不在上传。驱动输入框上传 chip 的确定性进度圆圈。
+  uploadProgress: number | null;
+  setUploadProgress: (progress: number | null) => void;
   setText: (conversationId: string, text: string) => void;
   addParts: (conversationId: string, parts: UIMessagePart[]) => void;
   removePartAt: (conversationId: string, index: number) => void;

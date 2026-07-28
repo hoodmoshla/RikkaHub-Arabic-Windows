@@ -5,7 +5,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { ApiMessage, Assistant, JsonValue, Message, MessagePart, Model, Provider, ToolOutputEntry } from "../foundation/types";
 import { id, isRecord } from "../foundation/utils";
-import { ensureExtractedTextAsync, fallbackDocumentText, readExtractedTextSync } from "../files/index";
+import { fallbackDocumentText, readExtractedTextSync } from "../files/index";
+import { ensureExtractedTextAsync } from "../files/extraction";
 import { parseToolInput, resolvedToolOutput } from "../tools/format";
 import { state } from "../persistence/json-store";
 

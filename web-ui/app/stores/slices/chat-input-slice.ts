@@ -19,6 +19,8 @@ export const createChatInputSlice: StateCreator<AppStoreState, [], [], ChatInput
   drafts: {},
   uploading: false,
   setUploading: (uploading) => set({ uploading }),
+  uploadProgress: null,
+  setUploadProgress: (uploadProgress) => set({ uploadProgress }),
   setText: (conversationId, text) => {
     set((state) => {
       const draft = getDraft(state.drafts, conversationId);

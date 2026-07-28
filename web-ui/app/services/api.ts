@@ -232,6 +232,54 @@ const api = {
       return handleError(error);
     }
   },
+  /** 专题4:带上传进度回调的 multipart POST。fetch/ky 拿不到请求体的发送进度,只能用
+   *  XHR 的 upload.onprogress(与导入导出的 XHR 用法同理);鉴权头、错误载荷解析、401
+   *  密码闸门语义与 kyInstance 对齐。timeout=0——大文件慢网不设限,与上传通道既有的
+   *  timeout:false 决策(7-2)一致。 */
+  postMultipartWithProgress<T>(
+    url: string,
+    formData: FormData,
+    onProgress: (percent: number) => void,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/${url}`);
+      xhr.timeout = 0;
+      const token = getValidWebAuthToken();
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText) as T);
+          } catch (parseError) {
+            reject(parseError);
+          }
+          return;
+        }
+        let message = `HTTP ${xhr.status}`;
+        let code = xhr.status;
+        try {
+          const data = JSON.parse(xhr.responseText) as ErrorResponse;
+          message = data.error ?? message;
+          code = data.code ?? code;
+        } catch {
+          // 非 JSON 错误体,保留 HTTP 状态文案
+        }
+        if (code === 401) {
+          clearWebAuthToken();
+          dispatchWebAuthRequired({ message, code });
+        }
+        reject(new ApiError(message, code));
+      };
+      xhr.onerror = () => reject(new ApiError("Network error", 0));
+      xhr.send(formData);
+    });
+  },
   async postBlob(url: string, data?: unknown, options?: Options): Promise<Response> {
     try {
       return await kyInstance.post(url, data === undefined ? options : { ...options, json: data });

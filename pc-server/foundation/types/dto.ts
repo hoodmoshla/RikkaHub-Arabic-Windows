@@ -109,15 +109,25 @@ export type MessageSearchResultDto = {
 
 // ── 文件上传 DTO ───────────────────────────────────────────────────
 
-/** files/upload 响应元素。 */
+/** 文档全文提取状态(专题4):pending=排队/解析中,done=旁车缓存已写,empty=提取过
+ *  但无文本(扫描版 PDF 等),failed=子进程崩溃/超时,none=该类型没有提取阶段(图片
+ *  /音视频)。done/total 为 PDF 逐页进度,其他格式无中间进度恒为 null。 */
+export type ExtractionStatusDto = {
+  status: "pending" | "done" | "empty" | "failed" | "none";
+  done: number | null;
+  total: number | null;
+};
+
+/** files/upload 响应元素。专题4:上传落盘即返回,提取转后台——原 extractedTextLength
+ *  字段随之退役,前端改轮询 files/:id/extraction 获取进度与结果。 */
 export type UploadedFileDto = {
   id: number;
   url: string;
   fileName: string;
   mime: string;
   size: number;
-  /** 服务端抽取出的正文长度(旧前端 DTO 未声明,实际线上一直存在)。 */
-  extractedTextLength: number;
+  /** 初始提取状态:可提取文档为 "pending",其余 "none"。 */
+  extraction: ExtractionStatusDto["status"];
 };
 
 export type UploadFilesResponseDto = {

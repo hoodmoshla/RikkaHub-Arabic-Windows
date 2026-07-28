@@ -14,6 +14,7 @@ export type {
   ConversationSnapshotEventDto,
   ConversationSnapshotMetaEventDto,
   ConversationTextDeltaEventDto,
+  ExtractionStatusDto,
   MessageDto,
   MessageNodeDto,
   MessageSearchResultDto,

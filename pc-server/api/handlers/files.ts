@@ -1,14 +1,15 @@
-// api/handlers/files.ts — 文件路由（files/upload、content、path、delete）
+// api/handlers/files.ts — 文件路由（files/upload、content、path、extraction、delete）
 // 纪律：纯搬迁自 server.ts routeApi()。
 
-import type { UploadFilesResponseDto, UploadedFileDto } from "../../foundation/types";
+import type { ExtractionStatusDto, UploadFilesResponseDto, UploadedFileDto } from "../../foundation/types";
 import { existsSync, unlinkSync } from "node:fs";
 import { safeDataFilePath } from "../../files";
 import { extname, join } from "node:path";
 import type { StoredFile } from "../../foundation/types";
 import { filesDir } from "../../foundation/paths";
 import { saveState, state } from "../../persistence/json-store";
-import { extractStoredFileText, extractedTextPath, writeExtractedTextSidecar } from "../../files/index";
+import { extractedTextPath, isExtractableDocument } from "../../files/index";
+import { ensureExtractedTextAsync, getExtractionStatus } from "../../files/extraction";
 import { error, json, mime } from "../request";
 
 export async function handleFileRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
@@ -20,19 +21,20 @@ export async function handleFileRoutes(request: Request, _url: URL, path: string
         const target = join(filesDir, `${fileId}${extname(file.name)}`);
         await Bun.write(target, file);
         const entry: StoredFile = { id: fileId, path: target, fileName: file.name, mime: file.type || "application/octet-stream", size: file.size };
-        const t0 = Date.now();
-        // 1-7:抽取全文写旁车文件而非 state 条目,state.json 不再随大文档膨胀。
-        const extractedText = await extractStoredFileText(entry);
-        if (extractedText) writeExtractedTextSidecar(fileId, extractedText);
-        console.log(`[upload] ${entry.fileName} (${(file.size / 1024).toFixed(1)} KB) extracted ${extractedText.length} chars in ${Date.now() - t0}ms`);
         state.files.push(entry);
+        // 专题4:字节落盘即返回,全文提取转后台子进程——上传接口不再被大 PDF 拖住
+        // 几十秒。前端拿 "pending" 后轮询 files/:id/extraction 画进度圆圈;发送时
+        // 提取未完的走既有 fallbackDocumentText 降级(3-4 机制,行为不变)。
+        const extractable = isExtractableDocument(entry);
+        if (extractable) ensureExtractedTextAsync(entry);
+        console.log(`[upload] ${entry.fileName} (${(file.size / 1024).toFixed(1)} KB) stored, extraction=${extractable ? "pending" : "none"}`);
         return {
           id: fileId,
           url: `/api/files/${fileId}/content`,
           fileName: entry.fileName,
           mime: entry.mime,
           size: entry.size,
-          extractedTextLength: extractedText.length,
+          extraction: extractable ? "pending" as const : "none" as const,
         };
       }),
     );
@@ -59,6 +61,15 @@ export async function handleFileRoutes(request: Request, _url: URL, path: string
         "ETag": `"${entry.id}"`,
       },
     });
+  }
+  // 专题4:提取状态/进度查询(前端附件 chip 进度圆圈轮询)。终态后前端停轮。
+  const fileExtraction = path.match(/^files\/(\d+)\/extraction$/);
+  if (fileExtraction && request.method === "GET") {
+    const entry = state.files.find((item) => item.id === Number(fileExtraction[1]));
+    if (!entry) return error("File not found", 404);
+    const status = getExtractionStatus(entry);
+    const response: ExtractionStatusDto = { status: status.status, done: status.done, total: status.total };
+    return json(response);
   }
   const fileByPath = path.match(/^files\/path\/(.+)$/);
   if (fileByPath) {

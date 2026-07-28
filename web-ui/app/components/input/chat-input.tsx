@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { ArrowUp, File, FileDown, Image, LoaderCircle, Mic, Plus, Scissors, Sparkles, Square, Undo2, Video, X, Zap } from "lucide-react";
+import { ArrowUp, File, FileDown, Image, LoaderCircle, Mic, Plus, Scissors, Sparkles, Square, TriangleAlert, Undo2, Video, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -19,7 +19,7 @@ import { resolveFileUrl } from "~/lib/files";
 import { DOCUMENT_UPLOAD_ACCEPT, uploadFilesToDraft } from "~/lib/upload";
 import { cn } from "~/lib/utils";
 import api, { appendWebAuthQuery } from "~/services/api";
-import type { UIMessagePart } from "~/types";
+import type { ExtractionStatusDto, UIMessagePart } from "~/types";
 
 export interface ChatInputProps {
   value: string;
@@ -119,6 +119,112 @@ function getPartFileId(part: UIMessagePart): number | null {
   return typeof value === "number" ? value : null;
 }
 
+// 专题4:PC 端"长文本粘贴转文件"固定开启、阈值 5000 字(用户决策)。刻意不读
+// displaySetting.pasteLongTextAsFile/pasteLongTextThreshold——那是安卓端的设置,
+// 会随备份导入被安卓的值覆盖(安卓默认关);PC 行为不受安卓备份影响。两个字段
+// 仍照常存储并随备份透传,安卓端自用。
+const PASTE_LONG_TEXT_THRESHOLD = 5000;
+
+/** 专题4:确定性进度圆圈。percent=null 转不定圈(准备阶段/无逐页进度的格式),
+ *  有值时按百分比画弧——成熟应用的"小圆圈一段一段加载到闭合"。 */
+function ProgressRing({ percent }: { percent: number | null }) {
+  const radius = 5;
+  const circumference = 2 * Math.PI * radius;
+  if (percent == null) {
+    return (
+      <svg className="size-3.5 shrink-0 animate-spin text-primary" viewBox="0 0 14 14">
+        <circle cx="7" cy="7" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
+        <circle
+          cx="7"
+          cy="7"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeDasharray={`${circumference * 0.3} ${circumference}`}
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+  const clamped = Math.max(0, Math.min(100, percent));
+  return (
+    <svg className="size-3.5 shrink-0 -rotate-90 text-primary" viewBox="0 0 14 14">
+      <circle cx="7" cy="7" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
+      <circle
+        cx="7"
+        cy="7"
+        r={radius}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeDasharray={circumference}
+        strokeDashoffset={circumference * (1 - clamped / 100)}
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/** 专题4:附件的后台提取状态轮询。上传即时返回后,服务端在子进程里提取全文,
+ *  这里每 600ms 轮询 files/:id/extraction 直到终态(done/empty/failed/none)。 */
+function useExtractionStatus(fileId: number | null, isDocument: boolean): ExtractionStatusDto | null {
+  const [status, setStatus] = React.useState<ExtractionStatusDto | null>(null);
+  React.useEffect(() => {
+    if (fileId == null || !isDocument) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      try {
+        const next = await api.get<ExtractionStatusDto>(`files/${fileId}/extraction`);
+        if (cancelled) return;
+        setStatus(next);
+        if (next.status === "pending") timer = setTimeout(poll, 600);
+      } catch {
+        // 文件已删/网络抖动:停止轮询,chip 恢复普通样式即可,发送走既有降级
+        if (!cancelled) setStatus(null);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [fileId, isDocument]);
+  return status;
+}
+
+/** 专题4:附件 chip 上的提取指示。解析中 = 进度圆圈(PDF 有逐页百分比,其他格式
+ *  不定圈);失败/无文本 = 可悬停的警示角标;done/none = 不渲染,chip 恢复普通样子。
+ *  发送永远不被提取阻塞——未完成时该文件走 fallback 占位文案(服务端 3-4 机制)。 */
+function ExtractionBadge({ part }: { part: UIMessagePart }) {
+  const { t } = useTranslation("input");
+  const fileId = getPartFileId(part);
+  const status = useExtractionStatus(fileId, part.type === "document");
+  if (!status) return null;
+  if (status.status === "pending") {
+    const hasPageProgress = status.done != null && status.total != null && status.total > 0;
+    const percent = hasPageProgress ? Math.round((status.done! / status.total!) * 100) : null;
+    const title = hasPageProgress
+      ? t("chat.parsing_progress", { done: status.done, total: status.total })
+      : t("chat.parsing");
+    return (
+      <span className="inline-flex items-center" title={title}>
+        <ProgressRing percent={percent} />
+      </span>
+    );
+  }
+  if (status.status === "failed" || status.status === "empty") {
+    const title = t(status.status === "failed" ? "chat.extraction_failed" : "chat.extraction_empty");
+    return (
+      <span className="inline-flex items-center text-amber-500" title={title}>
+        <TriangleAlert className="size-3.5 shrink-0" />
+      </span>
+    );
+  }
+  return null;
+}
+
 function ChatInputInner({
   value,
   attachments,
@@ -143,12 +249,6 @@ function ChatInputInner({
   const { t } = useTranslation("input");
   const sendOnEnter = useSettingsStore(
     (state) => state.settings?.displaySetting.sendOnEnter ?? true,
-  );
-  const pasteLongTextAsFile = useSettingsStore(
-    (state) => state.settings?.displaySetting.pasteLongTextAsFile ?? false,
-  );
-  const pasteLongTextThreshold = useSettingsStore(
-    (state) => state.settings?.displaySetting.pasteLongTextThreshold ?? 1000,
   );
   const { currentAssistant, settings } = useCurrentAssistant();
 
@@ -220,6 +320,7 @@ function ChatInputInner({
 
   const [submitting, setSubmitting] = React.useState(false);
   const uploading = useChatInputStore((state) => state.uploading);
+  const uploadProgress = useChatInputStore((state) => state.uploadProgress);
   const [uploadMenuOpen, setUploadMenuOpen] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [asrListening, setAsrListening] = React.useState(false);
@@ -541,9 +642,12 @@ function ChatInputInner({
 
   const handleUploadInputChange = React.useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const result = await uploadFilesToDraft(event.target.files, onAddParts);
+      // React 的 currentTarget 只在同步分发阶段有值,await 恢复后为 null;先同步抓住
+      // input 元素再清空 value(不清空则同一文件二次选择不触发 change)。
+      const input = event.currentTarget;
+      const result = await uploadFilesToDraft(input.files, onAddParts);
       if (result.error) setError(result.error);
-      event.currentTarget.value = "";
+      input.value = "";
     },
     [onAddParts],
   );
@@ -552,10 +656,10 @@ function ChatInputInner({
     async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (!canUpload) return;
 
-      // 粘贴长文本自动转换为文件
-      if (pasteLongTextAsFile) {
+      // 粘贴长文本自动转换为文件(专题4:PC 端固定开启,阈值 5000 字,见常量注释)
+      {
         const text = event.clipboardData.getData("text/plain");
-        if (text.length > pasteLongTextThreshold) {
+        if (text.length > PASTE_LONG_TEXT_THRESHOLD) {
           event.preventDefault();
           const file = new globalThis.File([text], "pasted_text.txt", {
             type: "text/plain",
@@ -580,7 +684,7 @@ function ChatInputInner({
       const result = await uploadFilesToDraft(files, onAddParts);
       if (result.error) setError(result.error);
     },
-    [canUpload, onAddParts, pasteLongTextAsFile, pasteLongTextThreshold, t],
+    [canUpload, onAddParts, t],
   );
 
   const sendHint = sendOnEnter ? t("chat.send_hint_enter") : t("chat.send_hint_newline");
@@ -648,6 +752,15 @@ function ChatInputInner({
             </div>
           ) : null}
 
+          {uploading ? (
+            <div className="flex flex-wrap gap-2 px-2 pt-1">
+              <div className="inline-flex items-center gap-1.5 rounded-full border bg-background/80 px-2 py-1 text-xs text-muted-foreground">
+                <ProgressRing percent={uploadProgress} />
+                <span>{t("chat.uploading_progress", { percent: uploadProgress ?? 0 })}</span>
+              </div>
+            </div>
+          ) : null}
+
           {attachments.length > 0 ? (
             <div className="flex flex-wrap gap-2 px-2 pt-1">
               {attachments.map((part, index) => {
@@ -667,6 +780,7 @@ function ChatInputInner({
                       partIcon(part)
                     )}
                     <span className="truncate">{partLabel(part, t)}</span>
+                    <ExtractionBadge part={part} />
                     <button
                       className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
                       onClick={async () => {

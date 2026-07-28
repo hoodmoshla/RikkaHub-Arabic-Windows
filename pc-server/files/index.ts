@@ -1,7 +1,7 @@
 // files/index.ts — 文件上传、OCR、文档解析
 // 纪律：负责文档解析与文件元数据读取，不直接修改业务状态。
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { StoredFile, XmlToken, MupdfModule } from "../foundation/types";
@@ -87,14 +87,32 @@ export function readZipEntries(buffer: Buffer) {
 //
 // 安卓对齐(document 模块):DOCX/PPTX/EPUB 走 zip-file.ts 的中央目录随机访问读取器
 // (对齐 java.util.zip.ZipFile),只解压需要的 XML 条目——单文件内存峰值 = 最大单条目,
-// 与归档总体积无关,故这三种格式与安卓一样【无大小上限】。仍保留上限的两类,原因都是
-// 平台差异而非偷懒:
-//   - PDF:mupdf-wasm 只能从内存 buffer 打开(安卓 MuPDF 原生按路径打开、库内流式读页),
-//     整文件必须进 wasm 堆一次,100MB 上限是 wasm 内存空间的现实约束。
+// 与归档总体积无关,【无大小上限】。PDF 自专题4起经 fz_stream 流式打开(extractPdfText),
+// 常驻内存 = 解析工作集而非文件本体,同样【无大小上限】。仍保留两道保险,保护的都不是
+// 载体内存:
 //   - 纯文本:两端最终都是整串进内存(安卓 copyTo 同样如此),100MB 是 JS 堆的 OOM 保险;
 //     这是内存天花板,不是内容截断——上限内全量透传。
-export const MAX_PDF_EXTRACT_BYTES = 100 * 1024 * 1024;
+//   - 提取产出:100M 字符(≈2500 万 token)。超过它的全文没有任何模型的上下文窗口装得下,
+//     继续提取只是白写旁车缓存;到点截断并在文末注明停在哪一页。
 export const MAX_TEXT_EXTRACT_BYTES = 100 * 1024 * 1024;
+export const MAX_EXTRACT_OUTPUT_CHARS = 100 * 1024 * 1024;
+
+/** 按扩展名识别"文本类"文件(mime 缺失/被 OS 污染时的兜底判定;提取分支与 fallback 文案共用)。 */
+export const TEXT_LIKE_FILE_RE = /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html|htm|css|js|ts|tsx|jsx|py|java|kt|rs|go|c|cpp|h|hpp|cs|php|rb|sh|ps1|sql)$/i;
+
+/** 专题4:是否属于"有全文提取阶段"的文档类型(图片/音视频没有)。上传响应与提取状态
+ *  端点据此区分"解析中"与"无需解析",前端进度圆圈只对前者轮询。 */
+export function isExtractableDocument(entry: Pick<StoredFile, "fileName" | "mime">): boolean {
+  const name = entry.fileName.toLowerCase();
+  const mimeValue = entry.mime.toLowerCase();
+  return (
+    mimeValue === "application/pdf" || name.endsWith(".pdf") ||
+    mimeValue === "application/epub+zip" || name.endsWith(".epub") ||
+    mimeValue === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || name.endsWith(".docx") ||
+    mimeValue === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || name.endsWith(".pptx") ||
+    mimeValue.startsWith("text/") || TEXT_LIKE_FILE_RE.test(name)
+  );
+}
 
 /** R4-3:同步 CPU 重活(MuPDF 逐页/PPTX 逐 slide/EPUB 逐章节)之间让出事件环,
  *  大文档抽取不再冻结其他会话的流式输出与 SSE。setImmediate 无 setTimeout 的最小
@@ -370,10 +388,7 @@ async function extractNonPdfText(entry: StoredFile): Promise<string> {
     if (mimeValue === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || name.endsWith(".pptx")) {
       return await extractPptxText(entry.path);
     }
-    if (
-      mimeValue.startsWith("text/") ||
-      /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html|htm|css|js|ts|tsx|jsx|py|java|kt|rs|go|c|cpp|h|hpp|cs|php|rb|sh|ps1|sql)$/i.test(name)
-    ) {
+    if (mimeValue.startsWith("text/") || TEXT_LIKE_FILE_RE.test(name)) {
       if (getStoredFileSize(entry) > MAX_TEXT_EXTRACT_BYTES) {
         // OOM guard: a >100 MB plain-text upload would balloon JS heap. Bail and let
         // fallbackDocumentText tell the model the file is too large to inline. This is a
@@ -420,38 +435,21 @@ export function writeExtractedTextSidecar(fileId: number, text: string): void {
   }
 }
 
-/** 3-4:后台补抽。编码热路径未命中缓存时调用——不再同步解析大文件阻塞事件环,
- *  本次请求降级 fallbackDocumentText,抽取完写旁车,下次发送生效。in-flight 去重。
- *  R4-4:抽取结果为空(扫描版 PDF/不支持格式)不写旁车,不记录的话每次发送都会
- *  全量重抽同一个文件。空结果进程内负缓存:本次运行只试一次;不落盘,避免把瞬时
- *  故障(如 wasm 初始化失败)永久钉死,重启/重新上传自然失效。 */
-const inflightExtractions = new Set<number>();
-const emptyExtractionAttempts = new Set<number>();
-export function ensureExtractedTextAsync(entry: StoredFile): void {
-  if (inflightExtractions.has(entry.id) || emptyExtractionAttempts.has(entry.id)) return;
-  inflightExtractions.add(entry.id);
-  void extractStoredFileText(entry)
-    .then((text) => {
-      if (text) writeExtractedTextSidecar(entry.id, text);
-      else emptyExtractionAttempts.add(entry.id);
-    })
-    .catch((err) => console.warn(`[document] 后台抽取失败 ${entry.fileName}:`, err))
-    .finally(() => inflightExtractions.delete(entry.id));
-}
+// 专题4:后台补抽(ensureExtractedTextAsync)迁至 files/extraction.ts——提取一律在
+// 用完即弃的子进程里跑,主进程不再触碰 mupdf wasm(其堆只涨不缩,提取过一个大 PDF
+// 就永久占用),本文件只保留纯解析器供子进程(worker 模式)调用。
 
-// Full async version, used by the upload endpoint and background back-fill. Adds PDF
-// handling on top of the sync formats; result is cached into the sidecar file.
-export async function extractStoredFileText(entry: StoredFile): Promise<string> {
+// Full extraction dispatch. 专题4起仅由提取子进程(files/extraction.ts worker 模式)与
+// 测试调用;onPdfProgress 逐页回调,worker 把它转成 stdout 进度行供父进程/前端消费。
+export async function extractStoredFileText(
+  entry: StoredFile,
+  onPdfProgress?: (done: number, total: number) => void,
+): Promise<string> {
   const name = entry.fileName.toLowerCase();
   const mimeValue = entry.mime.toLowerCase();
   if (mimeValue === "application/pdf" || name.endsWith(".pdf")) {
-    const size = getStoredFileSize(entry);
-    if (size > MAX_PDF_EXTRACT_BYTES) {
-      console.warn(`[document] skipping PDF extraction: ${entry.fileName} ${size} > ${MAX_PDF_EXTRACT_BYTES}`);
-      return "";
-    }
     try {
-      return await extractPdfText(entry.path);
+      return await extractPdfText(entry.path, onPdfProgress);
     } catch (err) {
       console.warn(`[document] PDF extract failed for ${entry.fileName}:`, err);
       return "";
@@ -477,10 +475,9 @@ export function fallbackDocumentText(part: { fileName: string; url: string; entr
 
   // Size-cap path: tell the model the file is too big to inline so it can ask the user
   // to split / summarize rather than pretend to have read it.
-  // 安卓对齐后仅 PDF(wasm 约束)与纯文本(JS 堆保险)仍有上限;zip 类格式无上限。
+  // 专题4:PDF 改流式打开后不再有输入上限;仅纯文本(JS 堆保险)保留 100MB 上限。
   const overCap =
-    ((mimeValue === "application/pdf" || name.endsWith(".pdf")) && size > MAX_PDF_EXTRACT_BYTES) ||
-    ((mimeValue.startsWith("text/") || /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html|htm|css|js|ts|tsx|jsx|py|java|kt|rs|go|c|cpp|h|hpp|cs|php|rb|sh|ps1|sql)$/i.test(name)) && size > MAX_TEXT_EXTRACT_BYTES);
+    (mimeValue.startsWith("text/") || TEXT_LIKE_FILE_RE.test(name)) && size > MAX_TEXT_EXTRACT_BYTES;
   if (overCap) {
     return `[Document: ${fileName} — too large to inline (${sizeMb} MB). Ask the user to split it or describe the part they need.]`;
   }
@@ -501,13 +498,37 @@ export function fallbackDocumentText(part: { fileName: string; url: string; entr
 //
 // Memory: MuPDF maintains its own wasm heap; we MUST destroy() doc/page/stext explicitly
 // because JS GC can't reach into wasm memory. try/finally pairing is non-negotiable.
-export async function extractPdfText(pathValue: string): Promise<string> {
+//
+// 专题4:改为 fz_stream 流式打开——wasm 侧每次 read/seek 都回调到下面的 handle,
+// readSync(fd, HEAPU8窗口, ...) 直接从磁盘读进 mupdf 请求的堆窗口。PDF 解析天然随机
+// 访问(文件尾 xref 指哪读哪),结构化文本提取不解码图片,所以 3GB 的扫描件常驻内存
+// 也只是"当前页工作集"(MB 级)。这与安卓原生 MuPDF 按路径打开是同一内存模型,
+// 输入大小上限随之取消。⚠️ 不要"简化"回 readFileSync+buffer:那会把整个文件塞进
+// wasm 堆(4GB 硬顶、且只涨不缩),正是本次重构根除的问题。
+export async function extractPdfText(
+  pathValue: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<string> {
   const mupdf = await loadMupdf();
-  const buf = readFileSync(pathValue);
-  const doc = mupdf.Document.openDocument(buf, "application/pdf");
+  const fd = openSync(pathValue, "r");
+  const fileSize = fstatSync(fd).size;
+  let fdClosed = false;
+  const closeFd = () => {
+    if (fdClosed) return;
+    fdClosed = true;
+    try { closeSync(fd); } catch { /* 已关闭/句柄失效,忽略 */ }
+  };
+  const stream = new mupdf.Stream({
+    fileSize: () => fileSize,
+    read: (memory, offset, length, position) => readSync(fd, memory, offset, length, position),
+    close: closeFd,
+  });
+  let doc: ReturnType<typeof mupdf.Document.openDocument> | null = null;
   try {
+    doc = mupdf.Document.openDocument(stream, "application/pdf");
     const pageCount = doc.countPages();
     const parts: string[] = [];
+    let totalChars = 0;
     for (let i = 0; i < pageCount; i++) {
       // R4-3:页间让出事件环——大书解析期间流式输出/SSE 不再冻结(安卓在后台线程,无此问题)。
       if (i > 0) await yieldToEventLoop();
@@ -516,17 +537,28 @@ export async function extractPdfText(pathValue: string): Promise<string> {
         const stext = page.toStructuredText();
         try {
           // Aligned with Android: "---Page ${i+1}:\n${stext.asText()}"
-          parts.push(`---Page ${i + 1}:\n${stext.asText()}`);
+          const pageText = `---Page ${i + 1}:\n${stext.asText()}`;
+          parts.push(pageText);
+          totalChars += pageText.length;
         } finally {
           stext.destroy?.();
         }
       } finally {
         page.destroy?.();
       }
+      onProgress?.(i + 1, pageCount);
+      if (totalChars > MAX_EXTRACT_OUTPUT_CHARS) {
+        // 产出保险(见文件顶部纪律注释):没有模型装得下的部分不再白提取。
+        parts.push(`[extraction stopped at page ${i + 1} of ${pageCount}: output exceeded ${MAX_EXTRACT_OUTPUT_CHARS} characters]`);
+        break;
+      }
     }
     return parts.join("\n");
   } finally {
-    doc.destroy?.();
+    doc?.destroy?.();
+    stream.destroy?.();
+    // openDocument 抛出等 close 回调没走到的路径,兜底释放 fd。
+    closeFd();
   }
 }
 

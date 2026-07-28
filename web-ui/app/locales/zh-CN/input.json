@@ -108,7 +108,12 @@
     "placeholder_not_ready": "请先选择会话",
     "send_hint_enter": "按 Enter 发送，Shift + Enter 换行",
     "send_hint_newline": "按 Shift + Enter 发送，Enter 换行",
-    "long_text_as_file": "长文本已转为文件附件"
+    "long_text_as_file": "长文本已转为文件附件",
+    "uploading_progress": "上传中 {{percent}}%",
+    "parsing_progress": "解析中 {{done}}/{{total}} 页",
+    "parsing": "解析中",
+    "extraction_failed": "解析失败：发送时将无法附带此文件的正文",
+    "extraction_empty": "未能提取出文本（可能是扫描件或不支持的格式）"
   },
   "resize_handle": "拖动调整输入框大小",
   "compress_history": "压缩对话历史",

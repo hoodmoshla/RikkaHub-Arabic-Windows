@@ -18,10 +18,17 @@ import { checkpointConversationsDb, flushConvDirtyNow, getConversation, persistC
 
 import process from "node:process";
 import { installProcessSafetyNet, reportError } from "./observability/app-errors";
+import { maybeRunExtractionWorker } from "./files/extraction";
 
 // 全面审查 4-2:进程级异常兜底必须最早安装,罩住后续启动期与运行期的一切
 // 定时器/游离 Promise 顶层抛错(SIGINT/SIGTERM 的优雅停机在文件尾另行注册)。
 installProcessSafetyNet();
+
+// 专题4:文档提取 worker 分支——本进程被父进程以 RIKKAHUB_EXTRACT_WORKER=1 自孵化
+// 时只做单次提取即退出,必须在数据目录锁与端口绑定之前拐走,否则会跟正主抢锁。
+if (await maybeRunExtractionWorker()) {
+  process.exit(process.exitCode ?? 0);
+}
 
 // R1-4:壳(lib.rs)在 stdout 解析的单行诊断标记。release 壳下 stderr 不可见,启动失败
 // 的真实原因全靠它带出去;消息压成单行,壳原样弹窗展示。code 对齐 process.exit 码,

@@ -14,6 +14,9 @@ import api from "~/services/api";
 import { useAppStore } from "~/stores";
 import type { UIMessagePart, UploadFilesResponseDto } from "~/types";
 
+// 专题4:只列真的有后端解析器的格式。老 Office(.doc/.xls/.ppt)与 .xlsx 此前也在
+// 清单里,但服务端从来没有它们的解析器——用户上传后模型只会拿到"无法提取"占位文案,
+// 等于诱导用户踩坑,一并移除(选择器筛掉;强行拖拽的会被 MIME 白名单拒绝并 toast)。
 export const DOCUMENT_UPLOAD_ACCEPT = [
   ".txt",
   ".md",
@@ -24,11 +27,7 @@ export const DOCUMENT_UPLOAD_ACCEPT = [
   ".yaml",
   ".yml",
   ".pdf",
-  ".doc",
   ".docx",
-  ".xls",
-  ".xlsx",
-  ".ppt",
   ".pptx",
   ".epub",
   "application/epub+zip",
@@ -72,14 +71,11 @@ async function detectUploadFile(
   }
 
   // 允许常见文档格式
+  // 专题4:与 DOCUMENT_UPLOAD_ACCEPT 同步收敛——只放行有后端解析器的文档格式。
   const ALLOWED_DOCUMENT_MIMES = new Set([
     "application/pdf",
     "application/epub+zip",
-    "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/vnd.ms-powerpoint",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ]);
   if (ALLOWED_DOCUMENT_MIMES.has(detected.mime)) {
@@ -204,12 +200,16 @@ export async function uploadFilesToDraft(
       formData.append("files", safeFile, safeFile.name);
     });
 
-    // 7-2:唯一上传通道不能吃 ky 默认 30s 超时——大文件/慢网/远程部署 30s 传不完,
-    // ky abort 后服务端可能已落盘,产生孤儿文件+重试重复。与导入导出(XHR timeout=0)
-    // 及翻译/生图等长操作(timeout:false)对齐。大文件流式上传重做见路线图。
-    const response = await api.postMultipart<UploadFilesResponseDto>("files/upload", formData, {
-      timeout: false,
-    });
+    // 专题4:上传改走 XHR 进度通道(timeout=0,7-2 的"上传不设超时"决策不变),
+    // 百分比写进全局 store,驱动输入框上传 chip 的确定性进度圆圈。服务端自本次起
+    // "字节落盘即返回",全文提取转后台子进程——响应到达即上传阶段完成,附件 chip
+    // 随后自行轮询提取进度(ExtractionBadge)。
+    useAppStore.getState().setUploadProgress(0);
+    const response = await api.postMultipartWithProgress<UploadFilesResponseDto>(
+      "files/upload",
+      formData,
+      (percent) => useAppStore.getState().setUploadProgress(percent),
+    );
     const parts = response.files.map(toMessagePart);
     onAddParts(parts);
     return { error: null };
@@ -219,5 +219,6 @@ export async function uploadFilesToDraft(
     return { error: message };
   } finally {
     setUploading(false);
+    useAppStore.getState().setUploadProgress(null);
   }
 }

@@ -2047,7 +2047,15 @@ function minimalEpubBytes() {
 async function runEpubStatsLogsSmoke() {
   const upload = await uploadFile("/api/files/upload", new File([minimalEpubBytes()], "smoke.epub", { type: "application/epub+zip" }));
   const uploaded = upload.files?.[0];
-  assert(uploaded?.extractedTextLength > 0, "EPUB upload did not extract text");
+  // 专题4:上传即时返回、提取转后台子进程。这里轮询提取端点直到旁车写完——
+  // 顺带端到端验证"单命令自孵化 worker"在当前启动方式下真的能跑通。
+  assert(uploaded?.extraction === "pending", "EPUB upload should report extraction pending");
+  let extraction: AnyRecord = { status: "pending" };
+  for (let i = 0; i < 100 && extraction.status === "pending"; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    extraction = await api(`/api/files/${uploaded.id}/extraction`);
+  }
+  assert(extraction.status === "done", `EPUB extraction did not complete: ${JSON.stringify(extraction)}`);
   const stats = await api("/api/stats");
   const groupNames = (stats.requestGroups ?? []).map((item: AnyRecord) => item.name);
   assert(groupNames.includes("模型请求"), "stats missing model request group");
@@ -2057,7 +2065,7 @@ async function runEpubStatsLogsSmoke() {
   // imageGen + epub 产生的新日志。验证完整 body + method/headers 字段对齐移动端。
   assert(logs.some((log: AnyRecord) => log.requestBody && log.responseBody), "logs missing request/response body");
   assert(logs.some((log: AnyRecord) => log.method && log.requestHeaders && log.responseHeaders), "logs missing method/headers");
-  return { epubTextLength: uploaded.extractedTextLength, requestGroups: groupNames, logCount: logs.length };
+  return { epubExtraction: extraction.status, requestGroups: groupNames, logCount: logs.length };
 }
 
 // I-1 回归防线(专题2):快照协商。带正确令牌重开流,首帧必须是轻量 snapshot_meta

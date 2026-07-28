@@ -108,7 +108,12 @@
     "placeholder_not_ready": "Please select a conversation first",
     "send_hint_enter": "Press Enter to send, Shift + Enter for newline",
     "send_hint_newline": "Press Shift + Enter to send, Enter for newline",
-    "long_text_as_file": "Long text converted to file attachment"
+    "long_text_as_file": "Long text converted to file attachment",
+    "uploading_progress": "Uploading {{percent}}%",
+    "parsing_progress": "Parsing page {{done}}/{{total}}",
+    "parsing": "Parsing",
+    "extraction_failed": "Parsing failed: this file's text can't be attached when sending",
+    "extraction_empty": "No text could be extracted (scanned or unsupported file)"
   },
   "resize_handle": "Drag to resize the input box",
   "compress_history": "Compress conversation history",

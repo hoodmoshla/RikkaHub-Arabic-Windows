@@ -6,6 +6,7 @@ import { bumpAnalyticsErrCount } from "../app-config/analytics";
 import type { GenerationEvent, GenerationEventSink, StreamHooksWithSink, ToolExecutor } from "../inference-engine/events";
 import { id, isRecord, message, textFromParts } from "../foundation/utils";
 import { classifyProxyError } from "../foundation/net";
+import { classifyContextOverflowError } from "../inference-engine/context-overflow";
 import { state } from "../persistence/json-store";
 import { addLog } from "../api/logs";
 import { broadcastConversation, broadcastList, broadcastNodeUpdate, touchStream } from "../api/sse";
@@ -647,7 +648,7 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
     bumpAnalyticsErrCount();
     const rawContent = err instanceof Error ? err.message : String(err);
     const proxyHint = classifyProxyError(err, state.settings.proxyConfig);
-    const failureText = proxyHint ?? `请求失败：${rawContent}`;
+    const failureText = proxyHint ?? classifyContextOverflowError(err) ?? `请求失败：${rawContent}`;
     // P2-1(N-7 归宿):失败文本除了写进会话消息(仅会话 SSE 可见),还上报全局通道——
     // 用户不在该会话页时也能收到通知(批2 接前端 toast)。
     reportError("provider", "error", failureText, err);
