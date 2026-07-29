@@ -2,7 +2,7 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3a），行为不变。依赖注入见 imports；不反向依赖 ../server。
 
 import { updateSettings } from "../app-config";
-import { fetchWithTimeout } from "../foundation/net";
+import { fetchWithTimeout, readWithIdleTimeout } from "../foundation/net";
 import type { Assistant, Model, Provider } from "../foundation/types";
 import { state } from "../persistence/json-store";
 import { addLog } from "../api/logs";
@@ -244,24 +244,13 @@ async function readProviderTestStream(response: Response, providerItem: Provider
     preview += text;
     if (preview.length > 6000) preview = `${preview.slice(0, 6000)}...`;
   };
-  const readWithIdleTimeout = async () => {
-    // 120s between upstream chunks before declaring the connection dead. Was 10 minutes;
-    // dropped to 2 minutes so a half-open TCP / Cloudflare hiccup releases the connection
-    // (and its slot in the frontend's 6-per-host pool) much faster. Reasoning models can
-    // pause 30+s mid-thought but rarely 2 min — well within tolerance.
-    const timeoutMs = 120_000;
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    try {
-      return await Promise.race([
-        reader.read(),
-        new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("流式测试超时：2 分钟内没有收到供应商的 SSE 数据")), timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
-  };
+  // 120s between upstream chunks before declaring the connection dead. Was 10 minutes;
+  // dropped to 2 minutes so a half-open TCP / Cloudflare hiccup releases the connection
+  // (and its slot in the frontend's 6-per-host pool) much faster. Reasoning models can
+  // pause 30+s mid-thought but rarely 2 min — well within tolerance.
+  // 专题7:本地 Promise.race 实现去重,改用 foundation/net 的共用包装。
+  const readChunk = () =>
+    readWithIdleTimeout(() => reader.read(), 120_000, "流式测试超时：2 分钟内没有收到供应商的 SSE 数据");
   const consumePayload = (payload: string) => {
     if (!payload || payload === "[DONE]") return;
     sawEvent = true;
@@ -295,7 +284,7 @@ async function readProviderTestStream(response: Response, providerItem: Provider
   };
   try {
     for (;;) {
-      const { done, value } = await readWithIdleTimeout();
+      const { done, value } = await readChunk();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const parts = buffer.split(/\n\n+/);

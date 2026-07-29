@@ -394,3 +394,23 @@ export function fetchWithTimeout(url: string | URL, init: FetchWithTimeoutInit =
   const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   return fetch(url, { ...rest, signal: combined });
 }
+
+/** 用空闲超时包裹一次异步读取(通常是 reader.read()):超 timeoutMs 未 settle 即 reject,
+ *  让上游黑洞连接及时报错释放,而非永久悬挂。原 promise 在超时后仍挂着(JS 无法取消),
+ *  但错误已向上传播,调用栈随之解开;若需真正断开底层连接,调用方在 catch 里 abort。
+ *  原为 inference-engine/tool-loop 的 R3-1 能力,专题7 下沉到此供全库复用
+ *  (LLM 流式读取、供应商测试流、更新包下载流)。 */
+export function readWithIdleTimeout<T>(read: () => Promise<T>, timeoutMs: number, errorMessage?: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    read(),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(errorMessage ?? `流空闲超时:${Math.round(timeoutMs / 1000)}s 未收到上游数据`)),
+        timeoutMs,
+      );
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}

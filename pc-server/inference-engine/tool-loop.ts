@@ -29,27 +29,9 @@ export const MAX_TOOL_STEPS = 256;
 
 // R3-1:主对话流的空闲看门狗预算。上游黑洞(TCP 通但永不回头,或流中途静默不断连——
 // 劣质中转站常见)时,若无此上限 reader.read() 永久悬挂,generating 卡死、挡住 working-set
-// 清扫且不可自愈。三家流式 reader 统一走 readWithIdleTimeout 包装(此前仅 OpenAI 有)。
+// 清扫且不可自愈。三家流式 reader 统一走 readWithIdleTimeout 包装(此前仅 OpenAI 有;
+// 包装函数已于专题7下沉到 foundation/net.ts 供全库复用)。
 export const STREAM_IDLE_TIMEOUT_MS = 120_000;
-
-/** 用空闲超时包裹一次 reader.read():超 timeoutMs 未收到任何字节即 reject,让上游黑洞
- *  连接及时报错释放,而非永久悬挂。与 signal 轮询互补——signal 管"用户主动停",本包装
- *  管"上游静默挂死"。read 的 promise 在超时后仍挂着(JS 无法取消),但错误已向上传播,
- *  请求处理栈随之解开、连接由 GC 回收(与原 OpenAI 行为一致)。 */
-export function readWithIdleTimeout<T>(read: () => Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  return Promise.race([
-    read(),
-    new Promise<T>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`流空闲超时:${Math.round(timeoutMs / 1000)}s 未收到上游数据`)),
-        timeoutMs,
-      );
-    }),
-  ]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
-}
 
 // R3-1:头超时 + 外部 signal 桥接。下沉自 OpenAI adapter 的 fetchRound 包装,现为骨架能力,
 // 三家共用。响应头到达(fetch settle)即 cleanup 清定时器、摘外部 abort 监听——之后的流式

@@ -6,7 +6,7 @@ import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "n
 import type { Assistant, JsonValue, Message, Provider, ApiMessage, ClaudeStreamRoundResult, GoogleStreamRoundResult, ToolPart } from "../foundation/types";
 import { id, isRecord, reasoningFromParts, safeJsonParse, visibleReasoningFromMessage, visibleTextFromMessage } from "../foundation/utils";
 import { MODELS_DEV_CACHE_PATH } from "../foundation/paths";
-import { fetchWithTimeout } from "../foundation/net";
+import { fetchWithTimeout, readWithIdleTimeout } from "../foundation/net";
 import { initialApprovalState, toolNeedsApproval } from "../tools/approval";
 import { openAiToolOutput, partsToToolResultText, resolvedToolOutput, toolExecutionErrorPayload } from "../tools/format";
 import {
@@ -22,7 +22,7 @@ import {
 } from "../model-providers";
 import { addLog } from "../api/logs";
 import { touchStream } from "../api/sse";
-import { MAX_TOOL_STEPS, runStreamingToolLoop, toolCallContext, readWithIdleTimeout, STREAM_IDLE_TIMEOUT_MS, type ProviderRoundAdapter, type NormalizedToolCall } from "./tool-loop";
+import { MAX_TOOL_STEPS, runStreamingToolLoop, toolCallContext, STREAM_IDLE_TIMEOUT_MS, type ProviderRoundAdapter, type NormalizedToolCall } from "./tool-loop";
 
 // P1-5:工具循环骨架迁至 tool-loop.ts,这里重导出维持既有导入方。
 export { MAX_TOOL_STEPS, toolCallContext };
@@ -989,11 +989,11 @@ export function parseSseChunks(text: string) {
         .trim();
       if (!data) return [];
       if (data === "[DONE]") return [data];
-      // R3-7:SSE \u89C4\u8303\u5141\u8BB8\u4E00\u4E2A\u4E8B\u4EF6\u7684 data \u8DE8\u591A\u884C\u2014\u2014join \u540E\u624D\u662F\u5B8C\u6574\u8F7D\u8377\u3002\u6B64\u524D\u65E0\u6761\u4EF6\u6309\u884C
-      // \u518D\u62C6,\u8DE8\u884C JSON \u6BCF\u884C\u90FD\u89E3\u6790\u5931\u8D25\u88AB\u8C03\u7528\u65B9\u5BB9\u9519\u541E\u6389,\u5185\u5BB9\u6574\u6BB5\u9759\u9ED8\u4E22\u5931\u4E14\u65E0\u62A5\u9519(\u5BF9\u9F50
-      // readClaudeStreamingRound \u7684 join \u540E\u6574\u4F53 parse)\u3002\u5355\u884C\u8F7D\u8377(\u4E09\u5BB6\u5B98\u65B9\u4E0A\u6E38\u7684\u73B0\u72B6)
-      // \u884C\u4E3A\u4E0D\u53D8;join \u540E\u4E0D\u662F\u5408\u6CD5 JSON \u65F6\u9000\u56DE\u9010\u884C\u62C6\u5206\u2014\u2014\u517C\u5BB9"\u540C\u4E00 block \u91CC\u585E\u591A\u4E2A\u5355\u884C
-      // JSON \u4E8B\u4EF6"\u7684\u4E0D\u89C4\u8303\u4E0A\u6E38(\u65E7\u884C\u4E3A)\u3002
+      // R3-7:SSE 规范允许一个事件的 data 跨多行——join 后才是完整载荷。此前无条件按行
+      // 再拆,跨行 JSON 每行都解析失败被调用方容错吞掉,内容整段静默丢失且无报错(对齐
+      // readClaudeStreamingRound 的 join 后整体 parse)。单行载荷(三家官方上游的现状)
+      // 行为不变;join 后不是合法 JSON 时退回逐行拆分——兼容"同一 block 里塞多个单行
+      // JSON 事件"的不规范上游(旧行为)。
       if (!data.includes("\n")) return [data];
       try {
         JSON.parse(data);
@@ -1564,8 +1564,9 @@ export async function fetchOpenAiTextStreaming(
       body: JSON.stringify(requestBody),
       signal: sig,
     }),
-    // R3-1:非流式 180s / 流式 600s 头超时(原 OpenAI 自建包装,现下沉为骨架能力)。
-    headerTimeoutMs: (requestBody) => (requestBody.stream === false ? 180_000 : 600_000),
+    // R3-1:非流式 300s / 流式 600s 头超时(原 OpenAI 自建包装,现下沉为骨架能力)。
+    // 非流式的响应头要等全文生成完才到,长思考模型思考 5 分钟以上很常见,180s 会误杀(专题7)。
+    headerTimeoutMs: (requestBody) => (requestBody.stream === false ? 300_000 : 600_000),
     async readRound(response, sig) {
       const r = await readOpenAiResponseIntoMessage(response, hooks, sig);
       // 稀疏数组洞与无名条目过滤:Responses API 流按 output_index 建槽,function_call 与

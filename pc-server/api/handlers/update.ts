@@ -5,6 +5,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync, sta
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { GithubRelease } from "../../foundation/types";
 import { updatesCacheDir } from "../../foundation/paths";
+import { readWithIdleTimeout } from "../../foundation/net";
 import { RUNNING_IN_CONTAINER, RUNTIME_PLATFORM } from "../../foundation/platform";
 import { compareSemver } from "../../foundation/utils";
 import {
@@ -206,7 +207,14 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
         let writer: ReturnType<ReturnType<typeof Bun.file>["writer"]> | null = null;
         let downloadComplete = false;
         try {
-          const res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "RikkaHub-PC" }, signal: abort.signal });
+          // 专题7:下载流空闲看门狗。CDN 静默挂死(TCP 通但不回字节)时,若无上限,
+          // 响应头等待或 reader.read() 永久悬挂,前端进度条永久卡住且无错误提示。
+          // 超时抛错后走下方 catch:推 error 事件、abort 掉底层连接、finally 删半截文件。
+          const res = await readWithIdleTimeout(
+            () => fetch(url, { redirect: "follow", headers: { "User-Agent": "RikkaHub-PC" }, signal: abort.signal }),
+            30_000,
+            "下载连接超时：30s 内未收到服务器响应",
+          );
           if (!res.ok || !res.body) {
             const text = res.ok ? "no response body" : await res.text().catch(() => "");
             send({ type: "error", message: `Download failed: ${res.status} ${String(text).slice(0, 200)}` });
@@ -217,7 +225,11 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
           writer = Bun.file(targetPath).writer();
           let received = 0;
           while (true) {
-            const { done, value } = await reader.read();
+            const { done, value } = await readWithIdleTimeout(
+              () => reader.read(),
+              60_000,
+              "下载停滞：60s 未收到任何数据，已中断（网络或下载源异常，请重试）",
+            );
             if (done) break;
             await writer.write(value);
             received += value.length;
@@ -253,6 +265,8 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
           try { chmodSync(innerExe, 0o755); } catch { /* best-effort */ }
           send({ type: "done", path: innerExe, size: received });
         } catch (err) {
+          // 看门狗超时后底层 fetch 仍挂着(race 无法取消 promise),显式 abort 释放连接。
+          try { abort.abort(); } catch { /* 已 abort 或未发起 */ }
           send({ type: "error", message: err instanceof Error ? err.message : String(err) });
         } finally {
           if (writer) {
