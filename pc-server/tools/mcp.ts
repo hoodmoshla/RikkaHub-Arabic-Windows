@@ -330,7 +330,11 @@ export async function fetchMcpTools(server: Record<string, JsonValue>, log?: Mcp
     description: tool.description ? String(tool.description) : null,
     inputSchema: tool.inputSchema ?? tool.input_schema ?? { type: "object", properties: {} },
     needsApproval: tool.needsApproval === true,
-  })).filter((tool) => tool.name);
+  })).filter((tool) => tool.name)
+    // 专题11-P3:按名字序排序后再入库。部分 MCP 服务器 tools/list 返回顺序不稳定,
+    // 同步后工具在请求体里的顺序跳动会让工具定义段之后的前缀缓存失效;
+    // 用码点比较而非 localeCompare,保证跨机器/跨语言环境稳定。
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 export async function syncMcpServerTools(server: Record<string, JsonValue>, log?: McpLogCallback) {

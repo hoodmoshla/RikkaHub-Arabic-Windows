@@ -65,8 +65,13 @@ export function templateVariables(
   assistant: Assistant,
   modelItem: Model,
   userNickname: string,
+  // 专题11-P1-1:历史消息的时间类变量按消息自身 createdAt 渲染(调用方传 at),而不是
+  // 每次请求都用“此刻”——否则含 {{time}} 等字面量的历史消息内容随请求时刻漂移:
+  // 语义错误(昨天的消息声称今天的时间)且从该消息起前缀缓存全部失效。
+  // 不传 at(系统提示词/辅助调用)保持“此刻”。
+  at?: Date,
 ): Record<string, string> {
-  const now = new Date();
+  const now = at ?? new Date();
   const user = userNickname.trim() || "User";
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const locale = Intl.DateTimeFormat().resolvedOptions().locale;
@@ -91,12 +96,13 @@ export function templateVariables(
   };
 }
 
-export function renderAssistantMessageTemplate(template: string, messageText: string, role: string) {
+export function renderAssistantMessageTemplate(template: string, messageText: string, role: string, at?: Date) {
+  const now = at ?? new Date();
   const variables = {
     message: messageText,
     role: role.toLowerCase(),
-    time: formatLocalTime(new Date()),
-    date: formatLocalDate(new Date()),
+    time: formatLocalTime(now),
+    date: formatLocalDate(now),
   };
   return renderTemplate(template || "{{ message }}", variables);
 }
@@ -105,10 +111,10 @@ function transformedTextPart(part: TextPart, text: string): TextPart {
   return { ...part, text };
 }
 
-export function applyMessageTemplateToParts(parts: MessagePart[], role: string, template: string) {
+export function applyMessageTemplateToParts(parts: MessagePart[], role: string, template: string, at?: Date) {
   return parts.map((part) => {
     if (!isRecord(part) || part.type !== "text") return part;
-    return transformedTextPart(part, renderAssistantMessageTemplate(template, String(part.text ?? ""), role));
+    return transformedTextPart(part, renderAssistantMessageTemplate(template, String(part.text ?? ""), role, at));
   });
 }
 

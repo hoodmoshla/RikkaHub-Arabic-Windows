@@ -17,6 +17,7 @@ export async function computeStats() {
   let characters = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  let cachedTokens = 0;
   const models = new Map<string, { id: string; name: string; providerName: string; count: number }>();
   const requestGroups = new Map<string, { ok: number; failed: number }>();
   const providers = new Map<string, { ok: number; failed: number }>();
@@ -58,6 +59,7 @@ export async function computeStats() {
         if (msg.usage && typeof msg.usage === "object" && !Array.isArray(msg.usage)) {
           inputTokens += Number(msg.usage.promptTokens ?? msg.usage.inputTokens ?? 0);
           outputTokens += Number(msg.usage.completionTokens ?? msg.usage.outputTokens ?? 0);
+          cachedTokens += Number(msg.usage.cachedTokens ?? 0);
         }
         if (msg.modelId) {
           const info = modelLookup.get(msg.modelId) ?? { name: msg.modelId, providerName: "" };
@@ -82,6 +84,7 @@ export async function computeStats() {
       characters,
       inputTokens,
       outputTokens,
+      cachedTokens,
       launchCount: state.launchCount,
       requests: state.stats.totalRequests,
       failedRequests: state.stats.failedRequests,

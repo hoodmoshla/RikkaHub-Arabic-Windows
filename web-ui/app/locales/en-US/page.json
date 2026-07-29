@@ -37,7 +37,8 @@
       "default_name": "User"
     },
     "header": {
-      "select_conversation": "Select a conversation"
+      "select_conversation": "Select a conversation",
+      "cache_hit_rate": "Cache hit rate: {{rate}}%"
     },
     "custom_prompt": {
       "button": "Conversation System Prompt",

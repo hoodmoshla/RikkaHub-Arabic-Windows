@@ -13,6 +13,7 @@ export interface StatsPayload {
     characters: number;
     inputTokens: number;
     outputTokens: number;
+    cachedTokens?: number;
     launchCount: number;
     requests: number;
     failedRequests: number;
@@ -21,6 +22,21 @@ export interface StatsPayload {
   models: Array<{ id: string; name?: string; providerName?: string; count: number }>;
   requestGroups?: Array<{ name: string; ok: number; failed: number }>;
   providers: Array<{ name: string; ok: number; failed: number }>;
+}
+
+// 专题11-P1-3:大数字用 k/M/B 缩写(行业惯例,不用万/亿),完整值放 title 悬停。
+// 1 万以下保留原样,以上按阶梯保留一位小数(87.5k / 41.9M / 1.2B)。
+function compactNumber(value: number) {
+  if (!Number.isFinite(value)) return "0";
+  const abs = Math.abs(value);
+  const trim = (scaled: number, unit: string) => {
+    const text = scaled.toFixed(1);
+    return `${text.endsWith(".0") ? text.slice(0, -2) : text}${unit}`;
+  };
+  if (abs >= 1e9) return trim(value / 1e9, "B");
+  if (abs >= 1e6) return trim(value / 1e6, "M");
+  if (abs >= 1e4) return trim(value / 1e3, "k");
+  return value.toLocaleString();
 }
 
 export function StatsSection({ stats }: { stats: StatsPayload | null }) {
@@ -92,13 +108,37 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
       />
       <div className="grid gap-4 md:grid-cols-5">
         {[
-          [t("settings:stats.t_conversations"), stats.totals.conversations],
-          [t("settings:stats.t_messages"), stats.totals.messages],
-          [t("settings:stats.t_input_tokens"), stats.totals.inputTokens],
-          [t("settings:stats.t_output_tokens"), stats.totals.outputTokens],
-          [t("settings:stats.t_launches"), stats.totals.launchCount],
-        ].map(([label, value]) => (
-          <div key={String(label)} className="rounded-lg border bg-card p-4">
+          {
+            label: t("settings:stats.t_conversations"),
+            value: compactNumber(stats.totals.conversations),
+            full: stats.totals.conversations.toLocaleString(),
+          },
+          {
+            label: t("settings:stats.t_messages"),
+            value: compactNumber(stats.totals.messages),
+            full: stats.totals.messages.toLocaleString(),
+          },
+          {
+            // 全局缓存命中率合并格:命中总量占输入总量的百分比;无命中数据时只显示输入量。
+            label: t("settings:stats.t_input_tokens_cache"),
+            value:
+              stats.totals.inputTokens > 0 && (stats.totals.cachedTokens ?? 0) > 0
+                ? `${compactNumber(stats.totals.inputTokens)} / ${Math.min(100, Math.round(((stats.totals.cachedTokens ?? 0) / stats.totals.inputTokens) * 100))}%`
+                : compactNumber(stats.totals.inputTokens),
+            full: `${stats.totals.inputTokens.toLocaleString()} / ${(stats.totals.cachedTokens ?? 0).toLocaleString()}`,
+          },
+          {
+            label: t("settings:stats.t_output_tokens"),
+            value: compactNumber(stats.totals.outputTokens),
+            full: stats.totals.outputTokens.toLocaleString(),
+          },
+          {
+            label: t("settings:stats.t_launches"),
+            value: compactNumber(stats.totals.launchCount),
+            full: stats.totals.launchCount.toLocaleString(),
+          },
+        ].map(({ label, value, full }) => (
+          <div key={label} className="rounded-lg border bg-card p-4" title={full}>
             <div className="text-xs text-muted-foreground">{label}</div>
             <div className="mt-2 text-2xl font-semibold">{value}</div>
           </div>

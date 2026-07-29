@@ -1236,6 +1236,24 @@ function ConversationsPageInner() {
   const hasDetail = useConversationStore((state) =>
     activeId ? state.entries[activeId]?.detail != null : false,
   );
+  // 专题11-P1-3:本会话累计缓存命中率(已加载消息窗口内 cached/prompt 总和,取选中分支)。
+  // selector 直接归约成整数百分比:流式 chunk 不改 usage 时结果不变,顶层零重渲染;
+  // 无任何命中数据(厂商不回报)时返回 null,副标题该段隐藏。
+  const conversationCacheHitRate = useConversationStore((state) => {
+    const nodes = activeId ? state.entries[activeId]?.detail?.messages : undefined;
+    if (!nodes) return null;
+    let promptTotal = 0;
+    let cachedTotal = 0;
+    for (const node of nodes) {
+      const msg = node.messages[node.selectIndex] ?? node.messages[0];
+      const usage = msg?.usage as Record<string, unknown> | null | undefined;
+      if (!usage || typeof usage !== "object") continue;
+      promptTotal += Number(usage.promptTokens ?? 0) || 0;
+      cachedTotal += Number(usage.cachedTokens ?? 0) || 0;
+    }
+    if (promptTotal <= 0 || cachedTotal <= 0) return null;
+    return Math.min(100, Math.round((cachedTotal / promptTotal) * 100));
+  });
   // 节点增删才变(流式 chunk 只改节点内部),导出/压缩入口的可用性开关
   const hasMessages = useConversationStore((state) =>
     activeId ? (state.entries[activeId]?.detail?.messages.length ?? 0) > 0 : false,
@@ -1886,7 +1904,11 @@ function ConversationsPageInner() {
             </div>
             {currentModel && currentProvider ? (
               <div className="truncate text-xs text-muted-foreground/70">
-                {`${getAssistantDisplayName(currentAssistant?.name)} / ${getModelDisplayName(currentModel.displayName, currentModel.modelId)} (${currentProvider.name})`}
+                {`${getAssistantDisplayName(currentAssistant?.name)} / ${getModelDisplayName(currentModel.displayName, currentModel.modelId)} (${currentProvider.name})${
+                  conversationCacheHitRate !== null
+                    ? ` / ${t("conversations.header.cache_hit_rate", { rate: conversationCacheHitRate })}`
+                    : ""
+                }`}
               </div>
             ) : null}
           </div>

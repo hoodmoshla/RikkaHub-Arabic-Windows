@@ -14,14 +14,22 @@ import { openAiLocalTools, openAiMcpTools, openAiSearchTools, openAiSkillTools }
 import { GOOGLE_SAFETY_SETTINGS, apiContentFromParts, apiContentText, appendAssistantApiMessages, googleContentsFromApiMessages, googleFunctionDeclarations, googleGenerationConfig, hasBuiltInTool, responseApiMessagesFromUiMessages, supportsAbility, supportsOutputModality } from "./message-builder";
 import { isEmptyAssistantPlaceholder } from "./parts";
 
-export function templateVariables(messageText: string, role: string, assistant: Assistant, modelItem: Model) {
+export function templateVariables(messageText: string, role: string, assistant: Assistant, modelItem: Model, at?: Date) {
   return templateVariablesCore(
     messageText,
     role,
     assistant,
     modelItem,
     String(state.settings.displaySetting.userNickname ?? "").trim() || "User",
+    at,
   );
+}
+
+// P1-1:消息自身时间戳。无效/缺失时返回 undefined 回退“此刻”——Intl 对 Invalid Date
+// 会抛 RangeError,必须在这里拦住。
+function messageTimestamp(msg: Message): Date | undefined {
+  const parsed = Date.parse(String(msg.createdAt ?? ""));
+  return Number.isFinite(parsed) ? new Date(parsed) : undefined;
 }
 
 function activePromptInjections(conversation: Conversation, assistant: Assistant, messages: Message[]) {
@@ -115,7 +123,16 @@ function conversationTransformedMessages(conversation: Conversation, assistant: 
     const selected = node.messages[node.selectIndex] ?? node.messages[0];
     return !isEmptyAssistantPlaceholder(selected);
   });
-  const rawMessages = contextNodes.slice(assistant.contextMessageLimit > 0 ? -assistant.contextMessageLimit : undefined);
+  // 专题11-P2-1:上下文窗口“向上滞回”批量截断,替代逐轮滑动。旧逻辑 slice(-limit)
+  // 每轮把窗口起点前移一条 → 前缀每轮都变,跨轮缓存全灭。现在起点按步长
+  // S=ceil(limit×0.2) 量化前移:窗口在 limit ~ limit+S-1 条之间波动(只多给不少给,
+  // limit 是给用户的下限承诺),起点每 S 轮才动一次,期间跨轮缓存可命中。
+  const contextLimit = assistant.contextMessageLimit;
+  const truncationStep = Math.max(1, Math.ceil(contextLimit * 0.2));
+  const truncationStart = contextLimit > 0 && contextNodes.length > contextLimit
+    ? Math.floor((contextNodes.length - contextLimit) / truncationStep) * truncationStep
+    : 0;
+  const rawMessages = contextNodes.slice(truncationStart);
   const selectedMessages = rawMessages
     .map((node) => node.messages[node.selectIndex] ?? node.messages[0])
     .filter(Boolean);
@@ -123,14 +140,17 @@ function conversationTransformedMessages(conversation: Conversation, assistant: 
     ? String(conversation.systemPrompt ?? "").trim()
     : "";
   const effectiveSystemPrompt = conversationSystemPrompt || assistant.systemPrompt.trim();
+  // 专题11-P1-2:system 各区块按“稳定→易变”排列,把变化频率高的段落挪到末尾,
+  // 前缀缓存失效范围最小化:提示词/Skills/搜索(仅随配置变) → 记忆(记忆工具写入时变)
+  // → 最近会话(任何其他会话被使用都会变)。
   const systemParts = [
     effectiveSystemPrompt
       ? renderTemplate(effectiveSystemPrompt, templateVariables("", "system", assistant, picked.model))
       : "",
-    buildMemoryPrompt(assistant),
-    buildRecentChatsPrompt(assistant, conversation.id),
     buildSkillsContext(assistant),
     buildSearchContext(),
+    buildMemoryPrompt(assistant),
+    buildRecentChatsPrompt(assistant, conversation.id),
   ].filter(Boolean);
 
   const internalMessages: Message[] = [];
@@ -177,7 +197,7 @@ export function conversationMessagesForApi(
         items,
         {
           ...selected,
-          parts: applyMessageTemplateToParts(selected.parts, "assistant", template),
+          parts: applyMessageTemplateToParts(selected.parts, "assistant", template, messageTimestamp(selected)),
         },
         includeHistoryReasoning,
       );
@@ -185,12 +205,13 @@ export function conversationMessagesForApi(
     }
     const rawContent = textFromParts(selected.parts);
     const role = selected.role === "SYSTEM" ? "system" : selected.role === "TOOL" ? "tool" : "user";
+    const messageAt = messageTimestamp(selected);
     const placeholderParts = selected.parts.map((part) =>
       part.type === "text"
-        ? { ...part, text: applyPlaceholders(String(part.text ?? ""), templateVariables(rawContent, role, assistant, picked.model)) }
+        ? { ...part, text: applyPlaceholders(String(part.text ?? ""), templateVariables(rawContent, role, assistant, picked.model, messageAt)) }
         : part,
     );
-    const templatedParts = applyMessageTemplateToParts(placeholderParts, role, template);
+    const templatedParts = applyMessageTemplateToParts(placeholderParts, role, template, messageAt);
     const content = apiContentFromParts(templatedParts, rawContent, picked.model);
     if (!content) continue;
     items.push({ role, content });
@@ -206,19 +227,20 @@ export function conversationResponseApiInput(conversation: Conversation, assista
       if (selected.role === "ASSISTANT") {
         return {
           ...selected,
-          parts: applyMessageTemplateToParts(selected.parts, "assistant", template),
+          parts: applyMessageTemplateToParts(selected.parts, "assistant", template, messageTimestamp(selected)),
         };
       }
       const rawContent = textFromParts(selected.parts);
       const role = selected.role === "SYSTEM" ? "system" : selected.role === "TOOL" ? "tool" : "user";
+      const messageAt = messageTimestamp(selected);
       const placeholderParts = selected.parts.map((part) =>
         part.type === "text"
-          ? { ...part, text: applyPlaceholders(String(part.text ?? ""), templateVariables(rawContent, role, assistant, picked.model)) }
+          ? { ...part, text: applyPlaceholders(String(part.text ?? ""), templateVariables(rawContent, role, assistant, picked.model, messageAt)) }
           : part,
       );
       return {
         ...selected,
-        parts: applyMessageTemplateToParts(placeholderParts, role, template),
+        parts: applyMessageTemplateToParts(placeholderParts, role, template, messageAt),
       };
     });
   return responseApiMessagesFromUiMessages(converted, picked.model);

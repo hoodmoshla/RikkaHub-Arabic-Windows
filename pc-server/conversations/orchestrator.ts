@@ -36,6 +36,7 @@ import {
 } from "../inference-engine/conversation-encoding";
 import {
   fetchClaudeTextWithTools,
+  mergeTokenUsage,
   fetchOpenAiText,
   fetchOpenAiTextStreaming,
   fetchText,
@@ -590,7 +591,8 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
           touchStream(streamHooks as StreamHooksWithSink);
           break;
         case "usage":
-          currentMessage.usage = event.usage;
+          // P1-3:多轮工具调用时每轮都发 usage 事件,merge 防后轮缺字段清零已知值。
+          currentMessage.usage = mergeTokenUsage(currentMessage.usage, event.usage);
           break;
       }
     };

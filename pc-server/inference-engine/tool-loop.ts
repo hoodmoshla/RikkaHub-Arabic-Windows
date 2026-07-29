@@ -23,6 +23,29 @@ import type { ToolOutputEntry, ToolPart } from "../foundation/types";
 import { jsonBody, textBody } from "../model-providers";
 import { addLog } from "../api/logs";
 import { touchStream } from "../api/sse";
+
+// 专题11-P1-3:usage 合并语义对齐安卓 Usage.merge——新值>0 才覆盖,否则保留旧值。
+// 流式/多轮场景里,后到的 usage 事件缺某字段(如 Google 末尾 chunk 不带
+// cachedContentTokenCount)时不能把已知的缓存命中数清零——这是“命中数有时不显示”
+// 的根因之一。contextLimit 随旧值保留(新值有则用新值),避免重查 models.dev。
+export function mergeTokenUsage(prev: Message["usage"], next: Message["usage"]): Message["usage"] {
+  if (!next || typeof next !== "object") return prev;
+  if (!prev || typeof prev !== "object") return next;
+  const prevRec = prev as Record<string, unknown>;
+  const nextRec = next as Record<string, unknown>;
+  const pick = (key: string) => {
+    const value = Number(nextRec[key] ?? 0);
+    return value > 0 ? value : Number(prevRec[key] ?? 0) || 0;
+  };
+  const contextLimit = nextRec.contextLimit !== undefined ? nextRec.contextLimit : prevRec.contextLimit;
+  return {
+    promptTokens: pick("promptTokens"),
+    completionTokens: pick("completionTokens"),
+    totalTokens: pick("totalTokens"),
+    cachedTokens: pick("cachedTokens"),
+    ...(contextLimit !== undefined ? { contextLimit: contextLimit as number | null } : {}),
+  };
+}
 import { isRecord } from "../foundation/utils";
 
 export const MAX_TOOL_STEPS = 256;
@@ -235,7 +258,7 @@ export async function runStreamingToolLoop(
 
     if (hooks.message && result.usage) {
       if (hooks.sink) hooks.sink({ kind: "usage", usage: result.usage });
-      else hooks.message.usage = result.usage;
+      else hooks.message.usage = mergeTokenUsage(hooks.message.usage, result.usage);
     }
 
     logRound(adapter, round, roundStarted, requestBody, {

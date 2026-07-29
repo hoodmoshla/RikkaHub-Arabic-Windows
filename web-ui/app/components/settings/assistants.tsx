@@ -352,6 +352,12 @@ export function AssistantsSection({
               value={textValue(draft.systemPrompt)}
               onChange={(event) => patchDraft({ systemPrompt: event.target.value })}
             />
+            {/* 专题11-P0:秒级时间变量每次请求都变,提示词前缀缓存全灭,就地提醒改天级 */}
+            {/\{\{\s*(cur_time|cur_datetime|time)\s*\}\}/.test(textValue(draft.systemPrompt)) ? (
+              <p className="text-xs text-amber-600 dark:text-amber-500">
+                {t("settings:assistants.system_prompt_cache_hint")}
+              </p>
+            ) : null}
           </label>
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-3">

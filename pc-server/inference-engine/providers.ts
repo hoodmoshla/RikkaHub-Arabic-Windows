@@ -22,7 +22,8 @@ import {
 } from "../model-providers";
 import { addLog } from "../api/logs";
 import { touchStream } from "../api/sse";
-import { MAX_TOOL_STEPS, runStreamingToolLoop, toolCallContext, STREAM_IDLE_TIMEOUT_MS, type ProviderRoundAdapter, type NormalizedToolCall } from "./tool-loop";
+import { MAX_TOOL_STEPS, mergeTokenUsage, runStreamingToolLoop, toolCallContext, STREAM_IDLE_TIMEOUT_MS, type ProviderRoundAdapter, type NormalizedToolCall } from "./tool-loop";
+export { mergeTokenUsage } from "./tool-loop";
 
 // P1-5:工具循环骨架迁至 tool-loop.ts,这里重导出维持既有导入方。
 export { MAX_TOOL_STEPS, toolCallContext };
@@ -154,16 +155,22 @@ export function appendUsageFromRaw(msg: Message | undefined, raw: any) {
   // (response.completed 事件嵌套一层 response)。
   const usage = raw?.usage ?? raw?.response?.usage;
   if (!usage || typeof usage !== "object") return;
-  // 流式过程中本函数会被多次调用(每个 usage delta),每次重设 msg.usage 对象会丢掉已填的
-  // contextLimit,触发 fillContextLimit 重查 models.dev。保留前值避免重复查找。
-  const prevContextLimit = (msg.usage as Record<string, unknown> | null)?.contextLimit;
-  msg.usage = {
+  // 缓存命中字段各家方言不同(对齐安卓 #1576):OpenAI/DeepSeek 嵌套
+  // prompt_tokens_details.cached_tokens → Responses API input_tokens_details →
+  // Moonshot 顶层 cached_tokens → DeepSeek 旧版 prompt_cache_hit_tokens。
+  msg.usage = mergeTokenUsage(msg.usage, {
     promptTokens: Number(usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens ?? 0),
     completionTokens: Number(usage.completion_tokens ?? usage.output_tokens ?? usage.completionTokens ?? 0),
     totalTokens: Number(usage.total_tokens ?? usage.totalTokens ?? 0),
-    cachedTokens: Number(usage.prompt_tokens_details?.cached_tokens ?? usage.input_tokens_details?.cached_tokens ?? usage.cachedTokens ?? 0),
-    ...(prevContextLimit !== undefined ? { contextLimit: prevContextLimit as number | null } : {}),
-  };
+    cachedTokens: Number(
+      usage.prompt_tokens_details?.cached_tokens
+        ?? usage.input_tokens_details?.cached_tokens
+        ?? usage.cached_tokens
+        ?? usage.prompt_cache_hit_tokens
+        ?? usage.cachedTokens
+        ?? 0,
+    ),
+  });
   fillContextLimit(msg);
 }
 
@@ -704,7 +711,9 @@ function applyGoogleRoundChunk(
   const blockReason = raw.promptFeedback?.blockReason;
   if (blockReason) throw new UpstreamStreamError(`Gemini blocked: ${blockReason}`);
   const meta = raw.usageMetadata;
-  if (meta) result.usage = googleUsageFromMeta(meta) ?? result.usage;
+  // P1-3:merge 而非覆写——Google 流式末尾 chunk 的 usageMetadata 可能缺
+  // cachedContentTokenCount,覆写会把前面 chunk 已报的命中数清零。
+  if (meta) result.usage = mergeTokenUsage(result.usage ?? null, googleUsageFromMeta(meta) ?? null) ?? undefined;
   const candidate = raw.candidates?.[0];
   const parts = candidate?.content?.parts;
   if (!Array.isArray(parts)) return;

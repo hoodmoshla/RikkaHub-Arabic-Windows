@@ -37,7 +37,8 @@
       "default_name": "用户"
     },
     "header": {
-      "select_conversation": "请选择会话"
+      "select_conversation": "请选择会话",
+      "cache_hit_rate": "缓存命中率：{{rate}}%"
     },
     "custom_prompt": {
       "button": "会话系统提示词",
