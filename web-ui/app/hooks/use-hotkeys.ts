@@ -19,7 +19,8 @@ import { useSettingsStore } from "~/stores";
 import type { KeybindingAction, KeybindingEntry } from "~/types/settings";
 
 const FONT_MIN = 0.85;
-const FONT_MAX = 1.2;
+// issue5:4K 屏 120% 仍偏小,上限放宽到 180%(滑块与快捷键 clamp 保持同范围)。
+const FONT_MAX = 1.8;
 const FONT_STEP = 0.01;
 
 /** 走事件总线的 action 集合(需要组件上下文响应)。 */

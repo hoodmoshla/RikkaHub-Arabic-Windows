@@ -177,7 +177,7 @@ export function GeneralSection({
             <Slider
               value={[uiFontSlider]}
               min={0.85}
-              max={1.2}
+              max={1.8}
               step={0.01}
               aria-label={t("settings:general.ui_font_size")}
               onValueChange={(value) => setUiFontSlider(value[0])}
