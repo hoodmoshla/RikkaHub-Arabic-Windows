@@ -718,10 +718,10 @@ const ConversationTimeline = React.memo(
     }, [activeId]);
     const [isAtBottom, setIsAtBottom] = React.useState(true);
     // 打开会话的首帧渲染批量控制(专题2 加餐):increaseViewportBy=800 会让 Virtuoso
-    // 挂载时按 120px 估高一口气渲染 ~20 条消息,每条长消息的 markdown 管线(remark+
-    // KaTeX)要 4-20ms,叠加 DOM 提交就是用户看到的 0.5-1s“空白/加载中”。改成两阶段:
-    // 首帧只渲染视口内(overscan=0,约 9 条),首次内容绘制后的浏览器空闲期再扩回
-    // 800px 滚动预渲染缓冲——首开耗时与缓冲大小解耦,滚动体验不变。切换会话时重置。
+    // 挂载时连滚动缓冲区一并渲染,每条长消息的 markdown 管线(remark+KaTeX)要
+    // 4-20ms,叠加 DOM 提交与布局就是用户看到的“空白/加载中”。改成两阶段:首帧只
+    // 渲染视口内(overscan=0),首次内容绘制后的浏览器空闲期再扩回 800px 滚动预渲染
+    // 缓冲——首开耗时与缓冲大小解耦,滚动体验不变。切换会话时重置。
     const [overscanExpanded, setOverscanExpanded] = React.useState(false);
     React.useEffect(() => {
       setOverscanExpanded(false);
@@ -1001,10 +1001,17 @@ const ConversationTimeline = React.memo(
             firstItemIndex={nodesOffset}
             startReached={handleStartReached}
             initialTopMostItemIndex={initialLocation}
-            // 未测量条目的高度估算基准:缺省用首个渲染条目的实测值外推,长消息会话
-            // 方差极大,挂载稳定期窗口位置修正明显("瞬间显示中间位置")。给一个贴近
-            // 常见消息高度的估算值收窄首帧偏差;真实高度测得后照常精确修正。
-            defaultItemHeight={120}
+            // 未测量条目的高度估算基准。首帧挂载条数 ≈ 视口高 ÷ 估算值,它直接决定
+            // 打开会话的首帧渲染量:旧值 120 在 900px 视口下首帧挂 ~8 条,而长消息
+            // 会话单条实测 1500px+,等于首帧多画 4-8 倍——"打开卡 0.5-1s"的主因之一。
+            // 取偏大的 600:长消息会话首帧只挂 1-2 条;短消息会话低估的部分由实测后
+            // 同帧渐进补挂(见下方 skipAnimationFrameInResizeObserver),两类会话都
+            // 不吃亏。真实高度测得后照常精确修正。
+            defaultItemHeight={600}
+            // 尺寸测量不等下一帧(官方对新浏览器的推荐配置):Virtuoso 缺省把
+            // ResizeObserver 回调推迟到 rAF,挂载稳定期的"渲染→测量"要迭代多轮,
+            // 每轮至少一帧,纯帧等待就 100-200ms(性能探针实测)。关掉后同帧完成。
+            skipAnimationFrameInResizeObserver
             computeItemKey={(_, item) => item.message.id}
             // "auto" 瞬时贴底(D 族支柱④):流式每 chunk 都触发 followOutput,"smooth"
             // 会让上一帧尚未完成的平滑滚动被反复打断重启,视觉上持续抖动;瞬时贴底

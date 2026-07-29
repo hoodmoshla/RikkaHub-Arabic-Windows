@@ -118,6 +118,23 @@ function mergeCjkIntoFamily(enFamily: string, cjkFamily: string): string {
 }
 
 function AppContent() {
+  // KaTeX 字体预热:字体本来在首条数学公式渲染时才按需加载,加载完成又触发
+  // 全列表重排,恰好压在打开会话的关键路径上(探针实测:点击后 ~570ms 才开始
+  // 拉字体,随后一波重排)。启动后的空闲期提前拉取,打开会话时字体已就位。
+  React.useEffect(() => {
+    if (typeof document === "undefined" || !document.fonts?.load) return;
+    const warm = () => {
+      void document.fonts.load('400 16px "KaTeX_Main"');
+      void document.fonts.load('italic 400 16px "KaTeX_Math"');
+      void document.fonts.load('400 16px "KaTeX_Size2"');
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const h = window.requestIdleCallback(warm, { timeout: 3000 });
+      return () => window.cancelIdleCallback(h);
+    }
+    const t = window.setTimeout(warm, 1000);
+    return () => window.clearTimeout(t);
+  }, []);
   useSettingsSubscription();
   useMemorySubscription();
   useAppErrorsSubscription();

@@ -159,6 +159,38 @@ function writeTokensToCache(cacheKey: string, tokenized: TokenizedCode): void {
   tokensCache.set(cacheKey, tokenized);
 }
 
+// 空闲期高亮调度:打开会话时若干代码块同帧挂载,同步全量分词会把 ~15-40ms/块的
+// Shiki(oniguruma wasm)串成一个数百毫秒的主线程长任务,压在首开关键路径上
+// (性能探针实测 ~180-230ms)。改为空闲期逐块执行:一个空闲片只处理一个代码块,
+// 高亮完成前按原文渲染(行数/等宽字体不变 → 高度不变,无布局跳动)。
+const pendingHighlightJobs: Array<() => void> = [];
+let highlightDrainScheduled = false;
+
+function drainOneHighlightJob(): void {
+  const job = pendingHighlightJobs.shift();
+  job?.();
+  if (pendingHighlightJobs.length > 0) {
+    scheduleHighlightDrain();
+  } else {
+    highlightDrainScheduled = false;
+  }
+}
+
+function scheduleHighlightDrain(): void {
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(drainOneHighlightJob, { timeout: 200 });
+  } else {
+    window.setTimeout(drainOneHighlightJob, 16);
+  }
+}
+
+function scheduleIdleHighlight(job: () => void): void {
+  pendingHighlightJobs.push(job);
+  if (highlightDrainScheduled) return;
+  highlightDrainScheduled = true;
+  scheduleHighlightDrain();
+}
+
 function getHighlighter(
   language: BundledLanguage,
 ): Promise<HighlighterGeneric<BundledLanguage, BundledTheme>> {
@@ -258,28 +290,36 @@ function highlightCode(
     .then((highlighter) => {
       resolvedHighlighters.set(language, highlighter);
 
-      const tokenResult = highlighter.codeToTokens(code, {
-        lang: language,
-        themes: {
-          light: SHIKI_THEME_LIGHT,
-          dark: SHIKI_THEME_DARK,
-        },
-      });
-
-      const tokenized: TokenizedCode = {
-        bg: tokenResult.bg ?? "transparent",
-        fg: tokenResult.fg ?? "inherit",
-        tokens: tokenResult.tokens,
-      };
-
-      writeTokensToCache(tokensCacheKey, tokenized);
-      const subs = subscribers.get(tokensCacheKey);
-      if (subs) {
-        for (const sub of subs) {
-          sub(tokenized);
+      // 装载完成后的分词同样进空闲队列:多个代码块等同一高亮器时,promise 回调
+      // 会在同一次微任务清空里连续执行,等于把 N 次分词又串成一个长任务。
+      // 空闲片内先查缓存(同内容多次订阅只分词一次)。
+      scheduleIdleHighlight(() => {
+        const tokenized =
+          readTokensFromCache(tokensCacheKey) ??
+          (() => {
+            const tokenResult = highlighter.codeToTokens(code, {
+              lang: language,
+              themes: {
+                light: SHIKI_THEME_LIGHT,
+                dark: SHIKI_THEME_DARK,
+              },
+            });
+            const fresh: TokenizedCode = {
+              bg: tokenResult.bg ?? "transparent",
+              fg: tokenResult.fg ?? "inherit",
+              tokens: tokenResult.tokens,
+            };
+            writeTokensToCache(tokensCacheKey, fresh);
+            return fresh;
+          })();
+        const subs = subscribers.get(tokensCacheKey);
+        if (subs) {
+          for (const sub of subs) {
+            sub(tokenized);
+          }
+          subscribers.delete(tokensCacheKey);
         }
-        subscribers.delete(tokensCacheKey);
-      }
+      });
     })
     .catch(() => {
       const fallback = createRawTokens(code);
@@ -495,7 +535,9 @@ export function CodeBlockContent({
       return rawTokens;
     }
 
-    return highlightSync(code, language) ?? highlightCode(code, language) ?? rawTokens;
+    // 挂载首帧只读全文缓存(切回会话零闪烁);cache miss 不同步分词——由下方
+    // effect 的空闲期调度完成,避免打开会话时多个代码块同帧串成长任务。
+    return readTokensFromCache(getTokensCacheKey(code, language)) ?? rawTokens;
   });
 
   React.useEffect(() => {
@@ -504,13 +546,26 @@ export function CodeBlockContent({
       return;
     }
 
-    const sync = highlightSync(code, language);
-    if (sync) {
-      setTokenized(sync);
-      return;
+    // 流式增量路径:实例级分词器已存在(该块正在逐帧增长),同步只重算尾行,
+    // 逐帧高亮语义不变。
+    if (tokenizerRef.current?.language === language) {
+      const sync = highlightSync(code, language);
+      if (sync) {
+        setTokenized(sync);
+        return;
+      }
+    } else {
+      const cached = readTokensFromCache(getTokensCacheKey(code, language));
+      if (cached) {
+        tokenizerRef.current = null;
+        lastResultRef.current = null;
+        setTokenized(cached);
+        return;
+      }
     }
 
-    // 该语言高亮器首次装载中:走既有订阅机制;装载完成后后续帧回到上面的同步增量路径。
+    // cache miss:分词推迟到空闲期。高亮器已装载则空闲片内同步分词;尚未装载
+    // 沿用订阅机制(装载完成回调 setState)。期间按原文渲染,高度不变。
     let cancelled = false;
     const tokensCacheKey = getTokensCacheKey(code, language);
     const onHighlighted = (result: TokenizedCode) => {
@@ -519,11 +574,19 @@ export function CodeBlockContent({
       }
     };
 
-    const nextTokenized = highlightCode(code, language, onHighlighted);
-    if (nextTokenized) {
-      setTokenized(nextTokenized);
-    }
-    // If null (async loading), keep previous tokenized state to avoid flash
+    scheduleIdleHighlight(() => {
+      if (cancelled) return;
+      const sync = highlightSync(code, language);
+      if (sync) {
+        setTokenized(sync);
+        return;
+      }
+      const nextTokenized = highlightCode(code, language, onHighlighted);
+      if (nextTokenized) {
+        setTokenized(nextTokenized);
+      }
+      // null = 高亮器装载中,订阅回调兜底。
+    });
 
     return () => {
       cancelled = true;
