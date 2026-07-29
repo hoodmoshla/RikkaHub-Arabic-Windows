@@ -258,6 +258,12 @@ export default function Markdown({
         plugins={STREAMDOWN_PLUGINS}
         animated={false}
         isAnimating={isAnimating}
+        // 完成态消息走 static 模式:跳过 remend(流式截断修补,每次渲染对全文扫描,
+        // 实测占单条消息渲染成本的 ~60%)与 useTransition 状态机。历史消息批量挂载
+        // (打开会话首帧 ~10 条)直接受益;流式中的消息保持 streaming 语义不变。
+        // 中途终止的残破 markdown(未闭合围栏等)从“静默修补”变为按原文渲染——与安卓
+        // 端完成态渲染行为一致。
+        mode={isAnimating ? "streaming" : "static"}
         controls={{ code: false, mermaid: false }}
         components={components}
       >

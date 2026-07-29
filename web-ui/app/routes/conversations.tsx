@@ -717,6 +717,26 @@ const ConversationTimeline = React.memo(
       if (activeId) void loadOlderConversationNodes(activeId);
     }, [activeId]);
     const [isAtBottom, setIsAtBottom] = React.useState(true);
+    // 打开会话的首帧渲染批量控制(专题2 加餐):increaseViewportBy=800 会让 Virtuoso
+    // 挂载时按 120px 估高一口气渲染 ~20 条消息,每条长消息的 markdown 管线(remark+
+    // KaTeX)要 4-20ms,叠加 DOM 提交就是用户看到的 0.5-1s“空白/加载中”。改成两阶段:
+    // 首帧只渲染视口内(overscan=0,约 9 条),首次内容绘制后的浏览器空闲期再扩回
+    // 800px 滚动预渲染缓冲——首开耗时与缓冲大小解耦,滚动体验不变。切换会话时重置。
+    const [overscanExpanded, setOverscanExpanded] = React.useState(false);
+    React.useEffect(() => {
+      setOverscanExpanded(false);
+    }, [activeId]);
+    const hasRenderedContent = !detailLoading && !detailError && selectedNodeMessages.length > 0;
+    React.useEffect(() => {
+      if (overscanExpanded || !hasRenderedContent) return;
+      const expand = () => setOverscanExpanded(true);
+      if (typeof window.requestIdleCallback === "function") {
+        const handle = window.requestIdleCallback(expand, { timeout: 1500 });
+        return () => window.cancelIdleCallback(handle);
+      }
+      const timer = window.setTimeout(expand, 300);
+      return () => window.clearTimeout(timer);
+    }, [overscanExpanded, hasRenderedContent]);
     const [isAtTop, setIsAtTop] = React.useState(false);
     const [topVisibleIndex, setTopVisibleIndex] = React.useState(0);
     const [topEndIndex, setTopEndIndex] = React.useState(0);
@@ -997,7 +1017,7 @@ const ConversationTimeline = React.memo(
               setTopVisibleIndex(startIndex - nodesOffset);
               setTopEndIndex(endIndex - nodesOffset);
             }}
-            increaseViewportBy={800}
+            increaseViewportBy={overscanExpanded ? 800 : 0}
             components={{
               Header: () => <div className="h-4" />,
               Footer: () => <div className="h-4" />,
