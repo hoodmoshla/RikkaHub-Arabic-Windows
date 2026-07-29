@@ -14,6 +14,7 @@ export interface StatsPayload {
     inputTokens: number;
     outputTokens: number;
     cachedTokens?: number;
+    reportedInputTokens?: number;
     launchCount: number;
     requests: number;
     failedRequests: number;
@@ -119,12 +120,16 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
             full: stats.totals.messages.toLocaleString(),
           },
           {
-            // 全局缓存命中率合并格:命中总量占输入总量的百分比;无命中数据时只显示输入量。
+            // 全局缓存命中率合并格:分母用厂商真实回报的输入量(排除本地估算,
+            // 其 cached 恒 0 会稀释比例);无命中数据时只显示输入量。
             label: t("settings:stats.t_input_tokens_cache"),
-            value:
-              stats.totals.inputTokens > 0 && (stats.totals.cachedTokens ?? 0) > 0
-                ? `${compactNumber(stats.totals.inputTokens)} / ${Math.min(100, Math.round(((stats.totals.cachedTokens ?? 0) / stats.totals.inputTokens) * 100))}%`
-                : compactNumber(stats.totals.inputTokens),
+            value: (() => {
+              const cached = stats.totals.cachedTokens ?? 0;
+              const denominator = stats.totals.reportedInputTokens ?? stats.totals.inputTokens;
+              return cached > 0 && denominator > 0
+                ? `${compactNumber(stats.totals.inputTokens)} / ${Math.min(100, Math.round((cached / denominator) * 100))}%`
+                : compactNumber(stats.totals.inputTokens);
+            })(),
             full: `${stats.totals.inputTokens.toLocaleString()} / ${(stats.totals.cachedTokens ?? 0).toLocaleString()}`,
           },
           {

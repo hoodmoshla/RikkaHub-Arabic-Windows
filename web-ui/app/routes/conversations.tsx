@@ -1248,6 +1248,8 @@ function ConversationsPageInner() {
       const msg = node.messages[node.selectIndex] ?? node.messages[0];
       const usage = msg?.usage as Record<string, unknown> | null | undefined;
       if (!usage || typeof usage !== "object") continue;
+      // 本地估算的 usage 无缓存信息(cached 恒 0),计入会稀释命中率
+      if (usage.estimated === true) continue;
       promptTotal += Number(usage.promptTokens ?? 0) || 0;
       cachedTotal += Number(usage.cachedTokens ?? 0) || 0;
     }

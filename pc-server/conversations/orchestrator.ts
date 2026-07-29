@@ -522,6 +522,10 @@ export async function generateAnswer(conversation: Conversation, regenerateAtNod
   // supports regenerate, which reuses the same message object.
   streamStartedMessages.delete(currentMessage);
   if (!resumingApprovedTools) {
+    // 专题11复审:非续跑的重入生成(重试等复用同一消息对象)清掉上一代 usage——
+    // mergeTokenUsage 的“新值>0 才覆盖”会把上一代的 cachedTokens/completionTokens
+    // 带进本轮统计。续跑(工具审批恢复)是同一请求的延续,保留。
+    currentMessage.usage = null;
     // Show a loading placeholder immediately so the UI has visual feedback during the
     // upstream first-token wait. addStreamText / replaceLoadingReasoningWithTool will
     // strip this placeholder as soon as the first real delta arrives.

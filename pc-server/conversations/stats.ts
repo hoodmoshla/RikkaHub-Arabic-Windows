@@ -18,6 +18,9 @@ export async function computeStats() {
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens = 0;
+  // 命中率分母:只计厂商真实回报的输入量。本地估算的 usage(estimated:true)
+  // cached 恒为 0,计入分母会稀释全局命中率。
+  let reportedInputTokens = 0;
   const models = new Map<string, { id: string; name: string; providerName: string; count: number }>();
   const requestGroups = new Map<string, { ok: number; failed: number }>();
   const providers = new Map<string, { ok: number; failed: number }>();
@@ -60,6 +63,9 @@ export async function computeStats() {
           inputTokens += Number(msg.usage.promptTokens ?? msg.usage.inputTokens ?? 0);
           outputTokens += Number(msg.usage.completionTokens ?? msg.usage.outputTokens ?? 0);
           cachedTokens += Number(msg.usage.cachedTokens ?? 0);
+          if (msg.usage.estimated !== true) {
+            reportedInputTokens += Number(msg.usage.promptTokens ?? msg.usage.inputTokens ?? 0);
+          }
         }
         if (msg.modelId) {
           const info = modelLookup.get(msg.modelId) ?? { name: msg.modelId, providerName: "" };
@@ -85,6 +91,7 @@ export async function computeStats() {
       inputTokens,
       outputTokens,
       cachedTokens,
+      reportedInputTokens,
       launchCount: state.launchCount,
       requests: state.stats.totalRequests,
       failedRequests: state.stats.failedRequests,
