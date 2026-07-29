@@ -78,6 +78,34 @@ export async function readGnomeProxy(): Promise<string | undefined> {
   }
 }
 
+// 专题10-②:PAC(自动配置脚本)存在性探测。应用不解析 PAC(实现成本高、收益低),本函数
+// 仅供"检测系统代理"按钮的诊断提示:常规系统代理未检出但存在 PAC 配置时,告诉用户
+// 去代理工具查 HTTP 端口手动填写,而不是留下"未检测到系统代理"的死胡同。
+// 不进代理解析主链路(resolveEffectiveProxy),探测失败一律视作无 PAC。
+export async function detectSystemPacUrl(): Promise<string | undefined> {
+  try {
+    if (RUNTIME_PLATFORM === "win") {
+      const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+      const res = await runCommandText(["reg", "query", key, "/v", "AutoConfigURL"]);
+      if (res.exitCode !== 0) return undefined;
+      const match = res.stdout.match(/AutoConfigURL\s+REG_SZ\s+([^\r\n]+)/i);
+      return match?.[1]?.trim() || undefined;
+    }
+    if (RUNTIME_PLATFORM === "linux" && !RUNNING_IN_CONTAINER) {
+      const mode = (await runCommandText(["gsettings", "get", "org.gnome.system.proxy", "mode"])).stdout.trim();
+      if (mode !== "'auto'") return undefined;
+      const url = (await runCommandText(["gsettings", "get", "org.gnome.system.proxy", "autoconfig-url"])).stdout
+        .trim()
+        .replace(/^'|'$/g, "");
+      // GNOME mode='auto' 即 PAC 模式;url 可能为空(WPAD 自动发现),仍算存在 PAC。
+      return url || "wpad";
+    }
+  } catch {
+    // 纯诊断增强,探测异常绝不能影响检测主流程。
+  }
+  return undefined;
+}
+
 export async function detectSystemProxy(): Promise<string | undefined> {
   if (RUNTIME_PLATFORM === "win") return readWindowsSystemProxy();
   if (RUNTIME_PLATFORM === "linux" && !RUNNING_IN_CONTAINER) return readGnomeProxy();

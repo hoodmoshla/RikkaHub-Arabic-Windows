@@ -132,17 +132,30 @@ function isAllowedOrigin(request: Request): boolean {
   return false;
 }
 const preferredPort = resolvePreferredPort();
-// Try the preferred port first; on EADDRINUSE walk upward. Containers don't walk — a port
-// collision inside a container is unexpected, and silently hopping would hide a real problem.
+// Try the preferred port first; on a port-unusable error walk upward. Containers don't walk — a
+// port collision inside a container is unexpected, and silently hopping would hide a real problem.
 const MAX_PORT_ATTEMPTS = RUNNING_IN_CONTAINER ? 1 : 20;
 
+// 专题10-①:候选端口序列。非容器部署在顺延耗尽后追加 0(交给操作系统分配随机空闲端口)
+// 兜底——端口是启动期配置,启动失败意味着用户永远进不了设置页改端口(死锁),必须保证应用
+// 总能起来;实际端口经 RIKKAHUB_PORT 标记交给壳导航,UI 的"当前运行端口"照常显示。
+// 容器不顺延不兜底:端口由镜像/-p 映射约定,漂移只会掩盖真问题。
+const candidatePorts: number[] = [];
+for (let attempt = 0; attempt < MAX_PORT_ATTEMPTS; attempt += 1) {
+  const p = preferredPort + attempt;
+  if (p <= 65535) candidatePorts.push(p);
+}
+if (!RUNNING_IN_CONTAINER) candidatePorts.push(0);
+
 const { server, port } = (() => {
-  for (let attempt = 0; attempt < MAX_PORT_ATTEMPTS; attempt += 1) {
-    const tryPort = preferredPort + attempt;
-    if (tryPort > 65535) break;
+  for (const tryPort of candidatePorts) {
+    if (tryPort === 0) {
+      console.warn(
+        `[startup] Ports ${preferredPort}-${candidatePorts[candidatePorts.length - 2]} all unusable; falling back to an OS-assigned random port.`,
+      );
+    }
     try {
-      return {
-        server: Bun.serve({
+      const bound = Bun.serve({
           hostname: bindHostname,
           port: tryPort,
           idleTimeout: 0,
@@ -243,21 +256,26 @@ const { server, port } = (() => {
               if ((ws.data as { kind?: string } | undefined)?.kind === "asr") stopAsrRealtimeSession(ws);
             },
           },
-        }),
-        port: tryPort,
-      };
+      });
+      return { server: bound, port: bound.port ?? tryPort };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // Non-port-conflict errors (permission denied, bad config, etc.) must not silently hop
-      // to the next port — surface them and stop.
-      if (!/EADDRINUSE|address already in use|in use/i.test(message)) {
-        emitStartupFatal(1, `本地服务无法在端口 ${tryPort} 启动:${message}`);
+      // 专题10-①:"端口不可用"类错误一律顺延。除 EADDRINUSE 外,EACCES/EPERM(Windows 的
+      // Hyper-V/WSL 保留端口段 netsh excludedportrange、Linux 特权端口)对用户同样是
+      // "换个端口就好",旧逻辑直接 fatal 会把应用锁死在"起不来→进不了设置→改不了端口"。
+      // 其余错误(非法 hostname 等配置问题)与 port 0 兜底也失败的情况仍立即暴露。
+      // 同时检查 err.code 与 message:Bun 的报错文案不保证含错误码字样(如 EADDRINUSE 的文案是
+      // "Is port X in use?"),而 code 字段才是稳定契约。
+      const errCode = (err as NodeJS.ErrnoException | null)?.code ?? "";
+      const portUnusable = /EADDRINUSE|EACCES|EPERM|address already in use|in use|permission denied|access permissions|10013/i.test(`${errCode} ${message}`);
+      if (!portUnusable || tryPort === 0) {
+        emitStartupFatal(1, `本地服务无法在端口 ${tryPort === 0 ? "(系统分配)" : tryPort} 启动:${message}`);
         console.error(`[rikkahub-server] Failed to start on port ${tryPort}: ${message}`);
         process.exit(1);
       }
-      if (attempt === 0) {
+      if (tryPort === preferredPort && candidatePorts.length > 1) {
         console.warn(
-          `[startup] Port ${tryPort} busy, trying alternatives up to ${Math.min(preferredPort + MAX_PORT_ATTEMPTS - 1, 65535)}...`,
+          `[startup] Port ${tryPort} unusable (${message}), trying alternatives up to ${Math.min(preferredPort + MAX_PORT_ATTEMPTS - 1, 65535)}...`,
         );
       }
     }

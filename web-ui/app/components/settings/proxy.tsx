@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { Eye, EyeOff, Globe, Loader2, RefreshCw, Zap } from "lucide-react";
+import { Eye, EyeOff, Globe, Loader2, RefreshCw, RotateCcw, Zap } from "lucide-react";
 import type { ProxyConfig, ProxyMode, Settings } from "~/types";
 import { toast } from "sonner";
 import { Button } from "~/components/ui/button";
@@ -35,9 +35,10 @@ function isValidProxyUrl(url: string): boolean {
   }
 }
 
-// 导航项"代理"右侧的状态点(P2-7): 让用户不进设置页就知道代理运行态。
-// 绿=走代理 / 灰=直连(无代理)。独立轮询, 不依赖 ProxySection。
-function ProxyNavDot() {
+// 设置侧边栏导航项"代理"右侧的状态点(P2-7),由 routes/settings.tsx 渲染:用户打开
+// 设置任意分区即可看到代理运行态,不必点进本分区。绿=走代理 / 灰=直连(无代理)。
+// 独立轮询,不依赖 ProxySection(后端状态接口有 TTL 缓存,轮询成本趋零)。
+export function ProxyNavDot() {
   const { t } = useTranslation();
   const [st, setSt] = React.useState<{ activeUrl: string | null } | null>(null);
   React.useEffect(() => {
@@ -166,10 +167,18 @@ export function ProxySection({
   const detectSystemProxy = async () => {
     setDetecting(true);
     try {
-      const result = await api.post<{ detected: string | null }>("settings/proxy/detect", {});
+      const result = await api.post<{ detected: string | null; pac: string | null }>(
+        "settings/proxy/detect",
+        {},
+      );
       if (result.detected) {
         patch({ url: result.detected });
         toast.success(t("settings:proxy.detected_filled", { url: result.detected }));
+      } else if (result.pac) {
+        // 专题10-②:系统只配了 PAC 自动配置脚本(应用不支持解析),指路去代理工具查端口手动填写。
+        toast.message(t("settings:proxy.pac_detected"), {
+          description: t("settings:proxy.pac_detected_desc"),
+        });
       } else {
         toast.message(t("settings:proxy.none_detected"), {
           description: t("settings:proxy.none_detected_desc"),
@@ -232,6 +241,48 @@ export function ProxySection({
     setPortDraft(initialPort == null ? "" : String(initialPort));
   }, [initialPort]);
 
+  // ── 专题10-⑤:立即重启(仅 Tauri 桌面壳渲染按钮) ────────────────────
+  // 端口是启动期配置,此前改完只能手动退出再启动。顺序至关重要:
+  // 1) 先拿到 relaunch 再停机——若插件不可用,绝不能先把后端停掉造成死页面;
+  // 2) 冲刷未到期的端口草稿(600ms 防抖),否则重启丢本次修改;
+  // 3) POST app/shutdown 让后端体面停机(全部状态落盘,200 后 ~100ms 自退,
+  //    释放端口与数据目录实例锁)——直接 relaunch 会让新旧 sidecar 竞争锁与端口;
+  // 4) 短暂等待后 relaunch,旧壳退出钩子发现 sidecar 已退,kill 是空操作。
+  const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  const [restarting, setRestarting] = React.useState(false);
+  const restartApp = async () => {
+    setRestarting(true);
+    try {
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      if (portAutosave.isDirty()) {
+        // 重启前预检草稿合法性:非法端口下 saveNow 会"toast 后视作已处理",若继续
+        // 重启用户会错过提示且白重启一次,故在这里中断。
+        const trimmed = portDraft.trim();
+        const parsed = trimmed === "" ? null : Number(trimmed);
+        if (
+          parsed !== null &&
+          (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1 || parsed > 65535)
+        ) {
+          toast.error(t("settings:proxy.port_invalid"));
+          setRestarting(false);
+          return;
+        }
+        await portAutosave.saveNow({ force: true });
+      }
+      try {
+        await api.post("app/shutdown", {});
+      } catch {
+        // 停机请求可能因服务端立即退出而断开——属预期,继续重启。
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 600));
+      await relaunch();
+    } catch (err) {
+      setRestarting(false);
+      toast.error(t("settings:proxy.restart_failed"));
+      console.warn("[port] restart failed", err);
+    }
+  };
+
   const activeDisplay = status?.activeUrl
     ? status.source === "system"
       ? t("settings:proxy.active_from_system", { url: status.activeUrl })
@@ -250,10 +301,7 @@ export function ProxySection({
       <div className="space-y-4">
         <div className="space-y-4 rounded-lg border bg-card p-6">
           <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-base font-medium">{t("settings:proxy.http_title")}</div>
-              <ProxyNavDot />
-            </div>
+            <div className="text-base font-medium">{t("settings:proxy.http_title")}</div>
             <div className="text-xs text-muted-foreground">{t("settings:proxy.mode_desc")}</div>
             <Select
               value={draft.mode}
@@ -276,6 +324,11 @@ export function ProxySection({
               {draft.mode === "direct" && t("settings:proxy.mode_direct_desc")}
               {draft.mode === "env" && t("settings:proxy.mode_env_desc")}
             </div>
+            {draft.mode === "env" && status?.containerMode === false && (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                {t("settings:proxy.env_desktop_hint")}
+              </div>
+            )}
           </div>
 
           {status?.containerMode && (
@@ -432,6 +485,7 @@ export function ProxySection({
             <Input
               type="number"
               inputMode="numeric"
+              disabled={status?.containerMode === true}
               value={portDraft}
               onChange={(event) => {
                 portAutosave.markDirty();
@@ -443,9 +497,32 @@ export function ProxySection({
               step={1}
             />
           </label>
-          <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-            {t("settings:proxy.port_restart_note")}
-          </div>
+          {status?.containerMode ? (
+            <div className="text-xs text-muted-foreground">
+              {t("settings:proxy.port_container_locked")}
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+              <span>{t("settings:proxy.port_restart_note")}</span>
+              {isTauri && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => void restartApp()}
+                  disabled={restarting}
+                >
+                  {restarting ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <RotateCcw className="size-4" />
+                  )}
+                  {t("settings:proxy.restart_now")}
+                </Button>
+              )}
+            </div>
+          )}
           {status?.runningPort != null && (
             <div className="text-xs text-muted-foreground">
               {t("settings:proxy.port_running", { port: status.runningPort })}

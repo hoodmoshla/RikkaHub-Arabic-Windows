@@ -17,7 +17,7 @@ import { DataSection } from "~/components/settings/data";
 import { GeneralSection } from "~/components/settings/general";
 import { LogsSection, type RequestLog } from "~/components/settings/logs";
 import { AppErrorsSection } from "~/components/settings/app-errors";
-import { ProxySection } from "~/components/settings/proxy";
+import { ProxyNavDot, ProxySection } from "~/components/settings/proxy";
 import { DefaultModelsSection } from "~/components/settings/default-models";
 import { SearchSection } from "~/components/settings/search";
 import { SpeechSection } from "~/components/settings/speech";
@@ -181,6 +181,8 @@ export default function SettingsPage() {
                   )}
                 />
                 {t(item.labelKey)}
+                {/* 专题10-⑥:代理运行态小绿点——打开设置任意分区即可看到,不必点进代理页 */}
+                {item.id === "proxy" && <ProxyNavDot />}
               </button>
             );
           })}
