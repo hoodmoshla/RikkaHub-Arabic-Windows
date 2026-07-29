@@ -14,3 +14,13 @@ docs/
 .github/
 CLAUDE.md
 README*.md
+# 本地参考仓库/临时资料(gitignored,CI checkout 里不存在,但本地 docker build 的
+# 上下文按目录原样打包——不排除的话几个 GB 的无关代码全被送进 daemon)。
+Rikkahub-Android/
+cherry-studio/
+lobehub/
+kelivo/
+opencode-dev/
+tmp_doc/
+analytics/
+functions/

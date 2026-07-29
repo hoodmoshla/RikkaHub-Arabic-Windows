@@ -305,38 +305,52 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
       // 新应用目录 = 解压出的 rikkahub-pc/(新二进制的同级目录,含新 web-ui)。
       const newAppDir = dirname(resolvedSrcExe);
 
-      // ── 1. 替换前端资源 (web-ui 目录) ──────────────────────────────────
-      // 拷到 .web-ui.new 再原子 rename 覆盖。失败不致命(新版本可能没改前端):记 warning
-      // 后继续替换二进制 —— 避免前端替换的小问题阻塞整个更新。
-      const currentWebUi = join(currentAppDir, "web-ui");
-      const newWebUi = join(newAppDir, "web-ui");
-      if (existsSync(newWebUi)) {
-        const staging = join(currentAppDir, ".web-ui.new");
-        const bak = join(currentAppDir, ".web-ui.bak");
+      // ── 1. 替换随包资源目录 (web-ui / icons / fonts) ────────────────────
+      // 拷到 .<name>.new 再原子 rename 覆盖。cp 失败不致命(新版本可能没改该目录):记
+      // warning 后继续 —— 避免资源替换的小问题阻塞整个更新;但 rename 交换半途失败意味着
+      // 旧目录已被挪走、状态不确定,必须回滚。返回值区分这两种失败,由调用侧决定后果:
+      // web-ui 交换失败要中止更新(二进制换了前端没换,重启后前后端版本错位);
+      // icons/fonts 是 8-5 起随包分发的品牌图标/内置字体,失败只降级显示,不阻塞。
+      const swapAppResourceDir = (name: string): "ok" | "copy_failed" | "swap_failed" => {
+        const currentDir = join(currentAppDir, name);
+        const newDir = join(newAppDir, name);
+        if (!existsSync(newDir)) return "ok"; // 更新包不带该目录(老包):跳过
+        const staging = join(currentAppDir, `.${name}.new`);
+        const bak = join(currentAppDir, `.${name}.bak`);
         try {
           if (existsSync(staging)) rmSync(staging, { recursive: true, force: true });
-          const cp = Bun.spawnSync(["cp", "-r", newWebUi, staging]);
+          const cp = Bun.spawnSync(["cp", "-r", newDir, staging]);
           if (cp.exitCode !== 0) {
-            console.warn("[update/apply] cp web-ui to staging failed:", cp.stderr?.toString().trim());
-          } else if (existsSync(currentWebUi)) {
+            console.warn(`[update/apply] cp ${name} to staging failed:`, cp.stderr?.toString().trim());
+            return "copy_failed";
+          }
+          if (existsSync(currentDir)) {
             if (existsSync(bak)) rmSync(bak, { recursive: true, force: true });
-            try { renameSync(currentWebUi, bak); } catch { /* 首次安装可能没有旧 web-ui */ }
+            try { renameSync(currentDir, bak); } catch { /* 首次安装可能没有旧目录 */ }
             try {
-              renameSync(staging, currentWebUi);
+              renameSync(staging, currentDir);
               try { rmSync(bak, { recursive: true, force: true }); } catch { /* */ }
             } catch (swapErr) {
-              console.warn("[update/apply] web-ui swap failed, rolling back:", swapErr);
-              try { if (existsSync(bak)) renameSync(bak, currentWebUi); } catch { /* */ }
-              return error("替换前端资源失败，更新未完成", 500);
+              console.warn(`[update/apply] ${name} swap failed, rolling back:`, swapErr);
+              try { if (existsSync(bak)) renameSync(bak, currentDir); } catch { /* */ }
+              return "swap_failed";
             }
           } else {
-            // 当前没有 web-ui 目录(异常状态),直接把 staging 就位。
-            renameSync(staging, currentWebUi);
+            // 当前没有该目录(异常状态或老部署),直接把 staging 就位。
+            renameSync(staging, currentDir);
           }
-        } catch (webUiErr) {
-          console.warn("[update/apply] web-ui update skipped:", webUiErr);
+          return "ok";
+        } catch (err) {
+          console.warn(`[update/apply] ${name} update skipped:`, err);
+          return "copy_failed";
         }
+      };
+
+      if (swapAppResourceDir("web-ui") === "swap_failed") {
+        return error("替换前端资源失败，更新未完成", 500);
       }
+      swapAppResourceDir("icons");
+      swapAppResourceDir("fonts");
 
       // ── 2. 备份 + 原子替换二进制 ───────────────────────────────────────
       // 必须同时绕开两个 Linux 约束:
