@@ -35,6 +35,9 @@ jobs:
       - name: Stub sidecar binary and frontend dist
         run: |
           mkdir -p web-ui/build/client
+          # binaries/ 整目录 gitignore(真 sidecar exe 不入库),全新 checkout 里不存在,
+          # touch 不会自建父目录——CI 首跑实证(2026-07)。
+          mkdir -p web-ui/src-tauri/binaries
           touch web-ui/src-tauri/binaries/rikkahub-server-x86_64-unknown-linux-gnu
           chmod +x web-ui/src-tauri/binaries/rikkahub-server-x86_64-unknown-linux-gnu
 

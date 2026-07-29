@@ -4,7 +4,12 @@
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
-import type { StoredFile, XmlToken, MupdfModule } from "../foundation/types";
+import type { StoredFile, XmlToken } from "../foundation/types";
+
+// mupdf 模块形状类型放在本文件而非共享类型桶:foundation/types 被 web-ui 的 tsc
+// 跨包引用,而 web-ui 的 CI 作业不装 pc-server 依赖,`typeof import("mupdf")`
+// 在那边直接 TS2307(CI 首跑实证)。运行时专用类型不进共享面。
+type MupdfModule = typeof import("mupdf");
 import { dataDir, filesDir } from "../foundation/paths";
 import { ZipFileReader, withZipFile } from "./zip-file";
 

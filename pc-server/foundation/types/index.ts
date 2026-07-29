@@ -4,8 +4,6 @@
 import type { Settings } from "./settings";
 import type { MessagePart } from "./parts";
 
-export type MupdfModule = typeof import("mupdf");
-
 export * from "./parts";
 export * from "./dto";
 
