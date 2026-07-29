@@ -1,5 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import i18n from "~/i18n";
+import api from "~/services/api";
+import { useSettingsStore } from "~/stores/app-store";
+import type { DisplaySetting } from "~/types";
 
 export type ThemeMode = "dark" | "light" | "system";
 export type Theme = ThemeMode;
@@ -72,7 +75,7 @@ const LEGACY_CUSTOM_LIGHT_SUFFIX = "-custom-light";
 const LEGACY_CUSTOM_DARK_SUFFIX = "-custom-dark";
 const CUSTOM_THEME_STYLE_ID = "rikkahub-custom-theme";
 
-function isThemeMode(value: string | null): value is ThemeMode {
+function isThemeMode(value: unknown): value is ThemeMode {
   return value === "light" || value === "dark" || value === "system";
 }
 
@@ -117,64 +120,132 @@ function scopeCssForTheme(value: string, dataThemeId: string, mode: "light" | "d
   return `:root.dark${scopeAttr} {\n${filtered}\n}`;
 }
 
-// 读取并归一化用户主题列表。首次发现旧版单槽 custom 数据时,自动迁移成一条
-// 名为"自定义"的用户主题,老用户不会丢失已配置的主题。
-function readUserThemes(storageKey: string): UserTheme[] {
-  const userThemesKey = `${storageKey}${USER_THEMES_STORAGE_SUFFIX}`;
-  const raw = localStorage.getItem(userThemesKey);
+// ─── 持久化(专题8:重置/遗忘专项) ───────────────────────────────────────
+// 主题的权威存储从 localStorage 迁至后端 settings.displaySetting(PC-only 键,
+// 导出安卓时剥离,见 pc-server/backup/export.ts pcOnlyDisplayFields)。
+// 动机:Tauri 窗口的 origin 是 http://localhost:<端口>,localStorage 按 origin 隔离,
+// 用户改端口(或首选端口被占、启动时自动顺延)后自定义主题/明暗模式全部"消失"。
+// 首帧同步初值来自 settings 镜像(store 初值,见 lib/settings-mirror.ts),权威快照
+// 到达后经 store 订阅校正;旧 localStorage 数据由一次性迁移上传后清除。
+
+type ThemePrefs = {
+  mode: ThemeMode;
+  colorTheme: ColorTheme;
+  userThemes: UserTheme[];
+};
+
+function sanitizeUserThemes(raw: unknown): UserTheme[] | null {
+  if (!Array.isArray(raw)) return null;
+  return raw.filter(
+    (item): item is UserTheme =>
+      !!item &&
+      typeof item.id === "string" &&
+      typeof item.name === "string" &&
+      typeof item.css === "object" &&
+      item.css !== null &&
+      typeof item.css.light === "string" &&
+      typeof item.css.dark === "string",
+  );
+}
+
+// 归一化 colorTheme:兜底已删除的内置主题、旧版 "custom"、以及指向不存在用户主题的脏值。
+function resolveColorTheme(stored: unknown, userThemes: UserTheme[], fallback: ColorTheme): ColorTheme {
+  if (typeof stored !== "string" || !stored) return fallback;
+  // 旧版固定槽 "custom" → 映射到迁移后的第一条用户主题
+  if (stored === "custom") return userThemes[0]?.id ?? fallback;
+  // 已移除的内置主题
+  if (stored === "t3-chat" || stored === "bubblegum") return fallback;
+  // 指向不存在用户主题的脏值
+  if (stored.startsWith("user-")) {
+    return userThemes.some((u) => u.id === stored) ? stored : fallback;
+  }
+  return BUILTIN_COLOR_THEMES.includes(stored) ? stored : fallback;
+}
+
+/** displaySetting 里存过主题(三键任一存在)才返回值;全缺 = 后端尚无记录(触发迁移)。 */
+function prefsFromDisplaySetting(
+  ds: DisplaySetting | undefined,
+  defaults: { mode: ThemeMode; colorTheme: ColorTheme },
+): ThemePrefs | null {
+  if (!ds) return null;
+  if (!("themeMode" in ds) && !("colorTheme" in ds) && !("userThemes" in ds)) return null;
+  const userThemes = sanitizeUserThemes(ds.userThemes) ?? [];
+  return {
+    mode: isThemeMode(ds.themeMode) ? ds.themeMode : defaults.mode,
+    colorTheme: resolveColorTheme(ds.colorTheme, userThemes, defaults.colorTheme),
+    userThemes,
+  };
+}
+
+// ─── 旧版 localStorage 读取(仅用于首帧兜底与一次性迁移) ─────────────────
+function readLegacyUserThemes(storageKey: string): UserTheme[] {
+  const raw = localStorage.getItem(`${storageKey}${USER_THEMES_STORAGE_SUFFIX}`);
   if (raw) {
     try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.filter(
-          (item): item is UserTheme =>
-            !!item &&
-            typeof item.id === "string" &&
-            typeof item.name === "string" &&
-            typeof item.css === "object" &&
-            item.css !== null &&
-            typeof item.css.light === "string" &&
-            typeof item.css.dark === "string",
-        );
-      }
+      const parsed = sanitizeUserThemes(JSON.parse(raw));
+      if (parsed) return parsed;
     } catch {
-      // fall through to legacy migration
+      // fall through to legacy single-slot migration
     }
   }
-
+  // 更旧的单槽 custom 数据 → 一条名为"自定义"的用户主题(读取时映射,不再回写)
   const legacyLight = localStorage.getItem(`${storageKey}${LEGACY_CUSTOM_LIGHT_SUFFIX}`);
   const legacyDark = localStorage.getItem(`${storageKey}${LEGACY_CUSTOM_DARK_SUFFIX}`);
   if ((legacyLight && legacyLight.trim()) || (legacyDark && legacyDark.trim())) {
-    const migrated: UserTheme[] = [
+    return [
       {
         id: generateUserThemeId(),
         name: i18n.t("common:theme.custom"),
         css: { light: legacyLight ?? "", dark: legacyDark ?? "" },
       },
     ];
-    localStorage.setItem(userThemesKey, JSON.stringify(migrated));
-    localStorage.removeItem(`${storageKey}${LEGACY_CUSTOM_LIGHT_SUFFIX}`);
-    localStorage.removeItem(`${storageKey}${LEGACY_CUSTOM_DARK_SUFFIX}`);
-    return migrated;
   }
-
   return [];
 }
 
-// 决定初始 colorTheme:兜底已删除的内置主题、旧版 "custom"、以及指向不存在用户主题的脏值。
-function resolveInitialColorTheme(storageKey: string, userThemes: UserTheme[]): ColorTheme {
-  const stored = localStorage.getItem(`${storageKey}${COLOR_THEME_STORAGE_SUFFIX}`);
-  if (!stored) return "default";
+function readLegacyPrefs(
+  storageKey: string,
+  defaults: { mode: ThemeMode; colorTheme: ColorTheme },
+): ThemePrefs | null {
+  if (typeof localStorage === "undefined") return null;
+  const modeRaw = localStorage.getItem(storageKey);
+  const colorRaw = localStorage.getItem(`${storageKey}${COLOR_THEME_STORAGE_SUFFIX}`);
+  const userThemes = readLegacyUserThemes(storageKey);
+  if (!isThemeMode(modeRaw) && !colorRaw && userThemes.length === 0) return null;
+  return {
+    mode: isThemeMode(modeRaw) ? modeRaw : defaults.mode,
+    colorTheme: resolveColorTheme(colorRaw, userThemes, defaults.colorTheme),
+    userThemes,
+  };
+}
 
-  // 旧版固定槽 "custom" → 映射到迁移后的第一条用户主题
-  if (stored === "custom") return userThemes[0]?.id ?? "default";
-  // 已移除的内置主题
-  if (stored === "t3-chat" || stored === "bubblegum") return "default";
-  // 指向不存在用户主题的脏值
-  if (stored.startsWith("user-")) {
-    return userThemes.some((u) => u.id === stored) ? stored : "default";
+function clearLegacyPrefs(storageKey: string): void {
+  for (const key of [
+    storageKey,
+    `${storageKey}${COLOR_THEME_STORAGE_SUFFIX}`,
+    `${storageKey}${USER_THEMES_STORAGE_SUFFIX}`,
+    `${storageKey}${LEGACY_CUSTOM_LIGHT_SUFFIX}`,
+    `${storageKey}${LEGACY_CUSTOM_DARK_SUFFIX}`,
+  ]) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* 隐私模式等:清不掉只是下次迁移多跑一次 GET,无害 */
+    }
   }
-  return BUILTIN_COLOR_THEMES.includes(stored) ? stored : "default";
+}
+
+/** 乐观更新 store(settings 镜像随之落盘)并 POST 后端;失败静默——本地已生效,
+ *  下次改动或权威快照到达后自然校正。 */
+function persistDisplayPatch(patch: Partial<DisplaySetting>): void {
+  const store = useSettingsStore.getState();
+  const current = store.settings;
+  if (current) {
+    store.setSettings({ ...current, displaySetting: { ...current.displaySetting, ...patch } });
+  }
+  void api.post<{ status: string }>("settings/display", patch).catch(() => {
+    /* 离线/后端重启窗口:本地状态已生效,放弃本次落盘 */
+  });
 }
 
 export function ThemeProvider({
@@ -184,19 +255,61 @@ export function ThemeProvider({
   storageKey = "vite-ui-theme",
   ...props
 }: ThemeProviderProps) {
-  const colorThemeStorageKey = `${storageKey}${COLOR_THEME_STORAGE_SUFFIX}`;
-  const userThemesStorageKey = `${storageKey}${USER_THEMES_STORAGE_SUFFIX}`;
-
-  const [theme, setThemeState] = useState<ThemeMode>(() => {
-    const stored = localStorage.getItem(storageKey);
-    return isThemeMode(stored) ? stored : defaultTheme;
+  // 首帧解析顺序:settings 镜像(上次会话的权威值) → 旧版 localStorage → 内置默认。
+  const [prefs, setPrefs] = useState<ThemePrefs>(() => {
+    const defaults = { mode: defaultTheme, colorTheme: defaultColorTheme };
+    return (
+      prefsFromDisplaySetting(useSettingsStore.getState().settings?.displaySetting, defaults) ??
+      readLegacyPrefs(storageKey, defaults) ?? { ...defaults, userThemes: [] }
+    );
   });
+  const { mode: theme, colorTheme, userThemes } = prefs;
 
-  const [userThemes, setUserThemes] = useState<UserTheme[]>(() => readUserThemes(storageKey));
+  // 权威快照(或其他窗口的改动)到达 → 跟随。本组件自己的改动经 persistDisplayPatch
+  // 乐观写入 store,回到这里是等值 no-op,不会成环。
+  const displaySetting = useSettingsStore((state) => state.settings?.displaySetting);
+  useEffect(() => {
+    const next = prefsFromDisplaySetting(displaySetting, { mode: defaultTheme, colorTheme: defaultColorTheme });
+    if (!next) return;
+    setPrefs((prev) =>
+      prev.mode === next.mode &&
+      prev.colorTheme === next.colorTheme &&
+      JSON.stringify(prev.userThemes) === JSON.stringify(next.userThemes)
+        ? prev
+        : next,
+    );
+  }, [displaySetting, defaultTheme, defaultColorTheme]);
 
-  const [colorTheme, setColorThemeState] = useState<ColorTheme>(() =>
-    resolveInitialColorTheme(storageKey, userThemes),
-  );
+  // 一次性迁移:旧版数据还躺在本 origin 的 localStorage 里 → 若后端尚无主题记录,
+  // 上传旧值;随后清掉旧键(后端已有记录时同样清,权威以后端为准)。
+  // 以直接 GET 的服务端值为判断依据,不信 store 初值(可能是陈旧镜像)。
+  useEffect(() => {
+    const legacy = readLegacyPrefs(storageKey, { mode: defaultTheme, colorTheme: defaultColorTheme });
+    if (!legacy) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const fresh = await api.get<{ displaySetting?: DisplaySetting }>("settings");
+        if (cancelled) return;
+        // 按键逐个补传:用户可能在迁移完成前已改过某一项(后端只有那一个键),
+        // 整体判断会漏传其余旧值(如自定义主题列表)却清掉旧键 → 数据丢失。
+        const ds = fresh.displaySetting ?? ({} as DisplaySetting);
+        const patch: Partial<DisplaySetting> = {};
+        if (!("themeMode" in ds)) patch.themeMode = legacy.mode;
+        if (!("colorTheme" in ds)) patch.colorTheme = legacy.colorTheme;
+        if (!("userThemes" in ds)) patch.userThemes = legacy.userThemes;
+        if (Object.keys(patch).length > 0) persistDisplayPatch(patch);
+        // 首帧初值已按"镜像 → 旧 localStorage"解析,这里无需再 setPrefs;
+        // 后端已有的键以快照跟随效果器为准。
+        clearLegacyPrefs(storageKey);
+      } catch {
+        /* 网络/后端未就绪:旧键保留,下次启动重试迁移 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [storageKey, defaultTheme, defaultColorTheme]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -263,25 +376,15 @@ export function ThemeProvider({
     }
   }, [userThemes]);
 
-  useEffect(() => {
-    localStorage.setItem(userThemesStorageKey, JSON.stringify(userThemes));
-  }, [userThemes, userThemesStorageKey]);
+  const setTheme = useCallback((next: ThemeMode) => {
+    setPrefs((prev) => ({ ...prev, mode: next }));
+    persistDisplayPatch({ themeMode: next });
+  }, []);
 
-  const setTheme = useCallback(
-    (next: ThemeMode) => {
-      localStorage.setItem(storageKey, next);
-      setThemeState(next);
-    },
-    [storageKey],
-  );
-
-  const setColorTheme = useCallback(
-    (next: ColorTheme) => {
-      localStorage.setItem(colorThemeStorageKey, next);
-      setColorThemeState(next);
-    },
-    [colorThemeStorageKey],
-  );
+  const setColorTheme = useCallback((next: ColorTheme) => {
+    setPrefs((prev) => ({ ...prev, colorTheme: next }));
+    persistDisplayPatch({ colorTheme: next });
+  }, []);
 
   const addUserTheme = useCallback(
     ({ name, css }: { name: string; css: CustomThemeCss }): UserTheme => {
@@ -290,38 +393,42 @@ export function ThemeProvider({
         name: name.trim() || i18n.t("common:theme.unnamed"),
         css,
       };
-      setUserThemes((prev) => [...prev, created]);
+      const next = [...userThemes, created];
+      setPrefs((prev) => ({ ...prev, userThemes: next }));
+      persistDisplayPatch({ userThemes: next });
       return created;
     },
-    [],
+    [userThemes],
   );
 
   const updateUserTheme = useCallback(
     (id: string, patch: { name?: string; css?: CustomThemeCss }) => {
-      setUserThemes((prev) =>
-        prev.map((u) =>
-          u.id === id
-            ? {
-                ...u,
-                ...patch,
-                name: patch.name !== undefined ? patch.name.trim() || u.name : u.name,
-              }
-            : u,
-        ),
+      const next = userThemes.map((u) =>
+        u.id === id
+          ? {
+              ...u,
+              ...patch,
+              name: patch.name !== undefined ? patch.name.trim() || u.name : u.name,
+            }
+          : u,
       );
+      setPrefs((prev) => ({ ...prev, userThemes: next }));
+      persistDisplayPatch({ userThemes: next });
     },
-    [],
+    [userThemes],
   );
 
   const deleteUserTheme = useCallback(
     (id: string) => {
-      setUserThemes((prev) => prev.filter((u) => u.id !== id));
+      const next = userThemes.filter((u) => u.id !== id);
+      const patch: Partial<DisplaySetting> = { userThemes: next };
       // 删的恰好是当前主题 → 回退到默认,避免界面卡在一个已无 CSS 的作用域上
-      if (colorTheme === id) {
-        setColorTheme("default");
-      }
+      const nextColor = colorTheme === id ? "default" : colorTheme;
+      if (nextColor !== colorTheme) patch.colorTheme = nextColor;
+      setPrefs((prev) => ({ ...prev, userThemes: next, colorTheme: nextColor }));
+      persistDisplayPatch(patch);
     },
-    [colorTheme, setColorTheme],
+    [userThemes, colorTheme],
   );
 
   // value 用 useMemo 聚合稳定的 handler,避免 ThemeProvider 内部 state 变化时

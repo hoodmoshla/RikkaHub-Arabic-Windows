@@ -169,7 +169,12 @@ export function rewriteAvatarsInSettings(settings: any, mapping: Record<string, 
       // Strip PC-only displaySetting fields that Android can't deserialize:
       // - chatFontFamilyCss: PC-only CSS field
       // - uiFontSize / chatFontSize: PC-only font size fields
-      const pcOnlyDisplayFields = ["chatFontFamilyCss", "uiFontSize", "chatFontSize", "chatInputHeight"];
+      // - themeMode/colorTheme/userThemes/language: 专题8,UI 主题与语言的权威存储
+      //   (从 localStorage 迁来,防端口变更导致 origin 隔离丢失)
+      const pcOnlyDisplayFields = [
+        "chatFontFamilyCss", "uiFontSize", "chatFontSize", "chatInputHeight",
+        "themeMode", "colorTheme", "userThemes", "language",
+      ];
       for (const field of pcOnlyDisplayFields) {
         if (field in displaySetting) delete displaySetting[field];
       }

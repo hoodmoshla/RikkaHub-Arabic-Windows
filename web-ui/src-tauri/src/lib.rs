@@ -95,6 +95,10 @@ struct UserConfig {
     /// None = default-on, matching the convention of most modern desktop clients.
     #[serde(default)]
     minimize_to_tray: Option<bool>,
+    /// 专题8:未知字段透传。新版本(或降级前的新字段)写入的键在旧二进制的
+    /// load→save 往返中原样保留,而不是被静默丢弃——"设置遗忘"类问题的预防线。
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// User config lives in the user's roaming AppData so it survives uninstall+reinstall.
@@ -114,14 +118,27 @@ fn load_user_config(app: &AppHandle) -> UserConfig {
     let Ok(text) = fs::read_to_string(&path) else {
         return UserConfig::default();
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    match serde_json::from_str(&text) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            // 专题8:解析失败不再静默回默认值继续跑——那样下一次 save 会把损坏前的
+            // data_dir/托盘设置永久覆盖(用户会以为数据全丢了)。把坏文件挪到一边
+            // 留证可恢复,本次按默认运行。
+            let _ = fs::rename(&path, path.with_extension("json.corrupted"));
+            UserConfig::default()
+        }
+    }
 }
 
 fn save_user_config(app: &AppHandle, cfg: &UserConfig) -> Result<(), String> {
     let path = config_path(app)?;
     let text = serde_json::to_string_pretty(cfg)
         .map_err(|e| format!("Failed to serialize config: {e}"))?;
-    fs::write(&path, text).map_err(|e| format!("Failed to write config: {e}"))?;
+    // 专题8:temp+rename 原子写。此前 fs::write 直接覆盖,崩溃/断电时写一半,
+    // 下次启动解析失败 → data_dir 丢失,应用指回默认数据目录。
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text).map_err(|e| format!("Failed to write config: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit config: {e}"))?;
     Ok(())
 }
 

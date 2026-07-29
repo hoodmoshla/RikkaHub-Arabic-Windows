@@ -118,6 +118,18 @@ function mergeCjkIntoFamily(enFamily: string, cjkFamily: string): string {
   return idx < 0 ? `${en}, ${cjkFamily}` : `${en.slice(0, idx)}, ${cjkFamily}${en.slice(idx)}`;
 }
 
+// 专题8:语言上报——乐观写 store(settings 镜像随之落盘)+ POST 后端;等值跳过,
+// 保证快照回放触发的 languageChanged 不会回写成环。失败静默,本地已生效。
+function persistLanguage(lng: string): void {
+  const store = useSettingsStore.getState();
+  const current = store.settings;
+  if (!current || current.displaySetting?.language === lng) return;
+  store.setSettings({ ...current, displaySetting: { ...current.displaySetting, language: lng } });
+  void api.post<{ status: string }>("settings/display", { language: lng }).catch(() => {
+    /* 离线/后端重启窗口:放弃本次落盘,下次切换或迁移重试 */
+  });
+}
+
 function AppContent() {
   // 使用时长活动信标(专题6):窗口可见且聚焦时才向后端上报活动,hb 心跳据此
   // 只统计用户实际在用的时间段。详见 services/usage-activity.ts。
@@ -146,6 +158,25 @@ function AppContent() {
   useAppErrorsSubscription();
   useHotkeys();
   const displaySetting = useSettingsStore((state) => state.settings?.displaySetting);
+  // 专题8:界面语言权威在后端 displaySetting.language(localStorage 按 origin 隔离,
+  // 改端口/端口顺延即丢)。快照 → i18n 跟随;后端尚无记录时把当前生效语言上报一次
+  // (迁移旧 localStorage "lang"/浏览器推断值);用户切换语言经 languageChanged 上报。
+  const dsLanguage = typeof displaySetting?.language === "string" ? displaySetting.language : undefined;
+  React.useEffect(() => {
+    if (displaySetting === undefined) return; // settings 尚未就绪(无镜像的首次运行)
+    if (dsLanguage === undefined) {
+      persistLanguage(i18n.language);
+    } else if (dsLanguage !== i18n.language) {
+      void i18n.changeLanguage(dsLanguage);
+    }
+  }, [displaySetting, dsLanguage]);
+  React.useEffect(() => {
+    const onChanged = (lng: string) => persistLanguage(lng);
+    i18n.on("languageChanged", onChanged);
+    return () => {
+      i18n.off("languageChanged", onChanged);
+    };
+  }, []);
   React.useEffect(() => {
     if (typeof document === "undefined") return;
     // 中英文分别设置(Word 式):把中文字体插到英文字体 family 链的"主字体之后、兜底之前"。

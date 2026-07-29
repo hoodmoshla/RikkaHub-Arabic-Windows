@@ -66,6 +66,12 @@ export interface DisplaySetting {
   pasteLongTextThreshold: number;
   /** User-resizable chat input min-height in px (null = default). PC-only. */
   chatInputHeight?: number | null;
+  /** 专题8:UI 主题与语言的权威存储(原在 localStorage,按 origin 隔离,改端口即丢)。
+   *  PC-only,已在 pc-server pcOnlyDisplayFields 剥离清单,导出安卓不可见。 */
+  themeMode?: "light" | "dark" | "system";
+  colorTheme?: string;
+  userThemes?: { id: string; name: string; css: { light: string; dark: string } }[];
+  language?: string;
   [key: string]: unknown;
 }
 

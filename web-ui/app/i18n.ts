@@ -1,6 +1,8 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 
+import { readSettingsMirror } from "./lib/settings-mirror";
+
 import enUSCommon from "./locales/en-US/common.json";
 import enUSInput from "./locales/en-US/input.json";
 import enUSMarkdown from "./locales/en-US/markdown.json";
@@ -21,6 +23,15 @@ function getInitialLanguage(): (typeof SUPPORTED_LANGUAGES)[number] {
     return "zh-CN";
   }
 
+  // 专题8:语言的权威存储在后端 displaySetting.language(root.tsx 负责快照跟随与
+  // 用户切换时的上报)。首帧从 settings 镜像同步取上次会话的权威值,避免语言闪动。
+  const fromMirror = readSettingsMirror()?.displaySetting?.language;
+  if (fromMirror === "zh-CN" || fromMirror === "en-US") {
+    return fromMirror;
+  }
+
+  // 旧版把语言直接存 localStorage("lang",按 origin 隔离,改端口即丢)。留作迁移
+  // 兜底:root.tsx 在后端尚无记录时会把当前生效语言上报,此后镜像分支接管。
   const fromStorage = window.localStorage.getItem("lang");
   if (fromStorage === "zh-CN" || fromStorage === "en-US") {
     return fromStorage;
@@ -57,12 +68,6 @@ void i18n.use(initReactI18next).init({
   interpolation: {
     escapeValue: false,
   },
-});
-
-void i18n.on("languageChanged", (language) => {
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem("lang", language);
-  }
 });
 
 export default i18n;
