@@ -8,6 +8,7 @@ import {
   apiContentFromParts,
   claudeContentFromApiContent,
   dataUrlForMessageUrl,
+  documentPartsFirst,
   groupAssistantPartsByToolBoundary,
   parseDataUrl,
   responseApiContentFromUiParts,
@@ -61,6 +62,21 @@ describe("apiContentFromParts", () => {
 
   test("audio/video 降级为文本占位", () => {
     expect(apiContentFromParts([{ type: "audio", url: "u" }])).toBe("[audio: u]");
+  });
+});
+
+describe("documentPartsFirst", () => {
+  test("issue6:文档 part 前置(对齐安卓 add(0, prompt)),其余保持稳定顺序", () => {
+    const question = { type: "text", text: "问题" };
+    const doc1 = { type: "document", url: "/api/files/1/content", fileName: "a.txt" };
+    const doc2 = { type: "document", url: "/api/files/2/content", fileName: "b.txt" };
+    const image = { type: "image", url: "data:image/png;base64,AA" };
+    expect(documentPartsFirst([question, doc1, image, doc2])).toEqual([doc1, doc2, question, image]);
+  });
+
+  test("无文档时原样返回(同一引用,零开销)", () => {
+    const parts = [{ type: "text", text: "hi" }];
+    expect(documentPartsFirst(parts)).toBe(parts);
   });
 });
 

@@ -42,10 +42,20 @@ ${content}
 }
 
 
+// issue6:对齐安卓 DocumentAsPromptTransformer(add(0, prompt))——文档全文排在消息
+// parts 最前、用户问题在后。Gemini 等长上下文模型对"长内容在前、指令在后"敏感
+// (Google 官方长上下文指引),问题在前会显著降低模型对长文档中后段的利用率,
+// 表现为"上传长文只有前几千行被用到"。仅在请求构建时重排,存储与 UI 展示不变。
+export function documentPartsFirst<T>(parts: T[]): T[] {
+  const isDoc = (p: T) => isRecord(p) && (p as Record<string, unknown>).type === "document";
+  if (!parts.some(isDoc)) return parts;
+  return [...parts.filter(isDoc), ...parts.filter((p) => !isDoc(p))];
+}
+
 export function contentPartsForApi(parts: MessagePart[], targetModel?: Model) {
   const stripImageForOcr = targetModel ? !supportsInputModality(targetModel, "IMAGE") : false;
   const result: any[] = [];
-  for (const part of parts) {
+  for (const part of documentPartsFirst(parts)) {
     if (!isRecord(part)) continue;
     if (part.type === "text") {
       const text = String(part.text ?? "");
@@ -715,7 +725,7 @@ export function responseApiContent(content: unknown, role: string) {
 
 
 export function responseApiContentFromUiParts(parts: JsonValue[], role: string) {
-  const content = parts
+  const content = documentPartsFirst(parts)
     .map((part) => {
       if (!isRecord(part)) return null;
       if (part.type === "text" || part.type === "input_text" || part.type === "output_text") {
@@ -862,7 +872,7 @@ export function responseApiMessagesFromUiMessages(messages: Message[], targetMod
       continue;
     }
     const role = messageValue.role === "TOOL" ? "tool" : "user";
-    const contentParts = messageValue.parts
+    const contentParts = documentPartsFirst(messageValue.parts)
       .map((part) => {
         if (!isRecord(part)) return null;
         if (part.type === "text") return part;
