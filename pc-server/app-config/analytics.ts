@@ -1,6 +1,6 @@
 // app-config/analytics.ts — 匿名 DAU 统计（一启动一 ping，绝不打扰用户，详见下方设计准则注释）
 // 纪律：搬迁自 server.ts（阶段 5.3h）。仅发送当日计数——设备 UUID、日期、版本、OS,外加:
-//   mc = 消息数        hb = 心跳数(≈ 当日使用时长 / 10 分钟)
+//   mc = 消息数        hb = 心跳数(≈ 当日窗口激活时长 / 10 分钟,见 markUiActivity)
 //   er = provider 失败  fs/ft/fm/fi = 搜索 / TTS / MCP / 图像生成 使用次数
 // 不采集用户内容、IP、模型名、文件名、查询词。服务端只按 MAX 合并当日计数,每天归零。
 
@@ -11,12 +11,20 @@ import { APP_VERSION } from "../updates/index";
 const ANALYTICS_ENDPOINT = "https://rikkahub-desktop.pages.dev/ping";
 let analyticsDeviceId = "";
 let analyticsMsgCount = 0;
-let analyticsHbCount = 0;      // 心跳数:每次 ping +1,≈ 当日使用时长 / 10 分钟
+let analyticsHbCount = 0;      // 心跳数:活跃 tick +1,≈ 当日【窗口激活】时长 / 10 分钟
 let analyticsErrCount = 0;     // provider 请求失败数(不含用户主动中断)
 let analyticsSearchCount = 0;  // search_web / scrape_web 执行次数
 let analyticsTtsCount = 0;     // TTS 朗读次数
 let analyticsMcpCount = 0;     // MCP 工具调用次数
 let analyticsImgCount = 0;     // 图像生成次数
+
+// 专题6:hb 的口径是"用户实际在用"而非"进程在线"。此前每次 ping 无条件 +1,
+// 而 ping 只要 server 进程活着就发——托盘常驻/Docker 7×24 部署把"使用时长"灌成
+// "进程在线时长"(dashboard 曾出现日均 645 分钟的荒谬均值)。现在由前端在窗口
+// 可见且聚焦时定期上报活动信标(POST /api/activity → markUiActivity),每个
+// 10 分钟 tick 只有收到过信标才计 1 跳。无 UI 交互的空转进程 hb 恒为 0。
+let lastUiActivityAt = 0;
+export function markUiActivity(): void { lastUiActivityAt = Date.now(); }
 
 // 3.5c-4: 埋点分散在各域模块(会话/工具/媒体),经函数递增计数(let 变量无法跨模块赋值)。
 export function bumpAnalyticsMsgCount() { analyticsMsgCount++; }
@@ -59,7 +67,6 @@ function analyticsOs(): string {
 
 function sendAnalyticsPing(): void {
   if (!analyticsDeviceId) return;
-  analyticsHbCount++; // 每次 ping 即一跳(启动 + 每 10 分钟),服务端按 MAX 合并
   const url = `${ANALYTICS_ENDPOINT}?id=${encodeURIComponent(analyticsDeviceId)}`
     + `&d=${localDateStr()}`
     + `&v=${encodeURIComponent(APP_VERSION)}`
@@ -90,10 +97,14 @@ export function startAnalytics(): void {
     analyticsDeviceId = readOrCreateDeviceId();
     const today = localDateStr();
     let lastDate = today;
-    sendAnalyticsPing(); // startup ping
+    sendAnalyticsPing(); // startup ping(DAU 信号,不计时长——启动 ≠ 在用)
+    let lastTickAt = Date.now();
     setInterval(() => {
       const now = localDateStr();
       if (now !== lastDate) { resetAnalyticsCounters(); lastDate = now; }
+      // 本 tick 周期内有 UI 活动信标才算一跳(10 分钟粒度的激活时长估算)。
+      if (lastUiActivityAt >= lastTickAt) analyticsHbCount++;
+      lastTickAt = Date.now();
       sendAnalyticsPing();
     }, 10 * 60 * 1000); // every 10 minutes
   } catch { /* analytics must never break the app */ }

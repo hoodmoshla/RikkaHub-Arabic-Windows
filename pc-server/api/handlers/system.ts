@@ -13,6 +13,7 @@ import { memoryStore } from "../../memory/index";
 import { recentAppErrors } from "../../observability/app-errors";
 import { computeStats } from "../../conversations/stats";
 import { DEFAULT_PROMPT_OPTIMIZE_PROMPT } from "../../app-config/prompts";
+import { markUiActivity } from "../../app-config/analytics";
 import { fetchAuxiliaryText } from "../../conversations/auxiliary";
 import { serveAIIcon } from "../../assets/icons";
 import { FONT_EXTENSIONS_SET, FONT_MIME, MAX_FONT_BYTES, fontCssName, fontExtension, isBareFileName, isFontFile, listBuiltinFonts, listCustomFonts, listSystemFonts, makeBundledFontEntry, resolveFontFile } from "../../assets/fonts";
@@ -20,6 +21,12 @@ import { FONT_EXTENSIONS_SET, FONT_MIME, MAX_FONT_BYTES, fontCssName, fontExtens
 export async function handleSystemRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   // 4-6:不回显绝对 dataDir 路径(未鉴权即可见的轻微信息泄露;无消费方读它)。
   if (path === "health") return json({ ok: true, version: APP_VERSION });
+  // 专题6:UI 活动信标——前端在窗口可见且聚焦时定期上报,analytics 据此把"使用
+  // 时长"心跳限定在用户实际在用的时间段(托盘常驻/无头部署不再灌时长)。
+  if (path === "activity" && request.method === "POST") {
+    markUiActivity();
+    return json({ ok: true });
+  }
   // 单一应用事件通道(连接预算纪律,详见 api/sse.ts 顶部注释):设置/记忆/错误/列表失效
   // 四域合一。连接即推各域完整快照——重连本身就是状态补偿,客户端无需另发 GET。
   if (path === "events") {

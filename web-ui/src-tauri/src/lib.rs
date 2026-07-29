@@ -125,9 +125,42 @@ fn save_user_config(app: &AppHandle, cfg: &UserConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Consume the installer's data-dir handoff file (NSIS_HOOK_POSTINSTALL writes the
+/// chosen path as a plain-text single line). The installer must never write
+/// user-config.json itself: rewriting a JSON it doesn't fully parse clobbers every
+/// field it doesn't know about — that's exactly how `minimize_to_tray: false` kept
+/// resurrecting to default-on after every update (专题6). We merge here via
+/// load-modify-save (all other fields survive), then delete the handoff.
+/// Must run before the first resolve_data_dir call so a fresh install's choice takes
+/// effect on the very first launch.
+fn consume_installer_data_dir_handoff(app: &AppHandle) {
+    let Ok(config_dir) = app.path().app_config_dir() else {
+        return;
+    };
+    let handoff = config_dir.join("installer-data-dir.txt");
+    let Ok(text) = fs::read_to_string(&handoff) else {
+        return;
+    };
+    let path = text.trim();
+    if !path.is_empty() {
+        let mut cfg = load_user_config(app);
+        if cfg.data_dir.as_deref() != Some(path) {
+            cfg.data_dir = Some(path.to_string());
+            if save_user_config(app, &cfg).is_err() {
+                // 合并失败(磁盘/权限):保留交接文件,下次启动重试。本次启动
+                // resolve_data_dir 读到旧配置——与安装前行为一致,不丢数据。
+                return;
+            }
+        }
+    }
+    let _ = fs::remove_file(&handoff);
+}
+
 /// Resolve the effective data directory in this priority order:
 ///   1. env var `RIKKAHUB_PC_DATA_DIR` (developer/test override)
-///   2. value persisted in user-config.json (set by user via Settings UI or installer)
+///   2. value persisted in user-config.json (written only by this shell — either the
+///      Settings UI's set_data_dir command, or the startup merge of the installer's
+///      plain-text handoff file; the installer never writes the JSON itself)
 ///   3. `pc-data/` next to the running exe (portable default)
 fn resolve_data_dir(app: &AppHandle) -> PathBuf {
     if let Ok(env) = std::env::var("RIKKAHUB_PC_DATA_DIR") {
@@ -583,6 +616,10 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // 安装器数据目录交接必须先于 spawn_sidecar(内部 resolve_data_dir 决定
+            // 传给后端的 RIKKAHUB_PC_DATA_DIR),否则全新安装的首次启动用错目录。
+            consume_installer_data_dir_handoff(&handle);
 
             // Start the sidecar, then wait for it to print its `RIKKAHUB_PORT:<n>` marker. The
             // sidecar now picks its own port (8080 by default, walking up on conflict) and we

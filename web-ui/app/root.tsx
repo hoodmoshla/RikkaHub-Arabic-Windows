@@ -26,6 +26,7 @@ import { openExternal } from "./lib/external-link";
 import { toast } from "sonner";
 import { GlobalConfirmDialog } from "./components/global-confirm-dialog";
 import { useAppErrorsStore } from "./stores/app-errors-store";
+import { startUsageActivityBeacon } from "./services/usage-activity";
 import api from "~/services/api";
 
 const queryClient = new QueryClient();
@@ -118,6 +119,11 @@ function mergeCjkIntoFamily(enFamily: string, cjkFamily: string): string {
 }
 
 function AppContent() {
+  // 使用时长活动信标(专题6):窗口可见且聚焦时才向后端上报活动,hb 心跳据此
+  // 只统计用户实际在用的时间段。详见 services/usage-activity.ts。
+  React.useEffect(() => {
+    startUsageActivityBeacon();
+  }, []);
   // KaTeX 字体预热:字体本来在首条数学公式渲染时才按需加载,加载完成又触发
   // 全列表重排,恰好压在打开会话的关键路径上(探针实测:点击后 ~570ms 才开始
   // 拉字体,随后一波重排)。启动后的空闲期提前拉取,打开会话时字体已就位。
