@@ -30,6 +30,7 @@ import {
   DrawerTitle,
 } from "~/components/ui/drawer";
 import { useIsMobile } from "~/hooks/use-mobile";
+import { copyTextToClipboard } from "~/lib/clipboard";
 import { resolveFileUrl } from "~/lib/files";
 import { cn } from "~/lib/utils";
 import type { TextPart as UITextPart, ToolPart as UIToolPart } from "~/types";
@@ -288,11 +289,46 @@ function getToolTitle(toolName: string, args: unknown, t: TFunction): string {
   return t("tool_part.tool_call_with_name", { toolName });
 }
 
-function JsonBlock({ value }: { value: unknown }) {
+// issue3:工具结果常是纯文本(JSON.parse 失败回退原文)——此前对字符串再走 JSON.stringify,
+// 换行被转义成 \n 字面量,整段挤成一条超长单行只能横向滚动。字符串直接按原文
+// 渲染,对象保持缩进 JSON;pre-wrap + break-words 让长行折行,用足垂直空间。
+// maxHeightClass:卡片内联预览限高,抽屉里不限(外层容器自身可滚)。
+function JsonBlock({ value, maxHeightClass = "max-h-64" }: { value: unknown; maxHeightClass?: string }) {
+  const text = typeof value === "string" ? value : toJsonString(value);
   return (
-    <pre className="max-h-64 overflow-auto rounded-md border bg-muted/30 p-3 text-xs">
-      {toJsonString(value)}
+    <pre className={cn("overflow-y-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs", maxHeightClass)}>
+      {text}
     </pre>
+  );
+}
+
+// issue3:参数/结果区块的复制按钮。复制工具原始文本(结果用原文,不用二次
+// stringify 的转义形态),方便调试时把错误信息带走。
+function SectionCopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = React.useState(false);
+  const timeoutRef = React.useRef(0);
+  React.useEffect(() => () => window.clearTimeout(timeoutRef.current), []);
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="xs"
+      aria-label={label}
+      title={label}
+      className="h-5 px-1 text-muted-foreground"
+      onClick={async () => {
+        if (copied) return;
+        try {
+          await copyTextToClipboard(text);
+        } catch {
+          return;
+        }
+        setCopied(true);
+        timeoutRef.current = window.setTimeout(() => setCopied(false), 2000);
+      }}
+    >
+      {copied ? <Check className="size-3" /> : <Clipboard className="size-3" />}
+    </Button>
   );
 }
 
@@ -796,15 +832,17 @@ export function ToolPart({
             ) : (
               <div className="space-y-3">
                 <div>
-                  <div className="mb-1 text-muted-foreground text-xs">
-                    {t("tool_part.parameters")}
+                  <div className="mb-1 flex items-center justify-between text-muted-foreground text-xs">
+                    <span>{t("tool_part.parameters")}</span>
+                    <SectionCopyButton text={toJsonString(args)} label={t("tool_part.copy")} />
                   </div>
-                  <JsonBlock value={args} />
+                  <JsonBlock value={args} maxHeightClass="max-h-none" />
                 </div>
                 {isExecuted && (
                   <div className="space-y-2">
-                    <div className="mb-1 text-muted-foreground text-xs">
-                      {t("tool_part.result")}
+                    <div className="mb-1 flex items-center justify-between text-muted-foreground text-xs">
+                      <span>{t("tool_part.result")}</span>
+                      <SectionCopyButton text={outputText} label={t("tool_part.copy")} />
                     </div>
                     {tool.output.map((part, i) => {
                       if (part.type === "text") {
@@ -814,7 +852,7 @@ export function ToolPart({
                         } catch {
                           parsed = part.text;
                         }
-                        return <JsonBlock key={i} value={parsed} />;
+                        return <JsonBlock key={i} value={parsed} maxHeightClass="max-h-none" />;
                       }
                       if (part.type === "image")
                         return <ImagePartRenderer key={i} url={part.url} />;

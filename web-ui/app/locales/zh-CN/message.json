@@ -105,6 +105,7 @@
     "tool_name_label": "工具名：{{toolName}}",
     "parameters": "参数",
     "result": "结果",
+    "copy": "复制",
     "not_executed": "工具尚未执行",
     "ask_user_title": "询问用户",
     "ask_user_questions_count": "询问 {{count}} 个问题",

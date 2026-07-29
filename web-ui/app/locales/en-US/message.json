@@ -105,6 +105,7 @@
     "tool_name_label": "Tool: {{toolName}}",
     "parameters": "Parameters",
     "result": "Result",
+    "copy": "Copy",
     "not_executed": "Tool has not run yet",
     "ask_user_title": "Ask User",
     "ask_user_questions_count": "Ask {{count}} questions",
