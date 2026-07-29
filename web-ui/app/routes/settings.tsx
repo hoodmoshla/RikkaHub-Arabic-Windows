@@ -75,6 +75,10 @@ export default function SettingsPage() {
   const setStreamedSettings = useSettingsStore((state) => state.setSettings);
   const [settings, setSettings] = React.useState<Settings | null>(streamedSettings);
   const [section, setSection] = React.useState<Section>("general");
+  // issue(1.4.1 反馈):手机浏览器访问时设置页只剩左栏可见——固定 w-64+flex-1 双栏
+  // 在窄屏下内容区被挤出且 overflow-hidden 不可滑。窄屏改钻取式:先导航列表,
+  // 点击进全屏内容并带返回;md 及以上被 md: 类覆盖,双栏行为不变。
+  const [mobileContentOpen, setMobileContentOpen] = React.useState(false);
   const [logs, setLogs] = React.useState<RequestLog[]>([]);
   const [stats, setStats] = React.useState<StatsPayload | null>(null);
 
@@ -84,6 +88,7 @@ export default function SettingsPage() {
     const querySection = params.get("section");
     if (querySection && navItems.some((item) => item.id === querySection)) {
       setSection(querySection as Section);
+      setMobileContentOpen(true);
     }
   }, []);
 
@@ -142,7 +147,12 @@ export default function SettingsPage() {
 
   return (
     <div className="flex h-svh overflow-hidden bg-background">
-      <aside className="flex w-64 flex-col border-r border-divider bg-sidebar text-sidebar-foreground">
+      <aside
+        className={cn(
+          "w-full flex-col border-r border-divider bg-sidebar text-sidebar-foreground md:w-64",
+          mobileContentOpen ? "hidden md:flex" : "flex",
+        )}
+      >
         {/* pt-9 让出沉浸式标题栏高度,标题栏透明后内容仍顶到窗口顶但不会被盖住。
             border-divider:用比 --border 更淡的分界色,让区域分隔退到背景里。 */}
         <div className="flex items-center gap-2 border-b border-divider px-4 pb-3 pt-9">
@@ -172,7 +182,10 @@ export default function SettingsPage() {
                   active &&
                     "before:absolute before:left-0 before:top-1/2 before:h-5 before:w-[3px] before:-translate-y-1/2 before:rounded-r-full before:bg-sidebar-primary",
                 )}
-                onClick={() => setSection(item.id)}
+                onClick={() => {
+                  setSection(item.id);
+                  setMobileContentOpen(true);
+                }}
               >
                 <Icon
                   className={cn(
@@ -188,10 +201,24 @@ export default function SettingsPage() {
           })}
         </nav>
       </aside>
-      <main className="min-w-0 flex-1">
+      <main className={cn("min-w-0 flex-1", mobileContentOpen ? "block" : "hidden md:block")}>
         <ScrollArea className="h-svh">
           <div className="mx-auto w-full max-w-5xl px-6 pb-6 pt-9">
             {/* pt-9 与左侧 aside 顶部对齐,让出沉浸式透明标题栏高度,避免各板块内容贴顶。 */}
+            {/* 窄屏内容页头:返回导航列表 + 当前分区名(md 起隐藏) */}
+            <div className="mb-4 flex items-center gap-2 md:hidden">
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                aria-label={t("settings:nav.back")}
+                onClick={() => setMobileContentOpen(false)}
+              >
+                <ArrowLeft className="size-4" />
+              </Button>
+              <span className="text-sm font-semibold">
+                {t(navItems.find((item) => item.id === section)?.labelKey ?? "")}
+              </span>
+            </div>
             {section === "general" && (
               <GeneralSection settings={settings} onSettings={updateLocal} />
             )}
