@@ -623,6 +623,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
+        // 专题8:记忆窗口尺寸/位置/最大化状态,退出时保存、启动时恢复。
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(SidecarState::default())
         .invoke_handler(tauri::generate_handler![
             get_data_dir,
