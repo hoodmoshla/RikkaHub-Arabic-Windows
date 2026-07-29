@@ -5,11 +5,11 @@
 //   2. 全窗口拖拽投放区(global-drop-zone)。
 // 上传中的 busy 状态存在全局 store(uploading 字段),保证两个入口互斥、且任一入口
 // 触发上传时另一处的 UI 都能同步显示"上传中"。
-import { fileTypeFromBuffer } from "file-type";
 import { toast } from "sonner";
 
 import i18n from "~/i18n";
 import { normalizeImageForModelUpload } from "~/lib/image-normalize";
+import { detectUploadFile } from "~/lib/upload-detect";
 import api from "~/services/api";
 import { useAppStore } from "~/stores";
 import type { UIMessagePart, UploadFilesResponseDto } from "~/types";
@@ -32,62 +32,6 @@ export const DOCUMENT_UPLOAD_ACCEPT = [
   ".epub",
   "application/epub+zip",
 ].join(",");
-
-const DOCUMENT_MIME_BY_EXTENSION: Record<string, string> = {
-  ".epub": "application/epub+zip",
-  ".md": "text/markdown",
-  ".markdown": "text/markdown",
-  ".txt": "text/plain",
-  ".csv": "text/csv",
-  ".tsv": "text/tab-separated-values",
-  ".json": "application/json",
-  ".yaml": "application/yaml",
-  ".yml": "application/yaml",
-};
-
-function extensionOf(name: string) {
-  const match = name.toLowerCase().match(/\.[^.]+$/);
-  return match?.[0] ?? "";
-}
-
-async function detectUploadFile(
-  file: globalThis.File,
-): Promise<{ allowed: boolean; mimeType: string }> {
-  const extension = extensionOf(file.name);
-  const buffer = await file.slice(0, 4100).arrayBuffer();
-  const detected = await fileTypeFromBuffer(buffer);
-
-  // 无法识别 magic bytes → 文本文件 → 允许，强制 text/plain 防止 OS MIME 映射污染（如 .ts → video/mp2t）
-  if (!detected)
-    return { allowed: true, mimeType: DOCUMENT_MIME_BY_EXTENSION[extension] ?? "text/plain" };
-
-  // 识别为图片 / 视频 / 音频 → 允许，使用 magic bytes 检测到的 MIME
-  if (
-    detected.mime.startsWith("image/") ||
-    detected.mime.startsWith("video/") ||
-    detected.mime.startsWith("audio/")
-  ) {
-    return { allowed: true, mimeType: detected.mime };
-  }
-
-  // 允许常见文档格式
-  // 专题4:与 DOCUMENT_UPLOAD_ACCEPT 同步收敛——只放行有后端解析器的文档格式。
-  const ALLOWED_DOCUMENT_MIMES = new Set([
-    "application/pdf",
-    "application/epub+zip",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  ]);
-  if (ALLOWED_DOCUMENT_MIMES.has(detected.mime)) {
-    return { allowed: true, mimeType: detected.mime };
-  }
-  if (detected.mime === "application/zip" && extension === ".epub") {
-    return { allowed: true, mimeType: "application/epub+zip" };
-  }
-
-  // 其他可识别的二进制格式（exe、zip 等）→ 拒绝
-  return { allowed: false, mimeType: detected.mime };
-}
 
 function toMessagePart(file: UploadFilesResponseDto["files"][number]): UIMessagePart {
   if (file.mime.startsWith("image/")) {
