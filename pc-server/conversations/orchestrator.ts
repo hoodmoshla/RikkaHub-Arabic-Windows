@@ -105,17 +105,17 @@ export async function callProvider(
   let body: Record<string, any>;
 
   if (providerItem.type === "google") {
-    // Gemini 鉴权：API key 走 query param（与安卓非 Vertex 路径的 x-goog-api-key 等价，
-    // 这里沿用既有 query 形式以兼容各类兼容网关）。
-    const apiKey = providerItem.apiKey;
+    // issue10：Gemini 鉴权走 x-goog-api-key 头（与安卓非 Vertex 路径、Cherry Studio 一致）。
+    // 此前用 ?key= query，官方两者都收，但主流中转网关只解析 header，query 会被判 invalid key。
+    headers["x-goog-api-key"] = providerItem.apiKey;
     const baseUrl = providerItem.baseUrl;
     body = buildGoogleRequestBody(messagesForApi, picked.model, assistant);
     const finalBody = applyCustomBody(body, assistant, picked.model);
     // 有 hooks（来自会话）时走 SSE 流式 + 工具循环；辅助调用无 hooks 时退回非流式。
     if (hooks?.message != null) {
-      return streamGoogleChatWithTools(baseUrl, headers, apiKey, selectedModel, finalBody, providerItem, assistant, signal, hooks);
+      return streamGoogleChatWithTools(baseUrl, headers, selectedModel, finalBody, providerItem, assistant, signal, hooks);
     }
-    const googleUrl = `${baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const googleUrl = `${baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:generateContent`;
     return fetchText(googleUrl, headers, finalBody, providerItem, (raw) => raw.candidates?.[0]?.content?.parts?.map((part: any) => part?.text ?? "").join("") ?? "", signal);
   }
 

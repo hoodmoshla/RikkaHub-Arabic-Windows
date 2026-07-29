@@ -137,7 +137,9 @@ export async function fetchAuxiliaryText(modelId: string, prompt: string, kind: 
   let endpoint = endpointFor(providerItem);
   let body: Record<string, any>;
   if (providerItem.type === "google") {
-    endpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:generateContent?key=${encodeURIComponent(providerItem.apiKey)}`;
+    // issue10:Gemini 鉴权统一走 x-goog-api-key 头,URL 不再带 ?key=(中转网关只认 header)。
+    headers["x-goog-api-key"] = providerItem.apiKey;
+    endpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:generateContent`;
     body = {
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig: {
@@ -146,7 +148,7 @@ export async function fetchAuxiliaryText(modelId: string, prompt: string, kind: 
       },
     };
     if (stream) {
-      const streamEndpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:streamGenerateContent?key=${encodeURIComponent(providerItem.apiKey)}`;
+      const streamEndpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:streamGenerateContent`;
       try {
         return cleanAuxiliaryText(await fetchGoogleAuxiliaryStream(streamEndpoint, headers, applyCustomBody(body, assistant, modelItem), providerItem, pushDelta));
       } catch {
@@ -250,7 +252,8 @@ async function fetchAuxiliaryOcrText(imageUrl: string) {
   if (providerItem.type === "google") {
     const parsed = parseDataUrl(dataUrl);
     if (!parsed) return "";
-    endpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:generateContent?key=${encodeURIComponent(providerItem.apiKey)}`;
+    headers["x-goog-api-key"] = providerItem.apiKey;
+    endpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:generateContent`;
     body = {
       contents: [{
         role: "user",

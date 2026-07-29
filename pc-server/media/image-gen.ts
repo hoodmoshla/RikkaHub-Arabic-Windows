@@ -129,14 +129,14 @@ export async function callImageGeneration(input: {
 
   if (providerItem.type === "google") {
     if (references.length > 0) throw new Error("Gemini image edit is not supported by the original provider implementation");
-    const endpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:predict?key=${encodeURIComponent(providerItem.apiKey)}`;
+    const endpoint = `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:predict`;
     const body = applyModelCustomBody({
       instances: [{ prompt: input.prompt }],
       parameters: { sampleCount: count, aspectRatio: sizes.google },
     }, modelItem);
     const response = await fetchWithTimeout(endpoint, {
       method: "POST",
-      headers: applyModelRequestHeaders({ "Content-Type": "application/json" }, providerItem, modelItem),
+      headers: applyModelRequestHeaders({ "Content-Type": "application/json", ...providerHeaders(providerItem) }, providerItem, modelItem),
       body: JSON.stringify(body),
       timeoutMs: IMAGE_GEN_TIMEOUT_MS,
     });

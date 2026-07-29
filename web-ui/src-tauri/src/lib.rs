@@ -482,6 +482,20 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// issue12: Renders a crisp tray icon for the current display scale. Windows sizes tray
+/// icons at 16px x DPI scale (24px at 150%, 20px at 125%); feeding the 32px default window
+/// icon makes the OS stretch it with a low-quality filter - visibly blurry next to other
+/// apps. We decode the 256px master PNG and Lanczos-downscale it to the exact target size.
+fn tray_icon_for_scale(scale: f64) -> Option<tauri::image::Image<'static>> {
+    static MASTER_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
+    let target = ((16.0 * scale).round() as u32).clamp(16, 64);
+    let master = image::load_from_memory_with_format(MASTER_PNG, image::ImageFormat::Png).ok()?;
+    let resized = master
+        .resize_exact(target, target, image::imageops::FilterType::Lanczos3)
+        .into_rgba8();
+    Some(tauri::image::Image::new_owned(resized.into_raw(), target, target))
+}
+
 /// Builds the system tray icon + menu. Failure is non-fatal: we log and move on
 /// so the app still launches if the tray can't be created for some reason.
 fn build_tray(app: &AppHandle) -> Result<(), String> {
@@ -492,10 +506,15 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("tray quit item: {e}"))?;
     let menu = Menu::with_items(app, &[&show_item, &quit_item])
         .map_err(|e| format!("tray menu: {e}"))?;
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| "default window icon missing".to_string())?;
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let icon = tray_icon_for_scale(scale)
+        .or_else(|| app.default_window_icon().cloned())
+        .ok_or_else(|| "tray icon unavailable".to_string())?;
     let _ = TrayIconBuilder::with_id("main-tray")
         .icon(icon)
         .tooltip(strings.tooltip)

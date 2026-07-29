@@ -192,6 +192,14 @@ function searchKeyFailCode(e: unknown): string {
   return "network";
 }
 
+/** issue11:失败码之外保留底层错误原文(截断),否则超时/证书/DNS 等一律显示
+ *  "网络异常或服务暂不可用",用户与支持都无从排查。 */
+function searchKeyFailDetail(e: unknown): string {
+  const base = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+  const cause = e instanceof Error && e.cause ? ` (${String((e.cause as Error)?.message ?? e.cause)})` : "";
+  return `${base}${cause}`.slice(0, 500);
+}
+
 /**
  * 多 key 测试模式:对每个 key 独立执行 exec,收集每个 key 的脱敏标识与成败,不提前退出。
  * 与 withSearchKeyFailover(生产故障转移,成功即返回)的区别——本函数用于测试,目的是让用户
@@ -201,16 +209,16 @@ function searchKeyFailCode(e: unknown): string {
 async function testAllSearchKeys(
   rawKey: string,
   exec: (apiKey: string) => Promise<void>,
-): Promise<Array<{ key: string; status: "ok" | "fail"; failCode?: string }>> {
+): Promise<Array<{ key: string; status: "ok" | "fail"; failCode?: string; detail?: string }>> {
   const keys = splitSearchApiKeys(rawKey);
   if (keys.length === 0) throw new SearchKeyError(0, "API Key is empty");
-  const entries: Array<{ key: string; status: "ok" | "fail"; failCode?: string }> = [];
+  const entries: Array<{ key: string; status: "ok" | "fail"; failCode?: string; detail?: string }> = [];
   for (const key of keys) {
     try {
       await exec(key);
       entries.push({ key: maskSearchKey(key), status: "ok" });
     } catch (e) {
-      entries.push({ key: maskSearchKey(key), status: "fail", failCode: searchKeyFailCode(e) });
+      entries.push({ key: maskSearchKey(key), status: "fail", failCode: searchKeyFailCode(e), detail: searchKeyFailDetail(e) });
     }
   }
   return entries;
@@ -231,7 +239,7 @@ async function runSearchKeyTestResult(
   name: string;
   endpoint: string;
   preview: string;
-  keys: Array<{ key: string; status: "ok" | "fail"; failCode?: string }>;
+  keys: Array<{ key: string; status: "ok" | "fail"; failCode?: string; detail?: string }>;
 }> {
   let successPreview = "";
   const keys = await testAllSearchKeys(rawKey, async (k) => {

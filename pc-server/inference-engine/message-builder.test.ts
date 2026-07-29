@@ -11,10 +11,11 @@ import {
   documentPartsFirst,
   groupAssistantPartsByToolBoundary,
   parseDataUrl,
+  reasoningPayloadForProvider,
   responseApiContentFromUiParts,
   supportsInputModality,
 } from "./message-builder";
-import type { MessagePart, Model } from "../foundation/types";
+import type { MessagePart, Model, Provider } from "../foundation/types";
 
 const textModel = { inputModalities: ["TEXT"] } as unknown as Model;
 const visionModel = { inputModalities: ["TEXT", "IMAGE"] } as unknown as Model;
@@ -156,5 +157,48 @@ describe("supportsInputModality", () => {
     expect(supportsInputModality(visionModel, "image")).toBe(true);
     expect(supportsInputModality(textModel, "IMAGE")).toBe(false);
     expect(supportsInputModality({} as Model, "TEXT")).toBe(false);
+  });
+});
+
+// issue10:Gemini 经 OpenAI 兼容层(官方 /openai 端点、各类中转网关)时,必须显式
+// 请求 extra_body.google.thinking_config.include_thoughts,否则上游不回传思维链。
+describe("reasoningPayloadForProvider — Gemini via OpenAI 兼容层", () => {
+  const relay = { type: "openai", baseUrl: "https://my-relay.example.com/v1", apiKey: "k" } as unknown as Provider;
+  const gemini25 = { modelId: "gemini-2.5-pro", abilities: ["REASONING"] } as unknown as Model;
+  const gemini25Flash = { modelId: "gemini-2.5-flash", abilities: ["REASONING"] } as unknown as Model;
+  const gemini3 = { modelId: "gemini-3-pro-preview", abilities: ["REASONING"] } as unknown as Model;
+
+  test("auto 档也要发 include_thoughts(思维链默认回传是本修复的核心)", () => {
+    expect(reasoningPayloadForProvider(relay, gemini25, "auto")).toEqual({
+      extra_body: { google: { thinking_config: { include_thoughts: true } } },
+    });
+  });
+
+  test("2.5 系用 thinking_budget;gemini-3 用 thinking_level", () => {
+    expect(reasoningPayloadForProvider(relay, gemini25, "high")).toEqual({
+      extra_body: { google: { thinking_config: { include_thoughts: true, thinking_budget: 8000 } } },
+    });
+    expect(reasoningPayloadForProvider(relay, gemini3, "low")).toEqual({
+      extra_body: { google: { thinking_config: { include_thoughts: true, thinking_level: "low" } } },
+    });
+  });
+
+  test("off:flash 关预算,pro 不可关(与原生路径 googleGenerationConfig 一致)", () => {
+    expect(reasoningPayloadForProvider(relay, gemini25Flash, "off")).toEqual({
+      extra_body: { google: { thinking_config: { include_thoughts: false, thinking_budget: 0 } } },
+    });
+    expect(reasoningPayloadForProvider(relay, gemini25, "off")).toEqual({
+      extra_body: { google: { thinking_config: { include_thoughts: true } } },
+    });
+  });
+
+  test("非 Gemini 模型不受影响,仍走 reasoning_effort 兜底", () => {
+    const other = { modelId: "some-model", abilities: ["REASONING"] } as unknown as Model;
+    expect(reasoningPayloadForProvider(relay, other, "high")).toEqual({ reasoning_effort: "high" });
+  });
+
+  test("OpenRouter 等已知 host 分支优先,不走 extra_body", () => {
+    const openrouter = { type: "openai", baseUrl: "https://openrouter.ai/api/v1", apiKey: "k" } as unknown as Provider;
+    expect(reasoningPayloadForProvider(openrouter, gemini25, "high")).toEqual({ reasoning: { effort: "high" } });
   });
 });

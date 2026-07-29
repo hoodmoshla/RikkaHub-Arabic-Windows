@@ -854,7 +854,6 @@ export async function readGoogleStreamingRound(
 export async function streamGoogleChatWithTools(
   baseUrl: string,
   headers: Record<string, string>,
-  apiKey: string,
   modelId: string,
   body: Record<string, any>,
   providerItem: Provider,
@@ -863,10 +862,11 @@ export async function streamGoogleChatWithTools(
   hooks: StreamHooksWithSink,
 ) {
   // P1-5:循环骨架统一到 runStreamingToolLoop,本函数只保留 Google 特定的 Round Adapter。
-  const streamUrl = `${baseUrl.replace(/\/+$/, "")}/models/${modelId}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+  // issue10:鉴权已移入 headers 的 x-goog-api-key(调用方设置),URL 不再带 ?key=。
+  const streamUrl = `${baseUrl.replace(/\/+$/, "")}/models/${modelId}:streamGenerateContent?alt=sse`;
   // 专题9:助手关闭"流式输出"时走 generateContent(非流式);Gemini 的流式/非流式区别在
   // URL 而非请求体,makeNonStreamBody 为恒等,由 fetchRound 按 nonStream 切换端点。
-  const jsonUrl = `${baseUrl.replace(/\/+$/, "")}/models/${modelId}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const jsonUrl = `${baseUrl.replace(/\/+$/, "")}/models/${modelId}:generateContent`;
   let contents = Array.isArray(body.contents) ? [...body.contents] : [];
   const initialBody: Record<string, unknown> = { ...body, contents };
 

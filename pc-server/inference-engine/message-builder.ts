@@ -1014,6 +1014,30 @@ export function reasoningPayloadForProvider(providerItem: Provider, modelItem: M
     return { reasoning_effort: normalized };
   }
   if (host === "chat.intern-ai.org.cn") return { thinking_mode: enabled };
+  // issue10:Gemini 经 OpenAI 兼容层(官方 /openai 端点及各类中转网关)时,思维链必须用
+  // extra_body.google.thinking_config 显式请求 include_thoughts,否则模型即使思考也不回传
+  // 思维内容(对齐 Cherry Studio;安卓端此场景同样缺失,属 PC 端补强)。字段区分与原生
+  // 路径 googleGenerationConfig 一致:Gemini 3 用 thinking_level,2.5 系用 thinking_budget。
+  if (/\bgemini[-._]?\d/i.test(modelItem.modelId)) {
+    const isGemini3 = /\bgemini[-._]?3\b/i.test(modelItem.modelId);
+    const isGeminiPro = /2[.-]5.*pro/i.test(modelItem.modelId);
+    const thinkingConfig: Record<string, any> = { include_thoughts: true };
+    if (normalized === "off") {
+      if (isGemini3) {
+        thinkingConfig.thinking_level = "minimal";
+      } else if (!isGeminiPro) {
+        thinkingConfig.thinking_budget = 0;
+        thinkingConfig.include_thoughts = false;
+      }
+    } else if (normalized !== "auto") {
+      if (isGemini3) {
+        thinkingConfig.thinking_level = normalized === "low" ? "low" : normalized === "medium" ? "medium" : "high";
+      } else {
+        thinkingConfig.thinking_budget = budgetTokensFor(normalized);
+      }
+    }
+    return { extra_body: { google: { thinking_config: thinkingConfig } } };
+  }
   // Android default else branch: passes effort through as-is (including "xhigh").
   // OFF maps to "low" (lowest budget), AUTO sends no field.
   if (normalized === "auto") return {};

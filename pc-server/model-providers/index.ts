@@ -293,13 +293,16 @@ export function textBody(value: string, limit?: number): string {
 
 export function modelsEndpointFor(providerItem: Provider) {
   const base = providerItem.baseUrl.replace(/\/+$/, "");
-  if (providerItem.type === "google") return `${base}/models?pageSize=100&key=${encodeURIComponent(providerItem.apiKey)}`;
+  if (providerItem.type === "google") return `${base}/models?pageSize=100`;
   return `${base}/models`;
 }
 
 export function providerHeaders(providerItem: Provider) {
   const headers: Record<string, string> = {};
   if (providerItem.type === "openai") headers.Authorization = `Bearer ${providerItem.apiKey}`;
+  // issue10: Gemini 鉴权统一走 x-goog-api-key 头（与安卓非 Vertex 路径、Cherry Studio 一致）。
+  // 之前用 ?key= query，官方 API 两者都收，但主流中转网关只解析 header，query 会被判 invalid key。
+  if (providerItem.type === "google") headers["x-goog-api-key"] = providerItem.apiKey;
   if (providerItem.type === "claude") {
     headers["x-api-key"] = providerItem.apiKey;
     headers["anthropic-version"] = "2023-06-01";

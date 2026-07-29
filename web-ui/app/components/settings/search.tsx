@@ -58,6 +58,16 @@ function searchServiceLabelForType(type: string | null | undefined): string {
 // 写回时再 join 成单字符串——数据结构不变,备份/APP 兼容零感知。
 const SEARCH_KEY_SPLIT = /[\s,]+/;
 
+/** 与后端 maskSearchKey 一字一致:服务端测试结果里的 key 是脱敏文本,
+ *  前端需用同样算法脱敏后才能与本地输入框的原文 key 对上(issue11 修复图标从不匹配)。 */
+function maskSearchKey(key: string): string {
+  const k = key.trim();
+  if (k.length === 0) return "";
+  if (k.length <= 4) return `${k[0]}***`;
+  if (k.length <= 8) return `${k.slice(0, 2)}***${k.slice(-2)}`;
+  return `${k.slice(0, 3)}***${k.slice(-3)}`;
+}
+
 /** 搜索服务多 Key 编辑器:每框一个 key,框尾「×」删除,底部「+」追加。
  *  测试结果按 key 精确匹配后内联显示绿勾/红叉(汇总区另有保留)。
  *
@@ -73,7 +83,7 @@ function SearchApiKeyList({
 }: {
   value: string;
   onChange: (value: string) => void;
-  testEntries: Array<{ key: string; status: "ok" | "fail"; failCode?: string }>;
+  testEntries: Array<{ key: string; status: "ok" | "fail"; failCode?: string; detail?: string }>;
 }) {
   const { t } = useTranslation();
   const [keys, setKeys] = React.useState<string[]>(() => {
@@ -121,8 +131,8 @@ function SearchApiKeyList({
   return (
     <div className="space-y-2">
       {keys.map((key, index) => {
-        // 改了 key 后字符串变化,旧测试结果自动对不上、图标消失——符合预期。
-        const entry = key ? testEntries.find((e) => e.key === key) : undefined;
+        // 改了 key 后脱敏文本变化,旧测试结果自动对不上、图标消失——符合预期。
+        const entry = key ? testEntries.find((e) => e.key === maskSearchKey(key)) : undefined;
         return (
           <div key={index} className="flex items-center gap-2">
             <div className="flex-1">
@@ -138,6 +148,8 @@ function SearchApiKeyList({
                 <XCircle
                   className="size-4 shrink-0 text-destructive"
                   aria-label={t(`settings:search.key_fail_${entry.failCode ?? "other"}`)}
+                  // issue11:悬停可见底层错误原文
+                  {...(entry.detail ? { title: entry.detail } : {})}
                 />
               )
             ) : null}
@@ -220,7 +232,7 @@ export function SearchSection({
   const [testing, setTesting] = React.useState(false);
   const [testResult, setTestResult] = React.useState("");
   const [keyTestEntries, setKeyTestEntries] = React.useState<
-    Array<{ key: string; status: "ok" | "fail"; failCode?: string }>
+    Array<{ key: string; status: "ok" | "fail"; failCode?: string; detail?: string }>
   >([]);
   const { t } = useTranslation();
 
@@ -314,7 +326,7 @@ export function SearchSection({
         status: "ok" | "fail";
         endpoint: string;
         preview: string;
-        keys?: Array<{ key: string; status: "ok" | "fail"; failCode?: string }>;
+        keys?: Array<{ key: string; status: "ok" | "fail"; failCode?: string; detail?: string }>;
       }>("settings/search/service/test", draft);
       const keys = Array.isArray(result.keys) ? result.keys : [];
       const okCount = keys.filter((k) => k.status === "ok").length;
@@ -348,14 +360,17 @@ export function SearchSection({
       } else {
         // 多 key 全部失败:展示汇总 + 每个 key 的失败明细;单 key 失败:直接给出友好原因
         // (如"密钥无效或已过期"),比原来的 "401: {body}" 更易懂。
+        // issue11:友好原因之外附上服务端记录的底层错误原文(超时/证书/DNS/5xx 等),
+        // 否则统一显示"网络异常或服务暂不可用",用户无从排查。
         const singleFailReason =
           keys.length === 1
             ? t(`settings:search.key_fail_${keys[0]?.failCode ?? "other"}`)
             : null;
+        const singleFailDetail = keys.length === 1 ? keys[0]?.detail : undefined;
         setTestResult(
           keys.length > 1
             ? t("settings:search.test_all_failed", { count: keys.length })
-            : singleFailReason ?? t("settings:search.test_failed"),
+            : [singleFailReason ?? t("settings:search.test_failed"), singleFailDetail].filter(Boolean).join("\n\n"),
         );
         toast.error(singleFailReason ?? t("settings:search.test_failed"));
       }
@@ -689,23 +704,31 @@ export function SearchSection({
                 {t("settings:search.key_status_title")}
               </div>
               {keyTestEntries.map((entry, index) => (
-                <div key={index} className="flex items-center gap-2 text-xs">
-                  {entry.status === "ok" ? (
-                    <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
-                  ) : (
-                    <XCircle className="size-3.5 shrink-0 text-destructive" />
-                  )}
-                  <code className="font-mono">{entry.key}</code>
-                  <span
-                    className={cn(
-                      "text-muted-foreground",
-                      entry.status === "fail" && "text-destructive",
+                <div key={index} className="space-y-0.5">
+                  <div className="flex items-center gap-2 text-xs">
+                    {entry.status === "ok" ? (
+                      <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
+                    ) : (
+                      <XCircle className="size-3.5 shrink-0 text-destructive" />
                     )}
-                  >
-                    {entry.status === "ok"
-                      ? t("settings:search.key_ok")
-                      : t(`settings:search.key_fail_${entry.failCode ?? "other"}`)}
-                  </span>
+                    <code className="font-mono">{entry.key}</code>
+                    <span
+                      className={cn(
+                        "text-muted-foreground",
+                        entry.status === "fail" && "text-destructive",
+                      )}
+                    >
+                      {entry.status === "ok"
+                        ? t("settings:search.key_ok")
+                        : t(`settings:search.key_fail_${entry.failCode ?? "other"}`)}
+                    </span>
+                  </div>
+                  {/* issue11:失败时附底层错误原文,便于区分超时/证书/DNS/5xx */}
+                  {entry.status === "fail" && entry.detail ? (
+                    <div className="pl-5.5 font-mono text-[11px] break-all text-muted-foreground">
+                      {entry.detail}
+                    </div>
+                  ) : null}
                 </div>
               ))}
             </div>

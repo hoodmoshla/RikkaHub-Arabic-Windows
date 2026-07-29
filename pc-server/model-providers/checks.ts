@@ -176,8 +176,7 @@ function providerTestPayload(providerItem: Provider, mode: "non_stream" | "strea
       body.tools = [{ functionDeclarations: [{ name: "get_current_time", description: "Get the current date and time.", parameters: { type: "object", properties: {} } }] }];
     }
     const suffix = mode === "stream" ? "streamGenerateContent?alt=sse" : "generateContent";
-    const connector = suffix.includes("?") ? "&" : "?";
-    return { url: `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:${suffix}${connector}key=${encodeURIComponent(providerItem.apiKey)}`, body };
+    return { url: `${providerItem.baseUrl.replace(/\/+$/, "")}/models/${selectedModel}:${suffix}`, body };
   }
   if (providerItem.type === "claude") {
     const body: any = {

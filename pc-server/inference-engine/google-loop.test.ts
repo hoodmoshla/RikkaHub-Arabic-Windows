@@ -61,8 +61,7 @@ describe("streamGoogleChatWithTools", () => {
 
     const out = await streamGoogleChatWithTools(
       "https://gen.test/v1beta/",
-      {},
-      "api-key",
+      { "x-goog-api-key": "api-key" },
       "gemini-test",
       { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
       providerItem,
@@ -74,7 +73,9 @@ describe("streamGoogleChatWithTools", () => {
     // joinTextWithNewline: 第一轮"先说一句" + \n + "完成"
     expect(out).toBe("先说一句\n完成");
     expect(executed).toEqual([{ name: "do_it", args: '{"a":1}' }]);
-    expect(requests[0]!.url).toContain(":streamGenerateContent?alt=sse&key=api-key");
+    // issue10:鉴权走 x-goog-api-key 头,URL 不再带 ?key=
+    expect(requests[0]!.url).toContain(":streamGenerateContent?alt=sse");
+    expect(requests[0]!.url).not.toContain("key=api-key");
 
     const secondContents = requests[1]!.body.contents as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
     expect(secondContents).toHaveLength(3);
@@ -100,7 +101,7 @@ describe("streamGoogleChatWithTools", () => {
       sink: () => {},
       executeTool: async () => ({ output: [] }),
     } as never;
-    const out = await streamGoogleChatWithTools("https://gen.test/v1beta/", {}, "k", "m", { contents: [] }, providerItem, assistant, undefined, hooks);
+    const out = await streamGoogleChatWithTools("https://gen.test/v1beta/", {}, "m", { contents: [] }, providerItem, assistant, undefined, hooks);
     expect(out).toBe("完成");
   });
 
@@ -117,7 +118,7 @@ describe("streamGoogleChatWithTools", () => {
       executeTool: async () => ({ output: [] }),
     } as never;
     await expect(
-      streamGoogleChatWithTools("https://gen.test/v1beta/", {}, "k", "m", { contents: [] }, providerItem, assistant, undefined, hooks),
+      streamGoogleChatWithTools("https://gen.test/v1beta/", {}, "m", { contents: [] }, providerItem, assistant, undefined, hooks),
     ).rejects.toThrow("Gemini blocked: SAFETY");
   });
 });
@@ -159,8 +160,7 @@ describe("streamGoogleChatWithTools 非流式模式", () => {
 
     const out = await streamGoogleChatWithTools(
       "https://gen.test/v1beta/",
-      {},
-      "api-key",
+      { "x-goog-api-key": "api-key" },
       "gemini-test",
       { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
       providerItem,
@@ -173,7 +173,8 @@ describe("streamGoogleChatWithTools 非流式模式", () => {
     expect(executed).toEqual([{ name: "do_it", args: JSON.stringify({ a: 1 }) }]);
     expect(requests).toHaveLength(2);
     for (const request of requests) {
-      expect(request.url).toContain(":generateContent?key=api-key");
+      expect(request.url).toContain(":generateContent");
+      expect(request.url).not.toContain("key=api-key");
       expect(request.url).not.toContain("streamGenerateContent");
     }
     const secondContents = requests[1]!.body.contents as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
