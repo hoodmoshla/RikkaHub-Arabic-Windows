@@ -23,6 +23,7 @@ import { Switch } from "~/components/ui/switch";
 import { Textarea } from "~/components/ui/textarea";
 import Markdown from "~/components/markdown/markdown";
 import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
+import { openExternal } from "~/lib/external-link";
 import { cn } from "~/lib/utils";
 import api, { appendWebAuthQuery } from "~/services/api";
 import { confirmDialog } from "~/stores/confirm-store";
@@ -347,6 +348,46 @@ function McpServerEditor({
       toast.error(error instanceof Error ? error.message : t("settings:mcp.save_failed"));
     });
   };
+  // 专题9 MCP OAuth 2.1(对齐安卓):授权状态以 SSE 推送的 settings 为准(回调落盘后
+  // 后端广播,此处自动刷新),不读可能陈旧的 draft。
+  const liveServer = servers.find((item) => String(item.id) === String(draft.id));
+  const liveServerCommon =
+    liveServer?.commonOptions && typeof liveServer.commonOptions === "object"
+      ? (liveServer.commonOptions as Record<string, unknown>)
+      : {};
+  const liveOauth =
+    liveServerCommon.oauth && typeof liveServerCommon.oauth === "object"
+      ? (liveServerCommon.oauth as Record<string, unknown>)
+      : null;
+  const oauthAuthorized = Boolean(liveOauth && textValue(liveOauth.accessToken));
+  const [oauthBusy, setOauthBusy] = React.useState(false);
+  const startOAuth = async () => {
+    // 先把在飞的草稿落盘:授权依赖服务端已保存的 URL。
+    setOauthBusy(true);
+    try {
+      await autosave.saveNow({ force: true });
+      const result = await api.post<{ authorizationUrl: string }>(
+        "settings/mcp-server/oauth/start",
+        { serverId: String(draft.id) },
+      );
+      await openExternal(result.authorizationUrl);
+      toast.info(t("settings:mcp.oauth.browser_opened"));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOauthBusy(false);
+    }
+  };
+  const clearOAuth = async () => {
+    if (!(await confirmDialog({ title: t("settings:mcp.oauth.clear_confirm"), danger: true }))) return;
+    try {
+      await api.post("settings/mcp-server/oauth/clear", { serverId: String(draft.id) });
+      await pullSettings(onSettings);
+      toast.success(t("settings:mcp.oauth.cleared"));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  };
   const remove = async () => {
     if (!selected.id) return;
     if (!(await confirmDialog({ title: t("settings:mcp.server.delete_confirm"), danger: true }))) return;
@@ -485,6 +526,51 @@ function McpServerEditor({
             {t("settings:mcp.server.headers_desc")}
           </span>
         </label>
+        <div className="space-y-2 rounded-md border p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{t("settings:mcp.oauth.title")}</div>
+              <div className="text-xs text-muted-foreground">{t("settings:mcp.oauth.desc")}</div>
+            </div>
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-2 py-0.5 text-xs",
+                oauthAuthorized ? "bg-emerald-500/10 text-emerald-600" : "bg-muted text-muted-foreground",
+              )}
+            >
+              {oauthAuthorized
+                ? t("settings:mcp.oauth.authorized")
+                : t("settings:mcp.oauth.not_authorized")}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={oauthBusy || !textValue(draft.url)}
+              onClick={() => void startOAuth()}
+            >
+              {oauthBusy ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : null}
+              {oauthAuthorized
+                ? t("settings:mcp.oauth.reauthorize")
+                : t("settings:mcp.oauth.authorize")}
+            </Button>
+            {liveOauth ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={oauthBusy}
+                onClick={() => void clearOAuth()}
+              >
+                {t("settings:mcp.oauth.clear")}
+              </Button>
+            ) : null}
+          </div>
+        </div>
         <label className="space-y-1">
           <span className="text-xs font-medium text-muted-foreground">{t("settings:mcp.server.tools_json")}</span>
           <Textarea

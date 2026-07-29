@@ -211,3 +211,55 @@ describe("非流式降级(OpenAI 能力)", () => {
     await expect(runStreamingToolLoop(adapter, {}, assistant, undefined, hooks)).rejects.toThrow("no fallback");
   });
 });
+
+describe("用户级非流式(专题9:助手关闭流式输出)", () => {
+  const nsAssistant = { id: "a1", mcpServers: [], streamOutput: false } as never;
+
+  test("每一轮都经 makeNonStreamBody 改造,fetch/read 收到 nonStream=true", async () => {
+    const { hooks } = hooksFixture();
+    const bodies: Array<Record<string, unknown>> = [];
+    const flags: Array<boolean | undefined> = [];
+    const adapter = baseAdapter([withTool("A"), noTools("B")]);
+    adapter.makeNonStreamBody = (b) => ({ ...b, stream: false });
+    const origRead = adapter.readRound;
+    adapter.fetchRound = async (requestBody, _round, _sig, nonStream) => {
+      bodies.push(requestBody);
+      flags.push(nonStream);
+      return okResponse();
+    };
+    adapter.readRound = async (response, sig, nonStream) => {
+      flags.push(nonStream);
+      return origRead(response, sig, nonStream);
+    };
+    expect(await runStreamingToolLoop(adapter, { stream: true }, nsAssistant, undefined, hooks)).toBe("AB");
+    expect(bodies).toHaveLength(2);
+    expect(bodies.every((b) => b.stream === false)).toBe(true);
+    expect(flags.every((f) => f === true)).toBe(true);
+  });
+
+  test("用户非流式时不做降级重试:失败直接抛,不产生额外计费请求", async () => {
+    const { hooks } = hooksFixture();
+    const adapter = baseAdapter([noTools("x")]);
+    adapter.makeNonStreamBody = (b) => b;
+    adapter.nonStreamFallback = { makeBody: (b) => b, connectHint: "c", interruptHint: "i" };
+    let fetchCalls = 0;
+    adapter.fetchRound = async () => {
+      fetchCalls += 1;
+      throw new Error("boom");
+    };
+    await expect(runStreamingToolLoop(adapter, {}, nsAssistant, undefined, hooks)).rejects.toThrow("boom");
+    expect(fetchCalls).toBe(1);
+  });
+
+  test("adapter 未声明 makeNonStreamBody 时开关不生效(照常流式)", async () => {
+    const { hooks } = hooksFixture();
+    const bodies: Array<Record<string, unknown>> = [];
+    const adapter = baseAdapter([noTools("流式")]);
+    adapter.fetchRound = async (requestBody, _round, _sig, nonStream) => {
+      bodies.push({ ...requestBody, nonStreamFlag: nonStream ?? false });
+      return okResponse();
+    };
+    expect(await runStreamingToolLoop(adapter, { stream: true }, nsAssistant, undefined, hooks)).toBe("流式");
+    expect(bodies[0]).toEqual({ stream: true, nonStreamFlag: false });
+  });
+});

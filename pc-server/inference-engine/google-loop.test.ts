@@ -121,3 +121,65 @@ describe("streamGoogleChatWithTools", () => {
     ).rejects.toThrow("Gemini blocked: SAFETY");
   });
 });
+
+// 专题9:助手关闭"流式输出"→ 改走 generateContent 非流式端点,响应为单个完整 JSON。
+describe("streamGoogleChatWithTools 非流式模式", () => {
+  const nsAssistant = { id: "a1", mcpServers: [], streamOutput: false } as never;
+  const toolRoundJson = JSON.stringify({
+    candidates: [{ content: { parts: [
+      { text: "先说一句" },
+      { functionCall: { name: "do_it", args: { a: 1 } }, thoughtSignature: "tsig" },
+    ] } }],
+    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+  });
+  const finalRoundJson = JSON.stringify({
+    candidates: [{ content: { parts: [{ text: "完成" }] } }],
+    usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 3 },
+  });
+
+  test("两轮均请求 generateContent;functionCall 归一与回放同流式", async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const payloads = [toolRoundJson, finalRoundJson];
+    globalThis.fetch = (async (url: unknown, init: RequestInit) => {
+      requests.push({ url: String(url), body: JSON.parse(String(init.body)) });
+      return new Response(payloads.shift() ?? "{}", { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const executed: Array<{ name: string; args: string }> = [];
+    const hooks = {
+      conversation: { id: "c1", title: "t" },
+      node: { id: "n1" },
+      message: { id: "m1", role: "ASSISTANT", parts: [] as unknown[], annotations: [], createdAt: 0, finishedAt: null },
+      sink: () => {},
+      executeTool: async (call: { function: { name: string; arguments: string } }) => {
+        executed.push({ name: call.function.name, args: call.function.arguments });
+        return { output: [{ type: "text", text: "工具输出" }] };
+      },
+    } as never;
+
+    const out = await streamGoogleChatWithTools(
+      "https://gen.test/v1beta/",
+      {},
+      "api-key",
+      "gemini-test",
+      { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
+      providerItem,
+      nsAssistant,
+      undefined,
+      hooks,
+    );
+
+    expect(out).toBe("先说一句\n完成");
+    expect(executed).toEqual([{ name: "do_it", args: JSON.stringify({ a: 1 }) }]);
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request.url).toContain(":generateContent?key=api-key");
+      expect(request.url).not.toContain("streamGenerateContent");
+    }
+    const secondContents = requests[1]!.body.contents as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
+    expect(secondContents[1]!.parts).toEqual([
+      { text: "先说一句" },
+      { functionCall: { name: "do_it", args: { a: 1 } }, thoughtSignature: "tsig" },
+    ]);
+  });
+});

@@ -699,6 +699,7 @@ export function AssistantsSection({
               ["enableTimeReminder", t("settings:assistants.opt.time_reminder")],
               ["useAssistantAvatar", t("settings:assistants.opt.use_avatar")],
               ["allowConversationSystemPrompt", t("settings:assistants.opt.allow_conv_prompt")],
+              ["allowConversationPromptInjection", t("settings:assistants.opt.allow_conv_injection")],
             ].map(([key, label]) => (
               <label
                 key={key}

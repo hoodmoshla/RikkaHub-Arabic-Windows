@@ -1016,7 +1016,15 @@ const ConversationTimeline = React.memo(
             // "auto" 瞬时贴底(D 族支柱④):流式每 chunk 都触发 followOutput,"smooth"
             // 会让上一帧尚未完成的平滑滚动被反复打断重启,视觉上持续抖动;瞬时贴底
             // 无动画可打断。点击"回到底部"按钮的平滑滚动不受影响(走 scrollToIndex)。
-            followOutput={(atBottom) => (focusMessageId ? false : atBottom ? "auto" : false)}
+            // 专题9:enableAutoScroll 关闭时不跟底(对齐安卓 ChatList 的同名开关);
+            // 进入会话的一次性滚底与"回到底部"按钮不受影响,只停生成期间的强制跟随。
+            followOutput={(atBottom) =>
+              focusMessageId || settings?.displaySetting.enableAutoScroll === false
+                ? false
+                : atBottom
+                  ? "auto"
+                  : false
+            }
             atBottomStateChange={setIsAtBottom}
             atTopStateChange={setIsAtTop}
             rangeChanged={({ startIndex, endIndex }) => {

@@ -130,6 +130,9 @@ export interface AssistantProfile {
   modeInjectionIds?: string[];
   lorebookIds?: string[];
   allowConversationSystemPrompt?: boolean;
+  // 专题9:独立对话提示词注入(对齐安卓 Assistant.allowConversationPromptInjection)。
+  // 开启后 modeInjectionIds/lorebookIds 的生效来源改为会话上的同名字段。
+  allowConversationPromptInjection?: boolean;
   name: string;
   systemPrompt?: string;
   messageTemplate?: string;

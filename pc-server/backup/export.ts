@@ -325,6 +325,7 @@ function generateRikkaHubDb(dbPath: string, backupNameById?: Map<number, string>
  *  加列无需 PC 改代码。 */
 const PC_MANAGED_CONVERSATION_COLUMNS = new Set([
   "id", "assistant_id", "title", "nodes", "create_at", "update_at", "suggestions", "is_pinned", "custom_system_prompt",
+  "mode_injection_ids", "lorebook_ids",
 ]);
 
 /** T-2:以 cached 安卓库为基底重建。文件级拷贝到目标后只重灌 PC 管理的表,安卓自有表
@@ -462,9 +463,17 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>, backupName
   // 判该列可否为 null。模板较老没有该列时保持 8 列写入,不破坏旧模板兼容。
   const convCols = db.prepare("PRAGMA table_info(ConversationEntity)").all() as { name: string; notnull: number }[];
   const cspCol = convCols.find((c) => c.name === "custom_system_prompt");
-  const insertConv = cspCol
-    ? db.prepare("INSERT OR REPLACE INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, suggestions, is_pinned, custom_system_prompt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    : db.prepare("INSERT OR REPLACE INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, suggestions, is_pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  // 专题9:会话级注入绑定列(安卓 mode_injection_ids/lorebook_ids,JSON 数组字符串)。
+  // 与 custom_system_prompt 同策略:模板有列才写,老模板保持原列集不破坏兼容。
+  const hasInjectionCols = convCols.some((c) => c.name === "mode_injection_ids") && convCols.some((c) => c.name === "lorebook_ids");
+  const extraCols = [
+    ...(cspCol ? ["custom_system_prompt"] : []),
+    ...(hasInjectionCols ? ["mode_injection_ids", "lorebook_ids"] : []),
+  ];
+  const allCols = ["id", "assistant_id", "title", "nodes", "create_at", "update_at", "suggestions", "is_pinned", ...extraCols];
+  const insertConv = db.prepare(
+    `INSERT OR REPLACE INTO ConversationEntity (${allCols.join(", ")}) VALUES (${allCols.map(() => "?").join(", ")})`,
+  );
   const insertNode = db.prepare("INSERT OR REPLACE INTO message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)");
   // DB-first 批1:导出全走活库(先 flush 对齐脏数据),逐会话瞬时读,峰值内存=单会话。
   flushConvDirtyNow();
@@ -473,12 +482,12 @@ function insertConversationsIntoDb(db: InstanceType<typeof Database>, backupName
   const txn = db.transaction(() => {
     for (const conv of exportMetas) {
       try {
-        const baseVals = [conv.id, conv.assistantId || DEFAULT_ASSISTANT_ID, conv.title || "", "[]", conv.createAt || Date.now(), conv.updateAt || Date.now(), JSON.stringify(conv.chatSuggestions || []), conv.isPinned ? 1 : 0] as const;
-        if (cspCol) {
-          insertConv.run(...baseVals, conv.systemPrompt ? conv.systemPrompt : (cspCol.notnull ? "" : null));
-        } else {
-          insertConv.run(...baseVals);
+        const baseVals: (string | number | null)[] = [conv.id, conv.assistantId || DEFAULT_ASSISTANT_ID, conv.title || "", "[]", conv.createAt || Date.now(), conv.updateAt || Date.now(), JSON.stringify(conv.chatSuggestions || []), conv.isPinned ? 1 : 0];
+        if (cspCol) baseVals.push(conv.systemPrompt ? conv.systemPrompt : (cspCol.notnull ? "" : null));
+        if (hasInjectionCols) {
+          baseVals.push(JSON.stringify(conv.modeInjectionIds ?? []), JSON.stringify(conv.lorebookIds ?? []));
         }
+        insertConv.run(...baseVals);
         const convNodes = liveDb ? loadConversationNodesFromDb(liveDb, conv.id) : [];
         for (let i = 0; i < convNodes.length; i++) {
           const node = convNodes[i];

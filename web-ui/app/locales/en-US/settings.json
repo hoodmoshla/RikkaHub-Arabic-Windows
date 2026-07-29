@@ -260,7 +260,8 @@
       "stream_output": "Stream output",
       "time_reminder": "Time reminders",
       "use_avatar": "Use assistant avatar in chat",
-      "allow_conv_prompt": "Allow per-conversation system prompt"
+      "allow_conv_prompt": "Allow per-conversation system prompt",
+      "allow_conv_injection": "Per-conversation prompt injections"
     },
     "memory_title": "Memory",
     "memory_desc_pre": "Enabling memory injects ",
@@ -544,6 +545,18 @@
     "status_off": "Disabled",
     "status_error": "Connection error",
     "status_connected": "Connected",
+    "oauth": {
+      "title": "OAuth Authorization",
+      "desc": "Some MCP servers require OAuth 2.1 sign-in. Authorization happens in your system browser; tokens are stored locally only.",
+      "authorized": "Authorized",
+      "not_authorized": "Not authorized",
+      "authorize": "Authorize",
+      "reauthorize": "Re-authorize",
+      "clear": "Clear authorization",
+      "browser_opened": "Authorization page opened in browser; this status will update automatically once done",
+      "clear_confirm": "Clear OAuth authorization for this server?",
+      "cleared": "Authorization cleared"
+    },
     "server": {
       "deleted": "MCP server deleted",
       "delete_confirm": "Delete this MCP server?",

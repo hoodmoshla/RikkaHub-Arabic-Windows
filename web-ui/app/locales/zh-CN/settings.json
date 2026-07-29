@@ -260,7 +260,8 @@
       "stream_output": "流式输出",
       "time_reminder": "时间提醒",
       "use_avatar": "聊天中使用助手头像",
-      "allow_conv_prompt": "允许会话独立 system prompt"
+      "allow_conv_prompt": "允许会话独立 system prompt",
+      "allow_conv_injection": "独立对话提示词注入"
     },
     "memory_title": "记忆管理",
     "memory_desc_pre": "开启记忆后会注入 ",
@@ -544,6 +545,18 @@
     "status_off": "已关闭",
     "status_error": "连接异常",
     "status_connected": "已连接",
+    "oauth": {
+      "title": "OAuth 授权",
+      "desc": "部分 MCP 服务器要求 OAuth 2.1 登录授权。授权在系统浏览器中完成，令牌只保存在本机。",
+      "authorized": "已授权",
+      "not_authorized": "未授权",
+      "authorize": "授权",
+      "reauthorize": "重新授权",
+      "clear": "清除授权",
+      "browser_opened": "已在浏览器打开授权页面，完成后此处状态会自动更新",
+      "clear_confirm": "清除该服务器的 OAuth 授权？",
+      "cleared": "已清除授权"
+    },
     "server": {
       "deleted": "已删除 MCP 服务器",
       "delete_confirm": "删除这个 MCP 服务器？",

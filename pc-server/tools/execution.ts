@@ -14,6 +14,7 @@ import { broadcastMemoryUpdate } from "../api/sse";
 import { memoryStore } from "../memory";
 import { runScrapeWeb, runSearchWeb } from "../search";
 import { callMcpTool } from "./mcp";
+import { ensureFreshMcpTokens } from "./mcp-oauth";
 import { runAskUserTool, runClipboardTool, runGetTimeInfoTool, runTextToSpeechTool } from "./local";
 import { readSkillBody, safeSkillFile } from "./skills";
 
@@ -119,6 +120,8 @@ export async function executeToolCall(
   }
   if (name.startsWith("mcp__")) {
     bumpAnalyticsMcpCount();
+    // 专题9 MCP OAuth 2.1:调用前补新临期令牌(刷新结果写回 state,故重读 settings)。
+    await ensureFreshMcpTokens(state.settings.mcpServers);
     return callMcpTool(assistant, name, args, state.settings.mcpServers, addLog);
   }
   throw new Error(`Unknown tool: ${name}`);

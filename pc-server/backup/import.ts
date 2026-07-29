@@ -861,6 +861,15 @@ function importAndroidConversations(extractDir: string, dbPath: string, androidF
         if (Array.isArray(decoded)) chatSuggestions = decoded.filter((x): x is string => typeof x === "string");
       } catch { /* keep empty */ }
 
+      // 专题9:安卓会话级注入绑定列(mode_injection_ids/lorebook_ids,JSON 数组字符串)。
+      const parseIdArray = (value: unknown): string[] => {
+        try {
+          const decoded = JSON.parse(typeof value === "string" && value ? value : "[]");
+          return Array.isArray(decoded) ? decoded.map((v) => String(v)) : [];
+        } catch {
+          return [];
+        }
+      };
       const conv: Conversation = {
         id: convId,
         assistantId: String(row.assistant_id ?? DEFAULT_ASSISTANT_ID) || DEFAULT_ASSISTANT_ID,
@@ -871,6 +880,8 @@ function importAndroidConversations(extractDir: string, dbPath: string, androidF
         isPinned: row.is_pinned === 1 || row.is_pinned === true,
         createAt: Number(row.create_at ?? Date.now()),
         updateAt: Number(row.update_at ?? Date.now()),
+        modeInjectionIds: parseIdArray(row.mode_injection_ids),
+        lorebookIds: parseIdArray(row.lorebook_ids),
       };
 
       existingById.set(conv.id, conv);

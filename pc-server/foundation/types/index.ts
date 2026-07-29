@@ -141,6 +141,9 @@ export interface Assistant {
   enabledSkills: string[];
   enableTimeReminder: boolean;
   allowConversationSystemPrompt: boolean;
+  /** 专题9:允许"会话级"绑定提示词注入/世界书(对齐安卓 Assistant.allowConversationPromptInjection)。
+   *  开启后生效的注入 id 集来自 Conversation.modeInjectionIds/lorebookIds,完全取代助手级集合。 */
+  allowConversationPromptInjection: boolean;
 }
 
 export interface AsrProvider {
@@ -225,6 +228,10 @@ export interface Conversation {
   isPinned: boolean;
   createAt: number;
   updateAt: number;
+  /** 专题9:会话级绑定的注入/世界书 id(仅当助手开启 allowConversationPromptInjection 时生效,
+   *  对齐安卓 Conversation.modeInjectionIds/lorebookIds)。缺省 = 空集。 */
+  modeInjectionIds?: string[];
+  lorebookIds?: string[];
 }
 
 export interface RequestLog {
@@ -419,6 +426,8 @@ export interface PcConversationRow {
   is_pinned: number;
   create_at: number;
   update_at: number;
+  mode_injection_ids?: string;
+  lorebook_ids?: string;
 }
 export interface PcMessageNodeRow {
   id: string;

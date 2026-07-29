@@ -18,9 +18,12 @@ function seededDb(): Database {
     id TEXT PRIMARY KEY NOT NULL, assistant_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
     system_prompt TEXT NOT NULL DEFAULT '',
     suggestions TEXT NOT NULL DEFAULT '[]', is_pinned INTEGER NOT NULL DEFAULT 0,
-    create_at INTEGER NOT NULL, update_at INTEGER NOT NULL
+    create_at INTEGER NOT NULL, update_at INTEGER NOT NULL,
+    mode_injection_ids TEXT NOT NULL DEFAULT '[]', lorebook_ids TEXT NOT NULL DEFAULT '[]'
   )`);
-  const ins = db.prepare("INSERT INTO pc_conversation VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  const ins = db.prepare(
+    "INSERT INTO pc_conversation (id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  );
   // a1 三个会话：c3 最新建、c1 最旧建但最近更新；b-only 属于另一助手
   ins.run("c1", "a1", "第一", "sys", '["s"]', 1, 1000, 9000);
   ins.run("c2", "a1", "第二", "", "[]", 0, 2000, 2100);
@@ -93,9 +96,12 @@ describe("pagedConversationMetas(专题2 J 族)", () => {
       id TEXT PRIMARY KEY NOT NULL, assistant_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
       system_prompt TEXT NOT NULL DEFAULT '',
       suggestions TEXT NOT NULL DEFAULT '[]', is_pinned INTEGER NOT NULL DEFAULT 0,
-      create_at INTEGER NOT NULL, update_at INTEGER NOT NULL
+      create_at INTEGER NOT NULL, update_at INTEGER NOT NULL,
+      mode_injection_ids TEXT NOT NULL DEFAULT '[]', lorebook_ids TEXT NOT NULL DEFAULT '[]'
     )`);
-    const ins = db.prepare("INSERT INTO pc_conversation VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    const ins = db.prepare(
+      "INSERT INTO pc_conversation (id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
     // 刻意制造大量并列:updateAt 只取 3 个值,createAt 只取 5 个值,置顶约 1/3
     let seed = 42;
     const rand = (n: number) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };

@@ -419,6 +419,55 @@ export async function readClaudeStreamingRound(
   return { blocks: orderedBlocks, textOut, thinkingOut, stopReason, usage, raw };
 }
 
+// 专题9:Claude 非流式单轮。助手关闭"流式输出"时使用:响应是完整 messages 对象,
+// content blocks 与流式聚合后的 blocks 同构(text/thinking/tool_use),直接一次性发事件。
+// 工具卡也在此创建(与流式 reader 一致),骨架的 toolCardsCreatedInStream 语义不变。
+export async function readClaudeJsonRound(
+  response: Response,
+  hooks: StreamHooksWithSink,
+  assistant: Assistant,
+): Promise<ClaudeStreamRoundResult> {
+  const rawText = await response.text();
+  let raw: any = {};
+  try {
+    raw = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    throw new Error(`Claude 非流式响应不是合法 JSON: ${rawText.slice(0, 200)}`);
+  }
+  const blocks: Array<Record<string, any>> = Array.isArray(raw.content) ? raw.content.filter(isRecord) : [];
+  let textOut = "";
+  let thinkingOut = "";
+  for (const block of blocks) {
+    const type = String(block.type ?? "");
+    if (type === "thinking" && typeof block.thinking === "string" && block.thinking) {
+      thinkingOut += block.thinking;
+      hooks.sink?.({ kind: "reasoning_delta", text: block.thinking });
+    } else if (type === "text" && typeof block.text === "string" && block.text) {
+      textOut += block.text;
+      hooks.sink?.({ kind: "text_delta", text: block.text });
+    } else if (type === "tool_use" && hooks.message) {
+      const name = String(block.name ?? "");
+      finishReasoningParts(hooks.message);
+      hooks.sink?.({
+        kind: "tool_call_created",
+        toolCallId: String(block.id ?? id()),
+        toolName: name,
+        input: JSON.stringify(isRecord(block.input) ? block.input : {}),
+        approvalState: initialApprovalState(name, assistant),
+      });
+      touchStream(hooks);
+    }
+  }
+  return {
+    blocks,
+    textOut,
+    thinkingOut,
+    stopReason: typeof raw.stop_reason === "string" ? raw.stop_reason : null,
+    usage: mergeClaudeUsage(raw.usage, undefined),
+    raw: rawText,
+  };
+}
+
 export async function streamClaudeChatWithTools(
   url: string,
   headers: Record<string, string>,
@@ -436,16 +485,20 @@ export async function streamClaudeChatWithTools(
     providerItem,
     logUrl: url,
     logHeaders: headers,
-    fetchRound: (requestBody, _round, sig) => fetch(url, {
+    fetchRound: (requestBody, _round, sig, nonStream) => fetch(url, {
       method: "POST",
-      headers: { ...headers, Accept: "text/event-stream" },
+      headers: nonStream ? headers : { ...headers, Accept: "text/event-stream" },
       body: JSON.stringify(requestBody),
       signal: sig,
     }),
     // R3-1:主对话流式 600s 头超时(与 OpenAI 流式一致),不再裸奔。
-    headerTimeoutMs: () => 600_000,
-    async readRound(response, sig) {
-      const round = await readClaudeStreamingRound(response, hooks, assistant, sig);
+    // 非流式(专题9,助手关闭"流式输出")与 OpenAI 非流式一致取 300s。
+    headerTimeoutMs: (requestBody) => (requestBody.stream === false ? 300_000 : 600_000),
+    makeNonStreamBody: (requestBody) => ({ ...requestBody, stream: false }),
+    async readRound(response, sig, nonStream) {
+      const round = nonStream
+        ? await readClaudeJsonRound(response, hooks, assistant)
+        : await readClaudeStreamingRound(response, hooks, assistant, sig);
       const toolCalls: NormalizedToolCall[] = round.blocks
         .filter((block) => block.type === "tool_use")
         .map((toolUse) => {
@@ -639,6 +692,96 @@ export function googleUsageFromMeta(meta: any): Message["usage"] | undefined {
   };
 }
 
+// 单个 generateContent 形状的响应对象 → 轮次聚合结果 + 实时事件。流式(SSE 逐 chunk)与
+// 非流式(整包一次)共用同一份解析(专题9),避免两份 part-walk 漂移。
+function applyGoogleRoundChunk(
+  raw: any,
+  result: GoogleStreamRoundResult,
+  hooks: StreamHooksWithSink,
+  assistant: Assistant,
+) {
+  if (!raw || typeof raw !== "object") return;
+  const blockReason = raw.promptFeedback?.blockReason;
+  if (blockReason) throw new UpstreamStreamError(`Gemini blocked: ${blockReason}`);
+  const meta = raw.usageMetadata;
+  if (meta) result.usage = googleUsageFromMeta(meta) ?? result.usage;
+  const candidate = raw.candidates?.[0];
+  const parts = candidate?.content?.parts;
+  if (!Array.isArray(parts)) return;
+  for (const part of parts) {
+    if (!isRecord(part)) continue;
+    if (typeof part.text === "string" && part.text) {
+      if (part.thought === true) {
+        result.thinkingOut += part.text;
+        hooks.sink?.({ kind: "reasoning_delta", text: part.text });
+      } else {
+        result.textOut += part.text;
+        result.modelParts.push({ text: part.text });
+        hooks.sink?.({ kind: "text_delta", text: part.text });
+      }
+    } else if (isRecord(part.inlineData)) {
+      const mime = String((part.inlineData as any).mimeType ?? "image/png");
+      const data = String((part.inlineData as any).data ?? "");
+      if (part.thought === true) {
+        // 思考过程中的草稿图直接忽略，对齐安卓 parseMessagePart。
+        continue;
+      }
+      if (data && mime.startsWith("image/")) {
+        hooks.sink?.({ kind: "image_delta", url: `data:${mime};base64,${data}` });
+      }
+    } else if (isRecord(part.functionCall)) {
+      const fc = part.functionCall as any;
+      const name = String(fc.name ?? "");
+      if (!name) continue;
+      const args = isRecord(fc.args) ? (fc.args as Record<string, JsonValue>) : {};
+      const thoughtSignature = part.thoughtSignature != null ? String(part.thoughtSignature) : undefined;
+      const callId = id();
+      result.functionCalls.push({ id: callId, name, args, thoughtSignature });
+      result.modelParts.push({
+        functionCall: { name, args },
+        ...(thoughtSignature ? { thoughtSignature } : {}),
+      });
+      if (hooks.message) {
+        finishReasoningParts(hooks.message);
+        hooks.sink?.({
+          kind: "tool_call_created",
+          toolCallId: callId,
+          toolName: name,
+          input: JSON.stringify(args),
+          approvalState: initialApprovalState(name, assistant),
+        });
+        touchStream(hooks);
+      }
+    }
+  }
+}
+
+// 专题9:Gemini 非流式单轮(generateContent)。助手关闭"流式输出"时使用;
+// 响应就是一个完整的 generateContent 对象,直接走共用解析一次性发事件。
+export async function readGoogleJsonRound(
+  response: Response,
+  hooks: StreamHooksWithSink,
+  assistant: Assistant,
+): Promise<GoogleStreamRoundResult> {
+  const rawText = await response.text();
+  const result: GoogleStreamRoundResult = {
+    textOut: "",
+    thinkingOut: "",
+    functionCalls: [],
+    modelParts: [],
+    usage: undefined,
+    raw: rawText,
+  };
+  let raw: any = {};
+  try {
+    raw = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    throw new Error(`Gemini 非流式响应不是合法 JSON: ${rawText.slice(0, 200)}`);
+  }
+  applyGoogleRoundChunk(raw, result, hooks, assistant);
+  return result;
+}
+
 export async function readGoogleStreamingRound(
   response: Response,
   hooks: StreamHooksWithSink,
@@ -658,62 +801,7 @@ export async function readGoogleStreamingRound(
   const decoder = new TextDecoder();
   let buffer = "";
 
-  const handleChunk = (raw: any) => {
-    if (!raw || typeof raw !== "object") return;
-    const blockReason = raw.promptFeedback?.blockReason;
-    if (blockReason) throw new UpstreamStreamError(`Gemini blocked: ${blockReason}`);
-    const meta = raw.usageMetadata;
-    if (meta) result.usage = googleUsageFromMeta(meta) ?? result.usage;
-    const candidate = raw.candidates?.[0];
-    const parts = candidate?.content?.parts;
-    if (!Array.isArray(parts)) return;
-    for (const part of parts) {
-      if (!isRecord(part)) continue;
-      if (typeof part.text === "string" && part.text) {
-        if (part.thought === true) {
-          result.thinkingOut += part.text;
-          hooks.sink?.({ kind: "reasoning_delta", text: part.text });
-        } else {
-          result.textOut += part.text;
-          result.modelParts.push({ text: part.text });
-          hooks.sink?.({ kind: "text_delta", text: part.text });
-        }
-      } else if (isRecord(part.inlineData)) {
-        const mime = String((part.inlineData as any).mimeType ?? "image/png");
-        const data = String((part.inlineData as any).data ?? "");
-        if (part.thought === true) {
-          // 思考过程中的草稿图直接忽略，对齐安卓 parseMessagePart。
-          continue;
-        }
-        if (data && mime.startsWith("image/")) {
-          hooks.sink?.({ kind: "image_delta", url: `data:${mime};base64,${data}` });
-        }
-      } else if (isRecord(part.functionCall)) {
-        const fc = part.functionCall as any;
-        const name = String(fc.name ?? "");
-        if (!name) continue;
-        const args = isRecord(fc.args) ? (fc.args as Record<string, JsonValue>) : {};
-        const thoughtSignature = part.thoughtSignature != null ? String(part.thoughtSignature) : undefined;
-        const callId = id();
-        result.functionCalls.push({ id: callId, name, args, thoughtSignature });
-        result.modelParts.push({
-          functionCall: { name, args },
-          ...(thoughtSignature ? { thoughtSignature } : {}),
-        });
-        if (hooks.message) {
-          finishReasoningParts(hooks.message);
-          hooks.sink?.({
-            kind: "tool_call_created",
-            toolCallId: callId,
-            toolName: name,
-            input: JSON.stringify(args),
-            approvalState: initialApprovalState(name, assistant),
-          });
-          touchStream(hooks);
-        }
-      }
-    }
-  };
+  const handleChunk = (raw: any) => applyGoogleRoundChunk(raw, result, hooks, assistant);
 
   for (;;) {
     if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
@@ -767,6 +855,9 @@ export async function streamGoogleChatWithTools(
 ) {
   // P1-5:循环骨架统一到 runStreamingToolLoop,本函数只保留 Google 特定的 Round Adapter。
   const streamUrl = `${baseUrl.replace(/\/+$/, "")}/models/${modelId}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+  // 专题9:助手关闭"流式输出"时走 generateContent(非流式);Gemini 的流式/非流式区别在
+  // URL 而非请求体,makeNonStreamBody 为恒等,由 fetchRound 按 nonStream 切换端点。
+  const jsonUrl = `${baseUrl.replace(/\/+$/, "")}/models/${modelId}:generateContent?key=${encodeURIComponent(apiKey)}`;
   let contents = Array.isArray(body.contents) ? [...body.contents] : [];
   const initialBody: Record<string, unknown> = { ...body, contents };
 
@@ -774,16 +865,20 @@ export async function streamGoogleChatWithTools(
     providerItem,
     logUrl: streamUrl,
     logHeaders: headers,
-    fetchRound: (requestBody, _round, sig) => fetch(streamUrl, {
+    fetchRound: (requestBody, _round, sig, nonStream) => fetch(nonStream ? jsonUrl : streamUrl, {
       method: "POST",
-      headers: { ...headers, Accept: "text/event-stream" },
+      headers: nonStream ? headers : { ...headers, Accept: "text/event-stream" },
       body: JSON.stringify(requestBody),
       signal: sig,
     }),
     // R3-1:主对话流式 600s 头超时(与 OpenAI 流式一致),不再裸奔。
-    headerTimeoutMs: () => 600_000,
-    async readRound(response, sig) {
-      const round = await readGoogleStreamingRound(response, hooks, assistant, sig);
+    // 非流式响应头要等全文生成完,与 OpenAI 非流式一致取 300s(专题7/专题9)。
+    headerTimeoutMs: (_requestBody, nonStream) => (nonStream ? 300_000 : 600_000),
+    makeNonStreamBody: (requestBody) => requestBody,
+    async readRound(response, sig, nonStream) {
+      const round = nonStream
+        ? await readGoogleJsonRound(response, hooks, assistant)
+        : await readGoogleStreamingRound(response, hooks, assistant, sig);
       const toolCalls: NormalizedToolCall[] = round.functionCalls.map((fc) => ({
         id: fc.id,
         name: fc.name,
@@ -1524,6 +1619,43 @@ export async function readOpenAiResponseIntoMessage(
     } catch {
       raw = { text: rawText };
     }
+    if (Array.isArray(raw.output)) {
+      // Responses API 非流式(专题9,助手关闭"流式输出"):output 是文档序的项数组
+      // (reasoning/message/function_call/image_generation_call),逐项发出等价事件。
+      for (const item of raw.output) {
+        if (!isRecord(item)) continue;
+        const itemType = String(item.type ?? "");
+        if (itemType === "reasoning") {
+          const summary = Array.isArray(item.summary) ? item.summary : [];
+          const text = summary.map((entry: any) => String(entry?.text ?? "")).filter(Boolean).join("\n");
+          if (text) {
+            reasoning += text;
+            hooks.sink?.({ kind: "reasoning_delta", text });
+          }
+        } else if (itemType === "message") {
+          const contentItems = Array.isArray(item.content) ? item.content : [];
+          const text = contentItems
+            .map((entry: any) => (isRecord(entry) && typeof entry.text === "string" ? entry.text : ""))
+            .filter(Boolean)
+            .join("");
+          if (text) {
+            content += text;
+            hooks.sink?.({ kind: "text_delta", text });
+          }
+        } else if (itemType === "function_call") {
+          mergeToolCallDeltas(toolCalls, [{
+            index: toolCalls.length,
+            id: String(item.call_id ?? item.id ?? ""),
+            type: "function",
+            function: { name: String(item.name ?? ""), arguments: String(item.arguments ?? "{}") },
+          }], "snapshot");
+        } else if (itemType === "image_generation_call" && typeof item.result === "string" && item.result) {
+          hooks.sink?.({ kind: "image_delta", url: normalizeGeneratedImageUrl(item.result) });
+        }
+      }
+      appendUsageFromRaw(hooks.message, raw);
+      return { content, reasoning, toolCalls, rawText, raw };
+    }
     const message = raw.choices?.[0]?.message ?? {};
     content = completionMessageText(raw);
     reasoning = String(message.reasoning_content ?? message.reasoning ?? "").trim();
@@ -1627,6 +1759,8 @@ export async function fetchOpenAiTextStreaming(
     toolCardsCreatedInStream: false,
     finishReasoningOnFinal: false,
     exhaustedError: "Too many consecutive tool calls without final assistant content",
+    // 专题9:助手关闭"流式输出"时的整程非流式(与下方降级用同一改造)。
+    makeNonStreamBody: (requestBody) => ({ ...requestBody, stream: false, stream_options: undefined }),
     nonStreamFallback: {
       // stream_options: undefined 会被 JSON.stringify 丢弃,与原实现一致
       makeBody: (requestBody) => ({ ...requestBody, stream: false, stream_options: undefined }),

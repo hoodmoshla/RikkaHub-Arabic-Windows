@@ -17,6 +17,7 @@ import { defaultAssistant } from "../../assistants/index";
 import { firstProviderModel } from "../../model-providers/index";
 import { loadModelsDev } from "../../inference-engine/providers";
 import { syncMcpServerTools } from "../../tools/mcp";
+import { clearMcpOAuth, completeMcpOAuth, ensureFreshMcpToken, startMcpOAuth } from "../../tools/mcp-oauth";
 import { listSkills } from "../../tools/skills";
 import { testSearchService } from "../../search/index";
 import { callImageGeneration } from "../../media/image-gen";
@@ -339,6 +340,15 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
       const prevCommon = prevServer && isRecord(prevServer.commonOptions) ? prevServer.commonOptions : null;
       const wasEnabled = prevCommon ? prevCommon.enable !== false : false;
       const willEnable = common.enable !== false;
+      // 专题9 MCP OAuth:oauth 状态的权威在服务端(令牌只由后端变更),重建 commonOptions 时
+      // 现读最新值透传,避免前端防抖快照把刚刷新的令牌冲掉;新建/导入时取 body 里的。
+      const liveOauth = () => {
+        const live = (state.settings.mcpServers as Array<Record<string, JsonValue>>)
+          .find((item) => String(item.id) === serverId);
+        const liveCommon = live && isRecord(live.commonOptions) ? live.commonOptions : null;
+        if (liveCommon && "oauth" in liveCommon) return liveCommon.oauth ?? null;
+        return isRecord(common.oauth) ? (common.oauth as JsonValue) : null;
+      };
       let server: Record<string, JsonValue> = {
         type: String(body.type ?? "streamable_http") === "sse" ? "sse" : "streamable_http",
         url: String(body.url ?? ""),
@@ -352,12 +362,18 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
           lastSyncAt: typeof common.lastSyncAt === "number" ? common.lastSyncAt : null,
           lastSyncError: String(common.lastSyncError ?? ""),
           connected: common.connected === true,
+          oauth: liveOauth(),
         },
       };
       // R3-3:ssePostEndpoint 是运行时会话缓存(见 tools/mcp.ts 的 mcpSsePostEndpointCache),
       // 不再持久化。剥掉前端经 ...body 回传的旧值,避免它又写回 settings。
       delete (server as Record<string, JsonValue>).ssePostEndpoint;
       if (isRecord(server.commonOptions) && server.commonOptions.enable !== false && String(server.url ?? "").trim()) {
+        // 专题9 MCP OAuth:同步前补新临期令牌(对齐安卓 ensureFreshToken),刷新后重取现值。
+        if (prevServer) {
+          await ensureFreshMcpToken(prevServer);
+          server.commonOptions = { ...server.commonOptions, oauth: liveOauth() };
+        }
         server = await syncMcpServerTools(server, addLog);
         // 全域复审 H2:上面的内嵌工具同步是长 await,期间备份恢复/导入可整体替换 settings
         // (不走 per-id 锁)。仅"更新既有服务器"需要防陈旧写回:保存开始时捕获的条目引用
@@ -400,6 +416,10 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
         }
         // Transition 3 needs no action — the tools array is already preserved verbatim.
       }
+      // 落盘前再取一次最新 oauth:同步的长 await 期间可能发生过回调授权/令牌刷新。
+      if (isRecord(server.commonOptions)) {
+        server.commonOptions = { ...server.commonOptions, oauth: liveOauth() };
+      }
       const result = upsertById(state.settings.mcpServers as JsonValue[], server);
       updateSettings({ ...state.settings, mcpServers: result.items });
       return json({ status: "ok", server: result.item });
@@ -430,6 +450,9 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
     return withMcpServerWriteLock(String(body.serverId ?? ""), async () => {
       const server = (state.settings.mcpServers as Array<Record<string, JsonValue>>).find((item) => String(item.id) === body.serverId);
       if (!server) return error("MCP server not found", 404);
+      // 专题9 MCP OAuth:同步前补新临期令牌。persistOauth 原地替换 commonOptions、保留 server
+      // 引用,下方的防陈旧写回守卫(includes(server))不受影响。
+      await ensureFreshMcpToken(server);
       const nextServer = await syncMcpServerTools(server, addLog);
       // 全域复审 H1:per-id 写锁只串行化 detail/sync/delete,挡不住备份恢复/导入(它整体替换
       // settings,不走锁)。同步的长 await 期间若完成了恢复,下面的 upsertById 会把旧世界的
@@ -445,6 +468,52 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
       if (common.connected === false) return error(String(common.lastSyncError ?? "MCP sync failed"), 502);
       return json({ status: "ok", tools: Array.isArray(common.tools) ? common.tools : [], server: result.item });
     });
+  }
+  // 专题9 MCP OAuth 2.1(对齐安卓 McpOAuthCoordinator):发起授权 → 浏览器完成 → 回调落盘。
+  // 回调 redirect_uri 取自发起请求的 origin(本机回环,RFC 8252),DCR 注册与换码保持一致。
+  if (path === "settings/mcp-server/oauth/start" && request.method === "POST") {
+    const body = await readJson<{ serverId: string }>(request);
+    const redirectUri = `${url.origin}/api/mcp/oauth/callback`;
+    try {
+      const result = await startMcpOAuth(String(body.serverId ?? ""), redirectUri);
+      return json(result);
+    } catch (err) {
+      return error(err instanceof Error ? err.message : String(err), 502);
+    }
+  }
+  if (path === "settings/mcp-server/oauth/clear" && request.method === "POST") {
+    const body = await readJson<{ serverId: string }>(request);
+    try {
+      clearMcpOAuth(String(body.serverId ?? ""));
+    } catch (err) {
+      return error(err instanceof Error ? err.message : String(err), 404);
+    }
+    return json({ status: "ok" });
+  }
+  // 浏览器重定向目标(GET,无鉴权 token —— 在 api/auth.ts 白名单豁免)。state 一次性校验 +
+  // PKCE verifier 只存服务端内存,泄露面仅限展示性 HTML。
+  if (path === "mcp/oauth/callback" && request.method === "GET") {
+    let outcome: { ok: boolean; message: string; serverName?: string };
+    try {
+      outcome = await completeMcpOAuth({
+        code: url.searchParams.get("code"),
+        state: url.searchParams.get("state"),
+        error: url.searchParams.get("error"),
+        errorDescription: url.searchParams.get("error_description"),
+      });
+    } catch (err) {
+      outcome = { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const title = outcome.ok ? "授权成功" : "授权失败";
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title} - RikkaHub</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f6f6f7;color:#1c1c1e}
+.card{background:#fff;border-radius:12px;padding:32px 40px;box-shadow:0 4px 24px rgba(0,0,0,.08);text-align:center;max-width:28rem}
+h1{font-size:1.25rem;margin:0 0 8px}p{margin:4px 0;color:#6b6b70;font-size:.9rem}</style></head>
+<body><div class="card"><h1>${outcome.ok ? "✅" : "❌"} ${title}</h1>
+${outcome.serverName ? `<p>${esc(outcome.serverName)}</p>` : ""}
+<p>${esc(outcome.message)}</p><p>${outcome.ok ? "现在可以关闭此页面,回到 RikkaHub 继续使用。" : "请回到 RikkaHub 重新发起授权。"}</p></div></body></html>`;
+    return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
   }
   if (path === "settings/mode-injection/detail" && request.method === "POST") {
     const body = await readJson<Record<string, JsonValue>>(request);

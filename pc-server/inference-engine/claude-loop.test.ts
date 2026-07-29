@@ -161,3 +161,71 @@ describe("streamClaudeChatWithTools", () => {
     ).rejects.toThrow("Overloaded");
   });
 });
+
+// 专题9:助手关闭"流式输出"→ 全程非流式 JSON(对齐安卓 GenerationHandler stream=assistant.streamOutput)。
+describe("streamClaudeChatWithTools 非流式模式", () => {
+  const nsAssistant = { id: "a1", mcpServers: [], streamOutput: false } as never;
+  const toolRoundJson = JSON.stringify({
+    content: [
+      { type: "thinking", thinking: "思考中", signature: "sig123" },
+      { type: "tool_use", id: "toolu_1", name: "do_it", input: { a: 1 } },
+    ],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 10, output_tokens: 5 },
+  });
+  const finalRoundJson = JSON.stringify({
+    content: [{ type: "text", text: "完成" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 12, output_tokens: 3 },
+  });
+
+  test("两轮均 stream:false;JSON 解析出思维链/工具/文本;原生 block 回放保留 signature", async () => {
+    const requests: Array<{ body: Record<string, unknown>; accept: string | undefined }> = [];
+    const payloads = [toolRoundJson, finalRoundJson];
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      const headers = (init.headers ?? {}) as Record<string, string>;
+      requests.push({ body: JSON.parse(String(init.body)), accept: headers.Accept });
+      return new Response(payloads.shift() ?? "{}", { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const events: Array<Record<string, unknown>> = [];
+    const executed: Array<{ name: string; args: string }> = [];
+    const hooks = {
+      conversation: { id: "c1", title: "t" },
+      node: { id: "n1" },
+      message: { id: "m1", role: "ASSISTANT", parts: [] as unknown[], annotations: [], createdAt: 0, finishedAt: null },
+      sink: (event: Record<string, unknown>) => events.push(event),
+      executeTool: async (call: { function: { name: string; arguments: string } }) => {
+        executed.push({ name: call.function.name, args: call.function.arguments });
+        return { output: [{ type: "text", text: "工具输出" }] };
+      },
+    } as never;
+
+    const out = await streamClaudeChatWithTools(
+      "https://api.test/v1/messages",
+      { "x-api-key": "k" },
+      { model: "claude-test", messages: [{ role: "user", content: "hi" }] },
+      providerItem,
+      nsAssistant,
+      undefined,
+      hooks,
+    );
+
+    expect(out).toBe("完成");
+    expect(executed).toEqual([{ name: "do_it", args: JSON.stringify({ a: 1 }) }]);
+    expect(requests).toHaveLength(2);
+    expect(requests.every((r) => r.body.stream === false)).toBe(true);
+    expect(requests.every((r) => r.accept !== "text/event-stream")).toBe(true);
+
+    // 回放:非流式拿到的是原生 content blocks,thinking 全文与 signature 一并保留
+    const secondMessages = requests[1]!.body.messages as Array<{ role: string; content: unknown }>;
+    const replayBlocks = secondMessages[1]!.content as Array<Record<string, unknown>>;
+    expect(replayBlocks.find((b) => b.type === "thinking")).toEqual({ type: "thinking", thinking: "思考中", signature: "sig123" });
+    expect(replayBlocks.find((b) => b.type === "tool_use")!.id).toBe("toolu_1");
+
+    expect(events.some((e) => e.kind === "reasoning_delta" && e.text === "思考中")).toBe(true);
+    expect(events.some((e) => e.kind === "tool_call_created" && e.toolCallId === "toolu_1")).toBe(true);
+    expect(events.some((e) => e.kind === "usage")).toBe(true);
+    expect(events.some((e) => e.kind === "text_delta" && e.text === "完成")).toBe(true);
+  });
+});

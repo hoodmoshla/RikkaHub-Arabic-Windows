@@ -41,9 +41,10 @@ async function fetchRoundWithHeaderTimeout(
   requestBody: Record<string, unknown>,
   round: number,
   externalSignal: AbortSignal | undefined,
+  nonStream: boolean,
 ): Promise<Response> {
-  const timeoutMs = adapter.headerTimeoutMs(requestBody);
-  if (timeoutMs <= 0) return adapter.fetchRound(requestBody, round, externalSignal);
+  const timeoutMs = adapter.headerTimeoutMs(requestBody, nonStream);
+  if (timeoutMs <= 0) return adapter.fetchRound(requestBody, round, externalSignal, nonStream);
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | null = null;
   let abortHandler: (() => void) | null = null;
@@ -60,7 +61,7 @@ async function fetchRoundWithHeaderTimeout(
     () => controller.abort(new Error(`响应头超时:${Math.round(timeoutMs / 1000)}s 内未收到上游响应`)),
     timeoutMs,
   );
-  return adapter.fetchRound(requestBody, round, controller.signal).finally(cleanup);
+  return adapter.fetchRound(requestBody, round, controller.signal, nonStream).finally(cleanup);
 }
 
 export function toolCallContext(hooks?: StreamHooksWithSink): ToolDispatchContext | undefined {
@@ -103,12 +104,13 @@ export interface ProviderRoundAdapter {
   logHeaders: Record<string, string>;
   /** 发起单轮请求。骨架统一负责"头超时 + 外部 signal 桥接"(R3-1),传入桥接后的 signal;
    *  adapter 只管拼 url/headers/body 并把 signal 透传给 fetch。 */
-  fetchRound(requestBody: Record<string, unknown>, round: number, signal: AbortSignal | undefined): Promise<Response>;
+  fetchRound(requestBody: Record<string, unknown>, round: number, signal: AbortSignal | undefined, nonStream?: boolean): Promise<Response>;
   /** 本轮"响应头超时"预算(ms):上游 TCP 通但迟迟不回响应头时的看门狗;返回 0 表示禁用。
    *  下沉自 OpenAI(非流式 180s / 流式 600s),三家统一后 Claude/Google 主链路不再无超时裸奔。 */
-  headerTimeoutMs(requestBody: Record<string, unknown>): number;
-  /** 读取并解析单轮响应，流内增量经 hooks/sink 下沉。 */
-  readRound(response: Response, signal: AbortSignal | undefined): Promise<RoundResult>;
+  headerTimeoutMs(requestBody: Record<string, unknown>, nonStream?: boolean): number;
+  /** 读取并解析单轮响应，流内增量经 hooks/sink 下沉。nonStream=true 时响应体是一次性
+   *  JSON(非 SSE),reader 需按非流式解析并一次性发出等价事件(专题9)。 */
+  readRound(response: Response, signal: AbortSignal | undefined, nonStream?: boolean): Promise<RoundResult>;
   /** 编码下一轮请求 body：回放本轮 assistant 轮 + 工具结果轮（provider 特定格式）。 */
   encodeNextTurn(result: RoundResult, toolResults: ExecutedToolResult[]): Record<string, unknown>;
   /** 成功轮的响应日志载荷。 */
@@ -121,6 +123,10 @@ export interface ProviderRoundAdapter {
   finishReasoningOnFinal: boolean;
   /** MAX_TOOL_STEPS 超限的报错文案（三家文案不同，冻结）。 */
   exhaustedError: string;
+  /** 专题9:助手"流式输出"开关关闭时的非流式请求体改造(对齐安卓 GenerationHandler 的
+   *  stream = assistant.streamOutput)。三家均实现;与 nonStreamFallback(流式失败自动
+   *  降级,仅 OpenAI)正交——本能力由用户显式选择,从第一轮起全程非流式。 */
+  makeNonStreamBody?(body: Record<string, unknown>): Record<string, unknown>;
   /** 流式失败降级为非流式重试（仅 OpenAI）。makeBody 把请求体改造为非流式形态。 */
   nonStreamFallback?: {
     makeBody(body: Record<string, unknown>): Record<string, unknown>;
@@ -166,21 +172,27 @@ export async function runStreamingToolLoop(
   let currentBody = initialBody;
   let allContent = "";
   let forceNonStream = false;
+  // 专题9:助手"流式输出"关闭 → 从第一轮起就按非流式请求(工具循环的每一轮都非流式)。
+  // 用户显式选择时 nonStreamFallback 的降级重试不再适用(已经是非流式,降无可降)。
+  const userNonStream = assistant.streamOutput === false && adapter.makeNonStreamBody != null;
 
   for (let round = 0; round < MAX_TOOL_STEPS; round += 1) {
     if (signal?.aborted) throw new DOMException("Generation stopped", "AbortError");
     const roundStarted = Date.now();
-    const requestBody = forceNonStream && adapter.nonStreamFallback
-      ? adapter.nonStreamFallback.makeBody(currentBody)
-      : currentBody;
+    const nonStreamRound = userNonStream || (forceNonStream && adapter.nonStreamFallback != null);
+    const requestBody = userNonStream
+      ? adapter.makeNonStreamBody!(currentBody)
+      : forceNonStream && adapter.nonStreamFallback
+        ? adapter.nonStreamFallback.makeBody(currentBody)
+        : currentBody;
 
     let response: Response;
     try {
-      response = await fetchRoundWithHeaderTimeout(adapter, requestBody, round, signal);
+      response = await fetchRoundWithHeaderTimeout(adapter, requestBody, round, signal, nonStreamRound);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       logRound(adapter, round, roundStarted, requestBody, { ok: false, status: 0, responseBody: "", error: detail });
-      if (adapter.nonStreamFallback && !forceNonStream && !signal?.aborted) {
+      if (adapter.nonStreamFallback && !forceNonStream && !userNonStream && !signal?.aborted) {
         forceNonStream = true;
         hooks.sink?.({ kind: "reasoning_delta", text: `${adapter.nonStreamFallback.connectHint} ${detail}` });
         round -= 1;
@@ -203,7 +215,7 @@ export async function runStreamingToolLoop(
 
     let result: RoundResult;
     try {
-      result = await adapter.readRound(response, signal);
+      result = await adapter.readRound(response, signal, nonStreamRound);
     } catch (err) {
       logRound(adapter, round, roundStarted, requestBody, {
         ok: false,
@@ -212,7 +224,7 @@ export async function runStreamingToolLoop(
         responseBody: "",
         error: err instanceof Error ? err.message : String(err),
       });
-      if (adapter.nonStreamFallback && !forceNonStream && !signal?.aborted) {
+      if (adapter.nonStreamFallback && !forceNonStream && !userNonStream && !signal?.aborted) {
         forceNonStream = true;
         hooks.sink?.({ kind: "reasoning_delta", text: adapter.nonStreamFallback.interruptHint });
         round -= 1;

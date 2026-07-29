@@ -3,6 +3,7 @@
 //       不直接读写 state，日志与 mcpServers 通过参数注入。
 
 import { id, isRecord } from "../foundation/utils";
+import { oauthStateOf } from "./mcp-oauth";
 import { jsonBody, textBody } from "../model-providers";
 import type { Assistant, JsonValue, RequestLog } from "../foundation/types";
 import { getStringArray } from "../foundation/utils";
@@ -23,6 +24,12 @@ function headersFromMcpServer(server: Record<string, JsonValue>) {
       const value = String(header.value ?? header.second ?? "");
       if (key) headers[key] = value;
     }
+  }
+  // 专题9 MCP OAuth 2.1:已授权的服务器注入 Bearer 令牌(对齐安卓 transport requestBuilder)。
+  // 用户手配的 Authorization 头优先——不覆盖显式配置。
+  const oauth = oauthStateOf(server);
+  if (oauth?.enabled === true && oauth.accessToken && !Object.keys(headers).some((k) => k.toLowerCase() === "authorization")) {
+    headers.Authorization = `Bearer ${oauth.accessToken}`;
   }
   return headers;
 }

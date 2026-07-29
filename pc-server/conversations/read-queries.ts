@@ -22,6 +22,17 @@ interface MetaRow {
   is_pinned: number;
   create_at: number;
   update_at: number;
+  mode_injection_ids: string;
+  lorebook_ids: string;
+}
+
+function parseIdArray(raw: string | undefined): string[] {
+  try {
+    const parsed = JSON.parse(raw ?? "[]");
+    return Array.isArray(parsed) ? parsed.map((v) => String(v)) : [];
+  } catch {
+    return [];
+  }
 }
 
 function rowToMeta(row: MetaRow): ConversationMeta {
@@ -40,10 +51,12 @@ function rowToMeta(row: MetaRow): ConversationMeta {
     isPinned: row.is_pinned === 1,
     createAt: row.create_at,
     updateAt: row.update_at,
+    modeInjectionIds: parseIdArray(row.mode_injection_ids),
+    lorebookIds: parseIdArray(row.lorebook_ids),
   };
 }
 
-const META_COLUMNS = "id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at";
+const META_COLUMNS = "id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at, mode_injection_ids, lorebook_ids";
 
 /**
  * 某助手的全部会话元数据，ORDER BY create_at DESC, id DESC——

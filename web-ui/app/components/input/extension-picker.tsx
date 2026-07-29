@@ -3,6 +3,7 @@ import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { ExternalLink, LoaderCircle, PackageIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useParams } from "react-router";
 
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
 import { usePickerPopover } from "~/hooks/use-picker-popover";
@@ -12,6 +13,7 @@ import { refreshSettingsStore } from "~/lib/settings-sync";
 import { safeStringArray } from "~/lib/type-guards";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
+import { useConversationEntry } from "~/stores/conversation-store";
 import type { LorebookProfile, ModeInjectionProfile, QuickMessage } from "~/types";
 import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
@@ -86,6 +88,15 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
   const { t } = useTranslation("input");
   const { settings, currentAssistant } = useCurrentAssistant();
 
+  // 专题9：独立对话提示词注入（对齐安卓 ExtensionSelector）——助手开启
+  // allowConversationPromptInjection 且当前在某个会话里时，注入/世界书的勾选读写
+  // 会话上的同名字段；快捷消息与 Skills 始终是助手级。
+  const { id: routeConversationId } = useParams();
+  const conversationEntry = useConversationEntry(routeConversationId ?? null);
+  const conversation = conversationEntry?.detail ?? null;
+  const useConversationInjections =
+    currentAssistant?.allowConversationPromptInjection === true && conversation != null;
+
   const [activeTab, setActiveTab] = React.useState<ActiveTab>("quickmessages");
   const [skills, setSkills] = React.useState<SkillProfile[]>([]);
 
@@ -114,12 +125,18 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
   );
 
   const selectedModeInjectionIds = React.useMemo(
-    () => safeStringArray(currentAssistant?.modeInjectionIds),
-    [currentAssistant?.modeInjectionIds],
+    () =>
+      safeStringArray(
+        useConversationInjections ? conversation?.modeInjectionIds : currentAssistant?.modeInjectionIds,
+      ),
+    [useConversationInjections, conversation?.modeInjectionIds, currentAssistant?.modeInjectionIds],
   );
   const selectedLorebookIds = React.useMemo(
-    () => safeStringArray(currentAssistant?.lorebookIds),
-    [currentAssistant?.lorebookIds],
+    () =>
+      safeStringArray(
+        useConversationInjections ? conversation?.lorebookIds : currentAssistant?.lorebookIds,
+      ),
+    [useConversationInjections, conversation?.lorebookIds, currentAssistant?.lorebookIds],
   );
   const selectedQuickMessageIds = React.useMemo(
     () => safeStringArray(currentAssistant?.quickMessageIds),
@@ -195,6 +212,30 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
     },
   });
 
+  // 会话级写入：成功后不刷 settings（数据在会话上），后端会广播快照更新 store。
+  const updateConversationInjectionsMutation = useMutation({
+    mutationFn: ({
+      conversationId,
+      modeInjectionIds,
+      lorebookIds,
+    }: {
+      conversationId: string;
+      modeInjectionIds?: string[];
+      lorebookIds?: string[];
+      key: string;
+    }) =>
+      api.post<{ status: string }>(`conversations/${conversationId}/injections`, {
+        modeInjectionIds,
+        lorebookIds,
+      }),
+    onError: (updateError) => {
+      setError(extractErrorMessage(updateError, t("injection.update_failed")));
+    },
+    onSuccess: () => {
+      setError(null);
+    },
+  });
+
   const updateSkillsMutation = useMutation({
     mutationFn: ({
       assistantId,
@@ -213,6 +254,15 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       setError(null);
     },
   });
+
+  // 注入/世界书/快捷消息的写入可能走助手级或会话级两条 mutation，合并展示态。
+  const extensionsPending =
+    updateExtensionsMutation.isPending || updateConversationInjectionsMutation.isPending;
+  const pendingExtensionKey = updateExtensionsMutation.isPending
+    ? updateExtensionsMutation.variables?.key
+    : updateConversationInjectionsMutation.isPending
+      ? updateConversationInjectionsMutation.variables?.key
+      : undefined;
 
   const buildPayload = (overrides: {
     modeInjectionIds?: string[];
@@ -237,6 +287,14 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       );
       if (checked) nextIds.add(id);
       else nextIds.delete(id);
+      if (useConversationInjections) {
+        updateConversationInjectionsMutation.mutate({
+          conversationId: conversation!.id,
+          modeInjectionIds: Array.from(nextIds),
+          key: `mode:${id}`,
+        });
+        return;
+      }
       updateExtensionsMutation.mutate({
         ...buildPayload({ modeInjectionIds: Array.from(nextIds) }),
         key: `mode:${id}`,
@@ -245,8 +303,11 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
     [
       canUse,
       currentAssistant,
+      conversation,
+      useConversationInjections,
       modeInjectionIdSet,
       selectedModeInjectionIds,
+      updateConversationInjectionsMutation,
       updateExtensionsMutation,
     ],
   );
@@ -257,12 +318,29 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       const nextIds = new Set(selectedLorebookIds.filter((item) => lorebookIdSet.has(item)));
       if (checked) nextIds.add(id);
       else nextIds.delete(id);
+      if (useConversationInjections) {
+        updateConversationInjectionsMutation.mutate({
+          conversationId: conversation!.id,
+          lorebookIds: Array.from(nextIds),
+          key: `lorebook:${id}`,
+        });
+        return;
+      }
       updateExtensionsMutation.mutate({
         ...buildPayload({ lorebookIds: Array.from(nextIds) }),
         key: `lorebook:${id}`,
       });
     },
-    [canUse, currentAssistant, lorebookIdSet, selectedLorebookIds, updateExtensionsMutation],
+    [
+      canUse,
+      currentAssistant,
+      conversation,
+      useConversationInjections,
+      lorebookIdSet,
+      selectedLorebookIds,
+      updateConversationInjectionsMutation,
+      updateExtensionsMutation,
+    ],
   );
 
   const handleToggleQuickMessage = React.useCallback(
@@ -313,14 +391,14 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
           type="button"
           variant="ghost"
           size="sm"
-          disabled={!canUse || updateExtensionsMutation.isPending || updateSkillsMutation.isPending}
+          disabled={!canUse || extensionsPending || updateSkillsMutation.isPending}
           className={cn(
             "h-8 rounded-full px-2 text-muted-foreground hover:text-foreground",
             selectedCount > 0 && "text-primary hover:bg-primary/10",
             className,
           )}
         >
-          {updateExtensionsMutation.isPending || updateSkillsMutation.isPending ? (
+          {extensionsPending || updateSkillsMutation.isPending ? (
             <LoaderCircle className="size-4 animate-spin" />
           ) : (
             <PackageIcon className="size-4" />
@@ -421,8 +499,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
                   {quickMessages.map((item) => {
                     const checked = selectedQuickMessageIds.includes(item.id);
                     const switching =
-                      updateExtensionsMutation.isPending &&
-                      updateExtensionsMutation.variables?.key === `quickmessage:${item.id}`;
+                      extensionsPending && pendingExtensionKey === `quickmessage:${item.id}`;
 
                     return (
                       <label
@@ -437,7 +514,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
                         ) : (
                           <Checkbox
                             checked={checked}
-                            disabled={disabled || updateExtensionsMutation.isPending}
+                            disabled={disabled || extensionsPending}
                             onCheckedChange={(nextChecked) => {
                               handleToggleQuickMessage(item.id, Boolean(nextChecked));
                             }}
@@ -465,9 +542,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
                 <div className="space-y-2">
                   {modeInjections.map((item) => {
                     const checked = selectedModeInjectionIds.includes(item.id);
-                    const switching =
-                      updateExtensionsMutation.isPending &&
-                      updateExtensionsMutation.variables?.key === `mode:${item.id}`;
+                    const switching = extensionsPending && pendingExtensionKey === `mode:${item.id}`;
 
                     return (
                       <label
@@ -482,7 +557,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
                         ) : (
                           <Checkbox
                             checked={checked}
-                            disabled={disabled || updateExtensionsMutation.isPending}
+                            disabled={disabled || extensionsPending}
                             onCheckedChange={(nextChecked) => {
                               handleToggleModeInjection(item.id, Boolean(nextChecked));
                             }}
@@ -513,8 +588,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
                   {lorebooks.map((item) => {
                     const checked = selectedLorebookIds.includes(item.id);
                     const switching =
-                      updateExtensionsMutation.isPending &&
-                      updateExtensionsMutation.variables?.key === `lorebook:${item.id}`;
+                      extensionsPending && pendingExtensionKey === `lorebook:${item.id}`;
 
                     return (
                       <label
@@ -529,7 +603,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
                         ) : (
                           <Checkbox
                             checked={checked}
-                            disabled={disabled || updateExtensionsMutation.isPending}
+                            disabled={disabled || extensionsPending}
                             onCheckedChange={(nextChecked) => {
                               handleToggleLorebook(item.id, Boolean(nextChecked));
                             }}

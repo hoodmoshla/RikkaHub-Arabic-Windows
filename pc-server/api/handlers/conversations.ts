@@ -239,6 +239,20 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       broadcastConversation(conversation);
       return json({ status: "updated" });
     }
+    if (sub === "injections" && request.method === "POST") {
+      // 专题9:会话级注入/世界书绑定(仅当助手开启 allowConversationPromptInjection 时
+      // 前端才会调用;后端不强校验开关——存下无害,生成侧只在开关开时消费)。
+      const body = await readJson<{ modeInjectionIds?: unknown; lorebookIds?: unknown }>(request);
+      const toIds = (value: unknown) => (Array.isArray(value) ? value.map((v) => String(v)) : undefined);
+      const modeIds = toIds(body.modeInjectionIds);
+      const lorebookIds = toIds(body.lorebookIds);
+      if (modeIds) conversation.modeInjectionIds = modeIds;
+      if (lorebookIds) conversation.lorebookIds = lorebookIds;
+      conversation.updateAt = Date.now();
+      persistConversation(conversation);
+      broadcastConversation(conversation);
+      return json({ status: "updated" });
+    }
     if (sub === "stop" && request.method === "POST") {
       // Abort the in-flight upstream fetch. Some providers take a moment to actually close the
       // socket after `controller.abort()` returns, so we proactively flush any throttled state

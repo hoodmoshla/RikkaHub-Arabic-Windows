@@ -58,14 +58,16 @@ export function openConversationsDb(): InstanceType<typeof Database> {
 export function ensureConversationTables(db: InstanceType<typeof Database>): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS pc_conversation (
-      id              TEXT PRIMARY KEY NOT NULL,
-      assistant_id    TEXT NOT NULL,
-      title           TEXT NOT NULL DEFAULT '',
-      system_prompt   TEXT NOT NULL DEFAULT '',
-      suggestions     TEXT NOT NULL DEFAULT '[]',
-      is_pinned       INTEGER NOT NULL DEFAULT 0,
-      create_at       INTEGER NOT NULL,
-      update_at       INTEGER NOT NULL
+      id                 TEXT PRIMARY KEY NOT NULL,
+      assistant_id       TEXT NOT NULL,
+      title              TEXT NOT NULL DEFAULT '',
+      system_prompt      TEXT NOT NULL DEFAULT '',
+      suggestions        TEXT NOT NULL DEFAULT '[]',
+      is_pinned          INTEGER NOT NULL DEFAULT 0,
+      create_at          INTEGER NOT NULL,
+      update_at          INTEGER NOT NULL,
+      mode_injection_ids TEXT NOT NULL DEFAULT '[]',
+      lorebook_ids       TEXT NOT NULL DEFAULT '[]'
     );
     CREATE TABLE IF NOT EXISTS pc_message_node (
       id              TEXT PRIMARY KEY NOT NULL,
@@ -84,6 +86,21 @@ export function ensureConversationTables(db: InstanceType<typeof Database>): voi
 /** 1.5.0 跟进安卓 Migration_16_17:废弃"清除上下文"机制,删除 truncate_index 列。
  *  替代机制与安卓一致——助手级"上下文消息数量"(contextMessageLimit)+ 压缩对话历史。
  *  老库多这一列时一次性 DROP;失败仅告警(残留列有 DEFAULT,读写均不再引用,无害)。 */
+/** 专题9:老库补加会话级注入绑定列(对齐安卓 mode_injection_ids/lorebook_ids)。幂等。 */
+function ensureConversationInjectionColumns(db: InstanceType<typeof Database>): void {
+  try {
+    const cols = db.prepare("PRAGMA table_info(pc_conversation)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "mode_injection_ids")) {
+      db.exec("ALTER TABLE pc_conversation ADD COLUMN mode_injection_ids TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!cols.some((c) => c.name === "lorebook_ids")) {
+      db.exec("ALTER TABLE pc_conversation ADD COLUMN lorebook_ids TEXT NOT NULL DEFAULT '[]'");
+    }
+  } catch (err) {
+    console.warn("[conv-db] 会话注入绑定列迁移失败(该功能暂不可用,下次启动重试)", err);
+  }
+}
+
 function dropTruncateIndexColumnIfPresent(db: InstanceType<typeof Database>): void {
   try {
     const cols = db.prepare("PRAGMA table_info(pc_conversation)").all() as { name: string }[];
@@ -110,6 +127,7 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
     db.exec("PRAGMA busy_timeout = 5000");
     ensureConversationTables(db);
     dropTruncateIndexColumnIfPresent(db);
+    ensureConversationInjectionColumns(db);
     ensureMessageFtsTable(db);
     // FTS 自愈重建：老库首次升级（表刚建、空）或索引意外丢失时，从节点表全量重建。
     // 幂等：行数>0 时零成本跳过。
@@ -134,8 +152,10 @@ function openConversationsDbUnsafe(): InstanceType<typeof Database> {
 // DB-first 用 ORDER BY create_at DESC, id DESC 保持该顺序(read-queries.ts 同)。
 /** 读取全部会话元数据(不 parse 节点 JSON,messages 置空)。迁移/合并路径用。 */
 export function loadConversationMetasFromDb(db: InstanceType<typeof Database>): Conversation[] {
+  // SELECT *:本函数也服务老 pc_conversations.db dump 的读回(备份 2.0),老 dump 没有
+  // 后加的注入绑定列,显式列名会直接查询失败;缺列按空集容错。
   const convRows = db.prepare(
-    "SELECT id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at FROM pc_conversation ORDER BY create_at DESC, id DESC",
+    "SELECT * FROM pc_conversation ORDER BY create_at DESC, id DESC",
   ).all() as PcConversationRow[];
   return convRows.map((row) => ({
     id: row.id,
@@ -147,6 +167,8 @@ export function loadConversationMetasFromDb(db: InstanceType<typeof Database>): 
     isPinned: row.is_pinned === 1,
     createAt: row.create_at,
     updateAt: row.update_at,
+    modeInjectionIds: safeParseStringArray(row.mode_injection_ids ?? "[]"),
+    lorebookIds: safeParseStringArray(row.lorebook_ids ?? "[]"),
   }));
 }
 
@@ -259,9 +281,10 @@ function safeParseStringArray(raw: string): string[] {
 // 该会话全部节点行被级联清空。流式期间每 200ms flush 都 upsert 会话行,等于整个流式期间
 // 磁盘上只剩正在补写的脏节点;流式中途进程死亡 = 会话历史永久丢失。
 const UPSERT_CONVERSATION_SQL =
-  "INSERT INTO pc_conversation (id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+  "INSERT INTO pc_conversation (id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at, mode_injection_ids, lorebook_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
   "ON CONFLICT(id) DO UPDATE SET assistant_id = excluded.assistant_id, title = excluded.title, system_prompt = excluded.system_prompt, " +
-  "suggestions = excluded.suggestions, is_pinned = excluded.is_pinned, create_at = excluded.create_at, update_at = excluded.update_at";
+  "suggestions = excluded.suggestions, is_pinned = excluded.is_pinned, create_at = excluded.create_at, update_at = excluded.update_at, " +
+  "mode_injection_ids = excluded.mode_injection_ids, lorebook_ids = excluded.lorebook_ids";
 
 const UPSERT_NODE_SQL =
   "INSERT INTO pc_message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?) " +
@@ -278,6 +301,8 @@ export function upsertConversationRowInto(db: InstanceType<typeof Database>, con
     conv.isPinned ? 1 : 0,
     conv.createAt || Date.now(),
     conv.updateAt || Date.now(),
+    JSON.stringify(conv.modeInjectionIds ?? []),
+    JSON.stringify(conv.lorebookIds ?? []),
   );
 }
 
@@ -474,6 +499,8 @@ export function migrateConversationsIntoDb(db: InstanceType<typeof Database>, co
         conv.isPinned ? 1 : 0,
         conv.createAt || Date.now(),
         conv.updateAt || Date.now(),
+        JSON.stringify(conv.modeInjectionIds ?? []),
+        JSON.stringify(conv.lorebookIds ?? []),
       );
       deleteNodes.run(conv.id);
       deleteConversationFts(db, [conv.id]);
@@ -520,14 +547,16 @@ export function exportPcConversationsDump(targetPath: string): number {
     db.exec(`
       CREATE TABLE pcdump.pc_dump_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
       CREATE TABLE pcdump.pc_conversation (
-        id              TEXT PRIMARY KEY NOT NULL,
-        assistant_id    TEXT NOT NULL,
-        title           TEXT NOT NULL DEFAULT '',
-        system_prompt   TEXT NOT NULL DEFAULT '',
-        suggestions     TEXT NOT NULL DEFAULT '[]',
-        is_pinned       INTEGER NOT NULL DEFAULT 0,
-        create_at       INTEGER NOT NULL,
-        update_at       INTEGER NOT NULL
+        id                 TEXT PRIMARY KEY NOT NULL,
+        assistant_id       TEXT NOT NULL,
+        title              TEXT NOT NULL DEFAULT '',
+        system_prompt      TEXT NOT NULL DEFAULT '',
+        suggestions        TEXT NOT NULL DEFAULT '[]',
+        is_pinned          INTEGER NOT NULL DEFAULT 0,
+        create_at          INTEGER NOT NULL,
+        update_at          INTEGER NOT NULL,
+        mode_injection_ids TEXT NOT NULL DEFAULT '[]',
+        lorebook_ids       TEXT NOT NULL DEFAULT '[]'
       );
       CREATE TABLE pcdump.pc_message_node (
         id              TEXT PRIMARY KEY NOT NULL,
@@ -537,7 +566,7 @@ export function exportPcConversationsDump(targetPath: string): number {
         select_index    INTEGER NOT NULL DEFAULT 0
       );
       INSERT INTO pcdump.pc_dump_meta (key, value) VALUES ('format', '1'), ('exportedAt', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-      INSERT INTO pcdump.pc_conversation SELECT id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at FROM main.pc_conversation;
+      INSERT INTO pcdump.pc_conversation SELECT id, assistant_id, title, system_prompt, suggestions, is_pinned, create_at, update_at, mode_injection_ids, lorebook_ids FROM main.pc_conversation;
       INSERT INTO pcdump.pc_message_node SELECT id, conversation_id, node_index, messages, select_index FROM main.pc_message_node;
     `);
     return (db.prepare("SELECT COUNT(*) AS n FROM pcdump.pc_conversation").get() as { n: number }).n;

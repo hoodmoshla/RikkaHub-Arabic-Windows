@@ -118,6 +118,9 @@ export async function handleAuthTokenRequest(request: Request): Promise<Response
 export function isWebAuthAuthorized(request: Request, url: URL): boolean {
   if (!webAuthEnabled()) return true;
   if (url.pathname === "/api/auth/token") return true;
+  // 专题9 MCP OAuth:授权回调来自外部浏览器重定向,带不了应用 token。安全面:该路径只
+  // 消费一次性 state(服务端内存校验)+授权码,不暴露任何用户数据。
+  if (url.pathname === "/api/mcp/oauth/callback") return true;
   const authHeader = request.headers.get("authorization");
   if (authHeader?.startsWith("Bearer ") && verifyToken(authHeader.slice(7).trim())) return true;
   const queryToken = url.searchParams.get("access_token");

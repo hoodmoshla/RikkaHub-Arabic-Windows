@@ -24,8 +24,16 @@ export function templateVariables(messageText: string, role: string, assistant: 
   );
 }
 
-function activePromptInjections(assistant: Assistant, messages: Message[]) {
-  return activePromptInjectionsCore(assistant, messages, state.settings.lorebooks, state.settings.modeInjections);
+function activePromptInjections(conversation: Conversation, assistant: Assistant, messages: Message[]) {
+  // 专题9:助手开启"允许会话级注入绑定"时,生效 id 集来自会话字段(完全取代助手级集合,
+  // 包括空集),对齐安卓 PromptInjectionTransformer.collectInjections 的 effective ids。
+  const override = assistant.allowConversationPromptInjection === true
+    ? {
+        modeInjectionIds: getStringArray(conversation.modeInjectionIds),
+        lorebookIds: getStringArray(conversation.lorebookIds),
+      }
+    : undefined;
+  return activePromptInjectionsCore(assistant, messages, state.settings.lorebooks, state.settings.modeInjections, override);
 }
 
 function timeReminderContent(current: Message, previous?: Message) {
@@ -147,7 +155,7 @@ function conversationTransformedMessages(conversation: Conversation, assistant: 
     messagesAfterTimeReminder.push(selected);
   }
 
-  const injections = activePromptInjections(assistant, messagesAfterTimeReminder);
+  const injections = activePromptInjections(conversation, assistant, messagesAfterTimeReminder);
   return { messages: applyPromptInjectionsToMessages(messagesAfterTimeReminder, injections), picked };
 }
 
