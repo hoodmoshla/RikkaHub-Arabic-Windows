@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS pings (
   os          TEXT    NOT NULL DEFAULT '',                 -- win / mac / linux / ''(其他)
   country     TEXT    NOT NULL DEFAULT '',                 -- CF 边缘的 ISO 3166-1 两位国家码,不存 IP
   msg_count   INTEGER NOT NULL DEFAULT 0,                  -- 当日累计发送消息数,上限 999999
-  hb_count    INTEGER NOT NULL DEFAULT 0,                  -- 当日心跳数(每 10 分钟 1 跳,≈使用时长/10min)
+  hb_count    INTEGER NOT NULL DEFAULT 0,                  -- 当日有活动的 10 分钟 tick 数(粗粒度,老客户端口径)
+  active_minutes INTEGER NOT NULL DEFAULT 0,               -- 当日窗口激活分钟数(分钟级,dashboard 优先采用)
   err_count   INTEGER NOT NULL DEFAULT 0,                  -- 当日 provider 请求失败数(不含用户主动中断)
   feat_search INTEGER NOT NULL DEFAULT 0,                  -- 当日联网搜索/抓取次数
   feat_tts    INTEGER NOT NULL DEFAULT 0,                  -- 当日 TTS 朗读次数

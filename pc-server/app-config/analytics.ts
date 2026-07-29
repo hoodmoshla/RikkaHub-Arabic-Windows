@@ -1,6 +1,6 @@
 // app-config/analytics.ts — 匿名 DAU 统计（一启动一 ping，绝不打扰用户，详见下方设计准则注释）
 // 纪律：搬迁自 server.ts（阶段 5.3h）。仅发送当日计数——设备 UUID、日期、版本、OS,外加:
-//   mc = 消息数        hb = 心跳数(≈ 当日窗口激活时长 / 10 分钟,见 markUiActivity)
+//   mc = 消息数        hb = 有活动的 10 分钟 tick 数  am = 活跃分钟数(见 markUiActivity)
 //   er = provider 失败  fs/ft/fm/fi = 搜索 / TTS / MCP / 图像生成 使用次数
 // 不采集用户内容、IP、模型名、文件名、查询词。服务端只按 MAX 合并当日计数,每天归零。
 
@@ -18,13 +18,26 @@ let analyticsTtsCount = 0;     // TTS 朗读次数
 let analyticsMcpCount = 0;     // MCP 工具调用次数
 let analyticsImgCount = 0;     // 图像生成次数
 
-// 专题6:hb 的口径是"用户实际在用"而非"进程在线"。此前每次 ping 无条件 +1,
-// 而 ping 只要 server 进程活着就发——托盘常驻/Docker 7×24 部署把"使用时长"灌成
-// "进程在线时长"(dashboard 曾出现日均 645 分钟的荒谬均值)。现在由前端在窗口
-// 可见且聚焦时定期上报活动信标(POST /api/activity → markUiActivity),每个
-// 10 分钟 tick 只有收到过信标才计 1 跳。无 UI 交互的空转进程 hb 恒为 0。
+// 专题6:使用时长的口径是"用户实际在用"而非"进程在线"。此前 hb 每次 ping 无条件
+// +1,而 ping 只要 server 进程活着就发——托盘常驻/Docker 7×24 部署把"使用时长"灌成
+// "进程在线时长"(dashboard 曾出现日均 645 分钟的荒谬均值)。现在由前端在窗口可见
+// 且聚焦时每 60s 上报活动信标(POST /api/activity → markUiActivity):
+//   am = 按信标间隔累计的活跃分钟数(分钟级精度,dashboard 优先采用)
+//   hb = 收到过信标的 10 分钟 tick 数(粗粒度,兼容老 dashboard 的 hb×10 估算)
+// 无 UI 交互的空转进程两者恒为 0。
 let lastUiActivityAt = 0;
-export function markUiActivity(): void { lastUiActivityAt = Date.now(); }
+let lastBeaconAt = 0;
+let analyticsActiveSeconds = 0;
+export function markUiActivity(): void {
+  const now = Date.now();
+  const gapSec = (now - lastBeaconAt) / 1000;
+  // 信标每 60s 一发:间隔 ≤90s(60s + 网络/定时器抖动余量)视为连续活跃,按实际
+  // 间隔累计;更长间隔说明中间失焦断流,新一拍只记一个信标周期。多标签页同时发
+  // 也成立:间隔越密单拍学分越小,总和仍不超过墙钟时间。
+  analyticsActiveSeconds += gapSec <= 90 ? gapSec : 60;
+  lastBeaconAt = now;
+  lastUiActivityAt = now;
+}
 
 // 3.5c-4: 埋点分散在各域模块(会话/工具/媒体),经函数递增计数(let 变量无法跨模块赋值)。
 export function bumpAnalyticsMsgCount() { analyticsMsgCount++; }
@@ -37,6 +50,7 @@ export function bumpAnalyticsImgCount() { analyticsImgCount++; }
 function resetAnalyticsCounters(): void {
   analyticsMsgCount = 0;
   analyticsHbCount = 0;
+  analyticsActiveSeconds = 0;
   analyticsErrCount = 0;
   analyticsSearchCount = 0;
   analyticsTtsCount = 0;
@@ -73,6 +87,7 @@ function sendAnalyticsPing(): void {
     + `&os=${analyticsOs()}`
     + `&mc=${analyticsMsgCount}`
     + `&hb=${analyticsHbCount}`
+    + `&am=${Math.round(analyticsActiveSeconds / 60)}`
     + `&er=${analyticsErrCount}`
     + `&fs=${analyticsSearchCount}`
     + `&ft=${analyticsTtsCount}`

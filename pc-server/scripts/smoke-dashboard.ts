@@ -160,6 +160,27 @@ console.log("[ping]");
   res = await pingHandler(ctx(extUrl.replace("hb=3", "hb=4"), { country: "JP" })); // 纯心跳 +1
   await flushWaits();
   check("纯心跳只花 1 读 + 1 写", sqlLog.length === 2, sqlLog);
+
+  // 分钟级时长 am(专题6 / 迁移 0003):落库、MAX 防回落、1440 钳顶、口径优先级
+  const amDev = "SELECT active_minutes, hb_count FROM pings WHERE device_id = 'abcdef0123456789abcdef01'";
+  res = await pingHandler(ctx(extUrl.replace("hb=3", "hb=4") + "&am=25", { country: "JP" }));
+  await flushWaits();
+  let amRow = db.query(amDev).get() as Record<string, number>;
+  check("am 落库", amRow.active_minutes === 25, amRow);
+  res = await pingHandler(ctx(extUrl.replace("hb=3", "hb=4") + "&am=20", { country: "JP" }));
+  await flushWaits();
+  amRow = db.query(amDev).get() as Record<string, number>;
+  check("am 回落不覆盖(保持 25)", amRow.active_minutes === 25, amRow);
+  res = await pingHandler(ctx(extUrl.replace("hb=3", "hb=4") + "&am=99999", { country: "JP" }));
+  await flushWaits();
+  amRow = db.query(amDev).get() as Record<string, number>;
+  check("am 钳制 1440", amRow.active_minutes === 1440, amRow);
+  // stats 的时长 CASE:该设备 am=1440 且 hb=4,若 am 未被优先则得 40。
+  const prio = db.query(
+    "SELECT ROUND(AVG(CASE WHEN active_minutes > 0 THEN active_minutes * 1.0 WHEN hb_count > 0 THEN hb_count * 10.0 END), 0) AS m " +
+    "FROM pings WHERE device_id = 'abcdef0123456789abcdef01'"
+  ).get() as { m: number };
+  check("时长口径:am 优先于 hb×10", prio.m === 1440, prio);
 }
 
 // ── stats ──

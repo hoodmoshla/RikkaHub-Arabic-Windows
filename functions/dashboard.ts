@@ -480,7 +480,7 @@ function renderOverview(d) {
   html += mini('流失率', churn.churnRate!=null?churn.churnRate+'%':'—', churn.churned!=null?('近 7 天流失 '+churn.churned):'—');
   html += mini('复活用户', fmt(churn.resurrected||0), '近 7 天回流');
   html += mini('重度活跃日占比', powerPct!=null?powerPct+'%':'—', '<span class="badge-tag">>20 条/日</span>');
-  html += mini('日均使用时长', avgDur!=null?(avgDur+' 分钟'):'—', avgDur!=null?'近 7 天 · 心跳估算':'等待新版客户端上报');
+  html += mini('日均使用时长', avgDur!=null?(avgDur+' 分钟'):'—', avgDur!=null?'近 7 天 · 窗口激活口径':'等待新版客户端上报');
   html += mini('请求失败率', errRate!=null?(errRate+'%'):'—', errRate!=null?('近 7 天失败 '+fmt(errSum)+' 次'):'等待新版客户端上报');
   html += '</div>';
 
