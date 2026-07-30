@@ -4,6 +4,7 @@ import { useMutation } from "@tanstack/react-query";
 import { ExternalLink, LoaderCircle, PackageIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router";
+import { useShallow } from "zustand/react/shallow";
 
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
 import { usePickerPopover } from "~/hooks/use-picker-popover";
@@ -94,21 +95,21 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
   const { id: routeConversationId } = useParams();
   // D1(专题9复查):窄订阅——本组件只消费"会话是否存在 + 两个 id 集"三个标量。
   // 订阅整个 entry 会让常驻输入区在流式期间随每帧 text_delta 重渲染(entry 每帧重建),
-  // 违反 D 族"流式帧只重渲染正在生成的节点"的纪律。id 集编码成 \n 连接串保持
-  // 引用稳定(id 是 uuid 不含换行),变化时才触发重渲染。
+  // 违反 D 族“流式帧只重渲染正在生成的节点”的纪律。id 集经 useShallow 浅比较,
+  // 内容不变时保持引用稳定,变化时才触发重渲染。
   const conversationId = routeConversationId ?? null;
   const conversationExists = useConversationStore((s) =>
     Boolean(conversationId && s.entries[conversationId]?.detail),
   );
-  const conversationModeIdsKey = useConversationStore((s) =>
-    conversationId
-      ? safeStringArray(s.entries[conversationId]?.detail?.modeInjectionIds).join("\n")
-      : "",
+  const conversationModeIds = useConversationStore(
+    useShallow((s) =>
+      conversationId ? safeStringArray(s.entries[conversationId]?.detail?.modeInjectionIds) : [],
+    ),
   );
-  const conversationLorebookIdsKey = useConversationStore((s) =>
-    conversationId
-      ? safeStringArray(s.entries[conversationId]?.detail?.lorebookIds).join("\n")
-      : "",
+  const conversationLorebookIds = useConversationStore(
+    useShallow((s) =>
+      conversationId ? safeStringArray(s.entries[conversationId]?.detail?.lorebookIds) : [],
+    ),
   );
   const useConversationInjections =
     currentAssistant?.allowConversationPromptInjection === true && conversationExists;
@@ -143,16 +144,16 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
   const selectedModeInjectionIds = React.useMemo(
     () =>
       useConversationInjections
-        ? (conversationModeIdsKey ? conversationModeIdsKey.split("\n") : [])
+        ? conversationModeIds
         : safeStringArray(currentAssistant?.modeInjectionIds),
-    [useConversationInjections, conversationModeIdsKey, currentAssistant?.modeInjectionIds],
+    [useConversationInjections, conversationModeIds, currentAssistant?.modeInjectionIds],
   );
   const selectedLorebookIds = React.useMemo(
     () =>
       useConversationInjections
-        ? (conversationLorebookIdsKey ? conversationLorebookIdsKey.split("\n") : [])
+        ? conversationLorebookIds
         : safeStringArray(currentAssistant?.lorebookIds),
-    [useConversationInjections, conversationLorebookIdsKey, currentAssistant?.lorebookIds],
+    [useConversationInjections, conversationLorebookIds, currentAssistant?.lorebookIds],
   );
   const selectedQuickMessageIds = React.useMemo(
     () => safeStringArray(currentAssistant?.quickMessageIds),
@@ -200,6 +201,8 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
     }
   }, [quickMessages.length, modeInjections.length, lorebooks.length, skills.length]);
 
+  // 助手级写入。端点为部分更新语义:只覆盖提交的数组,省略字段不动——
+  // 调用方只发自己改的那一个集,无需回填其余现值(回填取错作用域曾导致交叉污染)。
   const updateExtensionsMutation = useMutation({
     mutationFn: ({
       assistantId,
@@ -208,9 +211,9 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       quickMessageIds,
     }: {
       assistantId: string;
-      modeInjectionIds: string[];
-      lorebookIds: string[];
-      quickMessageIds: string[];
+      modeInjectionIds?: string[];
+      lorebookIds?: string[];
+      quickMessageIds?: string[];
       key: string;
     }) =>
       api.post<{ status: string }>("settings/assistant/injections", {
@@ -280,27 +283,6 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       ? updateConversationInjectionsMutation.variables?.key
       : undefined;
 
-  // A1复检修正:助手级端点(settings/assistant/injections)是三数组整体覆盖,payload 的
-  // mode/lorebook 兜底值必须恒取"助手级"现值。会话级绑定开启时 selected* 是会话的集,
-  // 若沿用,在会话里勾一个快捷消息就会把本会话的注入集写回助手默认——播种后助手
-  // 默认是所有未来新会话的种子,污染会扩散。开关关闭时两者等值,行为不变。
-  const buildPayload = (overrides: {
-    modeInjectionIds?: string[];
-    lorebookIds?: string[];
-    quickMessageIds?: string[];
-  }) => ({
-    assistantId: currentAssistant!.id,
-    modeInjectionIds:
-      overrides.modeInjectionIds ??
-      safeStringArray(currentAssistant?.modeInjectionIds).filter((id) => modeInjectionIdSet.has(id)),
-    lorebookIds:
-      overrides.lorebookIds ??
-      safeStringArray(currentAssistant?.lorebookIds).filter((id) => lorebookIdSet.has(id)),
-    quickMessageIds:
-      overrides.quickMessageIds ??
-      selectedQuickMessageIds.filter((id) => quickMessageIdSet.has(id)),
-  });
-
   const handleToggleModeInjection = React.useCallback(
     (id: string, checked: boolean) => {
       if (!canUse || !currentAssistant) return;
@@ -318,7 +300,8 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
         return;
       }
       updateExtensionsMutation.mutate({
-        ...buildPayload({ modeInjectionIds: Array.from(nextIds) }),
+        assistantId: currentAssistant.id,
+        modeInjectionIds: Array.from(nextIds),
         key: `mode:${id}`,
       });
     },
@@ -349,7 +332,8 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
         return;
       }
       updateExtensionsMutation.mutate({
-        ...buildPayload({ lorebookIds: Array.from(nextIds) }),
+        assistantId: currentAssistant.id,
+        lorebookIds: Array.from(nextIds),
         key: `lorebook:${id}`,
       });
     },
@@ -374,7 +358,8 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       if (checked) nextIds.add(id);
       else nextIds.delete(id);
       updateExtensionsMutation.mutate({
-        ...buildPayload({ quickMessageIds: Array.from(nextIds) }),
+        assistantId: currentAssistant.id,
+        quickMessageIds: Array.from(nextIds),
         key: `quickmessage:${id}`,
       });
     },

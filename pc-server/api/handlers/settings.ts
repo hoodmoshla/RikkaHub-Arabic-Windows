@@ -52,6 +52,33 @@ function withMcpServerWriteLock(serverId: string, task: () => Promise<Response>)
   return run;
 }
 
+export interface AssistantInjectionPatch {
+  modeInjectionIds?: string[];
+  lorebookIds?: string[];
+  quickMessageIds?: string[];
+}
+
+/** A1复检终极化:助手注入绑定改"部分更新"——只校验并覆盖 body 中出现的数组。
+ *  旧的三数组整体覆盖要求每个调用方回填另外两个数组的正确现值,任何一处取错
+ *  作用域(如把会话级集当助手级)都会静默改写助手默认;部分更新让这类交叉污染
+ *  在结构上不可能发生。省略字段=不动,显式空数组=清空。 */
+export function buildAssistantInjectionPatch(
+  settings: { modeInjections?: unknown; lorebooks?: unknown; quickMessages?: unknown },
+  body: { modeInjectionIds?: unknown; lorebookIds?: unknown; quickMessageIds?: unknown },
+): AssistantInjectionPatch {
+  const patch: AssistantInjectionPatch = {};
+  if (body.modeInjectionIds !== undefined) {
+    patch.modeInjectionIds = validateKnownJsonIds(settings.modeInjections, body.modeInjectionIds, "modeInjectionIds");
+  }
+  if (body.lorebookIds !== undefined) {
+    patch.lorebookIds = validateKnownJsonIds(settings.lorebooks, body.lorebookIds, "lorebookIds");
+  }
+  if (body.quickMessageIds !== undefined) {
+    patch.quickMessageIds = validateKnownJsonIds(settings.quickMessages, body.quickMessageIds, "quickMessageIds");
+  }
+  return patch;
+}
+
 export async function handleSettingsRoutes(request: Request, url: URL, path: string): Promise<Response | null> {
   if (path === "settings" && request.method === "GET") return json(state.settings);
   // settings 快照推送已并入 /api/events 通道(settings 事件)。
@@ -282,33 +309,22 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
   if (path === "settings/assistant/injections" && request.method === "POST") {
     const body = await readJson<{
       assistantId: string;
-      modeInjectionIds: string[];
-      lorebookIds: string[];
-      quickMessageIds: string[];
+      modeInjectionIds?: string[];
+      lorebookIds?: string[];
+      quickMessageIds?: string[];
     }>(request);
     const assistantExists = state.settings.assistants.some((assistant) => assistant.id === body.assistantId);
     if (!assistantExists) return error("Assistant not found", 404);
-    let modeInjectionIds: string[];
-    let lorebookIds: string[];
-    let quickMessageIds: string[];
+    let patch: AssistantInjectionPatch;
     try {
-      modeInjectionIds = validateKnownJsonIds(state.settings.modeInjections, body.modeInjectionIds, "modeInjectionIds");
-      lorebookIds = validateKnownJsonIds(state.settings.lorebooks, body.lorebookIds, "lorebookIds");
-      quickMessageIds = validateKnownJsonIds(state.settings.quickMessages, body.quickMessageIds, "quickMessageIds");
+      patch = buildAssistantInjectionPatch(state.settings, body);
     } catch (err) {
       return error(err instanceof Error ? err.message : String(err), 400);
     }
     updateSettings({
       ...state.settings,
       assistants: state.settings.assistants.map((assistant) =>
-        assistant.id === body.assistantId
-          ? {
-              ...assistant,
-              modeInjectionIds,
-              lorebookIds,
-              quickMessageIds,
-            }
-          : assistant,
+        assistant.id === body.assistantId ? { ...assistant, ...patch } : assistant,
       ),
     });
     return json({ status: "ok" });

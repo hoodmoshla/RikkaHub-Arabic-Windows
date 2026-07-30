@@ -1107,9 +1107,7 @@ function LorebookEditor({
     else ids.delete(String(draft.id));
     await api.post("settings/assistant/injections", {
       assistantId: assistant.id,
-      modeInjectionIds: assistant.modeInjectionIds ?? [],
       lorebookIds: [...ids],
-      quickMessageIds: assistant.quickMessageIds ?? [],
     });
     await pullSettings(onSettings);
   };
@@ -1315,8 +1313,6 @@ function QuickMessageEditor({
     else ids.delete(String(draft.id));
     await api.post("settings/assistant/injections", {
       assistantId: assistant.id,
-      modeInjectionIds: assistant.modeInjectionIds ?? [],
-      lorebookIds: assistant.lorebookIds ?? [],
       quickMessageIds: [...ids],
     });
     await pullSettings(onSettings);
@@ -1460,10 +1456,7 @@ function PromptItemEditor({
     else ids.delete(String(draft.id));
     await api.post("settings/assistant/injections", {
       assistantId: assistant.id,
-      modeInjectionIds:
-        bindKey === "modeInjectionIds" ? [...ids] : (assistant.modeInjectionIds ?? []),
-      lorebookIds: assistant.lorebookIds ?? [],
-      quickMessageIds: assistant.quickMessageIds ?? [],
+      [bindKey]: [...ids],
     });
     await pullSettings(onSettings);
   };
