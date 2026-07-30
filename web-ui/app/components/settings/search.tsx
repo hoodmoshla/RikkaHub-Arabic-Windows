@@ -145,12 +145,14 @@ function SearchApiKeyList({
                   aria-label={t("settings:search.key_ok")}
                 />
               ) : (
-                <XCircle
-                  className="size-4 shrink-0 text-destructive"
-                  aria-label={t(`settings:search.key_fail_${entry.failCode ?? "other"}`)}
-                  // issue11:悬停可见底层错误原文
-                  {...(entry.detail ? { title: entry.detail } : {})}
-                />
+                // issue11:title 放在 span 上(SVG 元素的 title 属性不触发浏览器 tooltip),
+                // 悬停可见底层错误原文。
+                <span className="flex shrink-0" title={entry.detail || undefined}>
+                  <XCircle
+                    className="size-4 shrink-0 text-destructive"
+                    aria-label={t(`settings:search.key_fail_${entry.failCode ?? "other"}`)}
+                  />
+                </span>
               )
             ) : null}
             <Button

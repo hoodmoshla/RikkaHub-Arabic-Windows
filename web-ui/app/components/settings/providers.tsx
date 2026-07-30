@@ -153,15 +153,15 @@ function endpointPreview(provider: ProviderProfile): string {
   if (kind === "openai")
     return `${base}${provider.useResponseApi === true ? "/responses" : textValue(provider.chatCompletionsPath) || "/chat/completions"}`;
   if (kind === "claude") return `${base}/messages`;
-  return `${base}/models/{model}:generateContent?key=${textValue(provider.apiKey) ? "***" : "<API_KEY>"}`;
+  // issue10:Gemini 鉴权已改走 x-goog-api-key 头,URL 不再带 ?key=,预览同步。
+  return `${base}/models/{model}:generateContent`;
 }
 
 function modelListEndpointPreview(provider: ProviderProfile): string {
   const kind = providerKind(provider) as ProviderKind;
   const base = textValue(provider.baseUrl).replace(/\/+$/, "");
-  if (!base) return kind === "google" ? "/models?pageSize=100&key=<API_KEY>" : "/models";
-  if (kind === "google")
-    return `${base}/models?pageSize=100&key=${textValue(provider.apiKey) ? "***" : "<API_KEY>"}`;
+  if (!base) return kind === "google" ? "/models?pageSize=100" : "/models";
+  if (kind === "google") return `${base}/models?pageSize=100`;
   return `${base}/models`;
 }
 
