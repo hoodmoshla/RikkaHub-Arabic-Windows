@@ -55,7 +55,7 @@ export const memoryStore = {
       try {
         renameSync(filePath, `${filePath}.corrupt-${Date.now()}`);
       } catch { /* 隔离失败不阻塞降级 */ }
-      reportError("persistence", "error", `记忆文件损坏,已降级为默认并隔离原件:${basename(filePath)}`, err);
+      reportError("persistence", "error", `记忆文件损坏，已隔离原件并回退默认：${basename(filePath)}`, err, "memory_corrupt", { file: basename(filePath) });
       return fallback;
     }
   },
@@ -76,7 +76,7 @@ export const memoryStore = {
         try { unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
       }
     }
-    reportError("persistence", "error", `记忆写入失败(已重试 8 次),本次变更未落盘:${basename(filePath)}`, lastError);
+    reportError("persistence", "error", `记忆写入失败，重试 8 次后放弃，本次变更未保存：${basename(filePath)}`, lastError, "memory_write_failed", { file: basename(filePath) });
   },
 
   /** 异步原子 temp-rename 写（运行时用）。Bun.write + fsPromises.rename，8 次重试。 */
@@ -96,7 +96,7 @@ export const memoryStore = {
         await new Promise<void>((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
       }
     }
-    reportError("persistence", "error", `记忆写入失败(已重试 8 次),本次变更未落盘:${basename(filePath)}`, lastError);
+    reportError("persistence", "error", `记忆写入失败，重试 8 次后放弃，本次变更未保存：${basename(filePath)}`, lastError, "memory_write_failed", { file: basename(filePath) });
   },
 
   /** 把一次写任务推入串行队列。吞掉 reject 避免"一次失败永久污染队列"

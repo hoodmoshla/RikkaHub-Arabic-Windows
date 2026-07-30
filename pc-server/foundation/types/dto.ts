@@ -158,11 +158,16 @@ export type AppErrorDto = {
   id: string;
   /** 最近一次发生时间(风暴合并时更新)。 */
   at: number;
-  /** 30s 窗口内同 domain+message 的合并计数。 */
+  /** 30s 窗口内同源条目的合并计数(同 domain,且 码+参数 或 message 相同)。 */
   count: number;
   severity: AppErrorSeverity;
   domain: AppErrorDomain;
+  /** 中文原文:console 镜像与文案键缺失时的兜底展示。 */
   message: string;
+  /** 文案键(settings:app_errors.codes.<code>),前端据此按当前界面语言渲染。 */
+  code?: string;
+  /** 文案插值参数。 */
+  params?: Record<string, string | number>;
   detail?: string;
 };
 

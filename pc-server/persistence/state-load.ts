@@ -340,7 +340,7 @@ export async function loadState(): Promise<State> {
       // 八连败写出的最后一笔抢救数据,不采用即静默丢弃最后一个会话期的全部变更。
       const fresher = maybeAdoptFresherRecovery(dataDir, statePath);
       if (fresher) {
-        reportError("persistence", "warn", `检测到上次退出前落盘失败的抢救数据(${fresher.source},落盘于 ${new Date(fresher.mtimeMs).toISOString()}),比 state.json 更新,已自动采用`);
+        reportError("persistence", "warn", `检测到上次落盘失败的抢救数据，比主文件更新，已自动采用：${fresher.source}`, undefined, "recovery_adopted", { source: fresher.source, time: new Date(fresher.mtimeMs).toISOString() });
         parsed = fresher.state;
       }
     } catch (err) {
@@ -350,10 +350,10 @@ export async function loadState(): Promise<State> {
       console.error("[loadState] state.json 解析失败,按恢复链回退", err);
       const recovered = recoverStateFromBackups(dataDir, statePath);
       if (recovered) {
-        reportError("persistence", "warn", `state.json 损坏,已从备份恢复:${recovered.source},落盘于 ${new Date(recovered.mtimeMs).toISOString()}——请核对设置是否为最新`, err);
+        reportError("persistence", "warn", `设置文件损坏，已从备份 ${recovered.source} 恢复，请核对设置是否最新`, err, "state_restored_from_backup", { source: recovered.source, time: new Date(recovered.mtimeMs).toISOString() });
         parsed = recovered.state;
       } else {
-        reportError("persistence", "error", "state.json 损坏且无任何可用备份,已回退默认状态", err);
+        reportError("persistence", "error", "设置文件损坏且无可用备份，已重置为默认", err, "state_reset_default");
         parsed = defaultState();
       }
     }
@@ -544,7 +544,7 @@ async function migrateFileDedupIfNeeded(stateObj: State): Promise<void> {
     stateObj.appliedMigrations = [...(Array.isArray(stateObj.appliedMigrations) ? stateObj.appliedMigrations : []), FILE_DEDUP_MIGRATION];
     writeSlimStateJsonSyncForMemory(stateObj);
   } catch (err) {
-    reportError("persistence", "warn", "附件去重迁移失败(本次跳过,下次启动重试)", err);
+    reportError("persistence", "warn", "附件去重迁移失败，下次启动重试", err, "dedup_migration_failed");
   }
 }
 
@@ -588,7 +588,7 @@ function migrateMemoryFilesIfNeeded(stateObj: State): void {
     try {
       copyFileSync(statePath, bakPath);
     } catch (err) {
-      reportError("persistence", "warn", "记忆迁移前备份失败(迁移继续,但无快照可回退)", err);
+      reportError("persistence", "warn", "记忆迁移前备份失败，迁移继续但无快照回退", err, "memory_migration_backup_failed");
     }
   }
 
@@ -629,7 +629,7 @@ async function migrateConversationsIfNeeded(parsed: Partial<State>): Promise<boo
       console.log(`[conv-db] 检测到迁移失败残留:从 pre-sqlite.bak 恢复 ${fromBak.length} 条会话`);
       // R4-1 配套:化石灌库是重大事件(快照可能落后数月),必须让用户看见——正常升级
       // 首启不走这里(state.json 自带 conversations),走到这里说明会话曾被某种途径抹空。
-      reportError("persistence", "warn", `检测到会话迁移失败残留,已从迁移前快照(pre-sqlite.bak)恢复 ${fromBak.length} 条会话——快照可能不是最新,请核对会话内容`);
+      reportError("persistence", "warn", `检测到会话迁移失败残留，已从快照恢复 ${fromBak.length} 条会话，请核对内容`, undefined, "migration_residue_recovered", { count: fromBak.length });
       conversationsToMigrate = fromBak;
     }
   }
@@ -639,7 +639,7 @@ async function migrateConversationsIfNeeded(parsed: Partial<State>): Promise<boo
     try {
       copyFileSync(statePath, preSqliteBakPath);
     } catch (err) {
-      reportError("persistence", "warn", "会话迁移前备份失败(迁移继续,但无快照可回退)", err);
+      reportError("persistence", "warn", "会话迁移前备份失败，迁移继续但无快照回退", err, "conversation_migration_backup_failed");
     }
   }
 
@@ -653,7 +653,7 @@ async function migrateConversationsIfNeeded(parsed: Partial<State>): Promise<boo
       console.log("[conv-db] 会话迁移完成");
     } catch (err) {
       console.error("[conv-db] 会话迁移失败,保留 state.json 原样,下次启动重试", err);
-      reportError("persistence", "error", "会话迁移到活库失败,已保留 state.json 原样,下次启动重试", err);
+      reportError("persistence", "error", "会话迁移到活库失败，数据保持原样，下次启动重试", err, "conversation_migration_failed");
       return false;
     }
   }
@@ -664,7 +664,7 @@ async function migrateConversationsIfNeeded(parsed: Partial<State>): Promise<boo
   try {
     writeSlimStateJsonSync(parsed);
   } catch (err) {
-    reportError("persistence", "warn", "迁移后写瘦 state.json 失败(活库已迁移,内存继续)", err);
+    reportError("persistence", "warn", "迁移后写瘦设置文件失败，运行不受影响", err, "slim_state_after_migration_failed");
   }
   return true;
 }
@@ -679,7 +679,7 @@ function recoverConversationsFromBak(): Conversation[] {
     const bakParsed = JSON.parse(readFileSync(bakPath, "utf8")) as Partial<State>;
     return Array.isArray(bakParsed.conversations) ? bakParsed.conversations : [];
   } catch (err) {
-    reportError("persistence", "error", "会话备份(pre-sqlite.bak)恢复失败", err);
+    reportError("persistence", "error", "会话迁移快照恢复失败", err, "sqlite_backup_restore_failed");
     return [];
   }
 }
@@ -691,7 +691,7 @@ function probeConversationsDbOrRecover(): void {
     countConversations(db);
   } catch (err) {
     console.error("[conv-db] 活库读取失败,尝试从 state.json.pre-sqlite.bak 重灌", err);
-    reportError("persistence", "error", "会话活库读取失败,正在尝试从迁移备份重灌", err);
+    reportError("persistence", "error", "会话库读取失败，正在从迁移备份重灌", err, "live_db_unreadable");
     const fromBak = recoverConversationsFromBak();
     if (fromBak.length === 0) return;
     try {
@@ -699,7 +699,7 @@ function probeConversationsDbOrRecover(): void {
       console.error(`[conv-db] 已从 pre-sqlite.bak 重灌 ${fromBak.length} 个会话`);
     } catch (err2) {
       // 读写都失败:库彻底不可用,本次会话为空;bak 原样保留,人工可救
-      reportError("persistence", "error", "会话活库重灌失败,本次启动会话列表为空(数据在 pre-sqlite.bak 未丢)", err2);
+      reportError("persistence", "error", "会话库重灌失败，本次启动会话列表为空，数据仍在迁移快照中", err2, "live_db_refill_failed");
     }
   }
 }

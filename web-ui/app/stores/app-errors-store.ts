@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import api from "~/services/api";
 import { onAppEvent } from "~/services/app-events";
+import i18n from "~/i18n";
 import type { AppErrorDto } from "~/types";
 
 interface AppErrorsStoreState {
@@ -59,10 +60,21 @@ export const useAppErrorsStore = create<AppErrorsStoreState>((set) => ({
   },
 }));
 
+/** 错误条目的用户可见文案:有 code 按当前界面语言渲染(切语言即时生效),
+ *  无 code(前端本地兜底/后端动态文本)或文案键缺失时回退服务端 message 原文。 */
+export function appErrorText(entry: AppErrorDto): string {
+  if (!entry.code) return entry.message;
+  return i18n.t(`settings:app_errors.codes.${entry.code}`, {
+    ...entry.params,
+    defaultValue: entry.message,
+  });
+}
+
 function routeToast(entry: AppErrorDto) {
+  const text = appErrorText(entry);
   const suffix = entry.count > 1 ? ` (×${entry.count})` : "";
-  if (entry.severity === "error") toast.error(entry.message + suffix);
-  else if (entry.severity === "warn") toast.warning(entry.message + suffix);
+  if (entry.severity === "error") toast.error(text + suffix);
+  else if (entry.severity === "warn") toast.warning(text + suffix);
   // info 级只进错误中心,不打扰
 }
 

@@ -588,7 +588,7 @@ export function snapshotConversationsDbBeforeImport(): void {
     conversationsDb.exec(`VACUUM INTO '${bakPath.replace(/'/g, "''")}'`);
     console.log(`[conv-db] 导入前快照已写入 ${bakPath}(${count} 个会话)`);
   } catch (err) {
-    reportError("backup", "warn", "导入前活库快照失败(导入继续,但本次无本地回退点)", err);
+    reportError("backup", "warn", "导入前会话库快照失败，导入继续但无本地回退点", err, "live_db_snapshot_failed");
   }
 }
 

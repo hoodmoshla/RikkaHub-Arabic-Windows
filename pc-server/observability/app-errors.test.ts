@@ -55,6 +55,18 @@ describe("reportError", () => {
     expect(recentAppErrors()).toHaveLength(2);
   });
 
+  test("带码条目按 码+参数 合并:同码同参合并,同码不同参不合并,code/params 随条目下发", () => {
+    setSystemTime(new Date(1_000_000));
+    reportError("internal", "error", "接口处理异常：/api/a", undefined, "api_exception", { path: "/api/a" });
+    reportError("internal", "error", "接口处理异常：/api/a", undefined, "api_exception", { path: "/api/a" });
+    reportError("internal", "error", "接口处理异常：/api/b", undefined, "api_exception", { path: "/api/b" });
+    const recent = recentAppErrors();
+    expect(recent).toHaveLength(2);
+    expect(recent[1]!.count).toBe(2);
+    expect(recent[1]!.code).toBe("api_exception");
+    expect(recent[1]!.params).toEqual({ path: "/api/a" });
+  });
+
   test("环形缓冲上限 200 条,溢出丢最旧", () => {
     setSystemTime(new Date(1_000_000));
     for (let i = 0; i < 205; i++) {

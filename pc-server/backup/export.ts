@@ -315,7 +315,7 @@ function generateRikkaHubDb(dbPath: string, backupNameById?: Map<number, string>
     }
     return true;
   } catch (err) {
-    reportError("backup", "error", "rikka_hub.db 生成失败,导出 zip 将不含安卓会话库(安卓端导入无会话)", err);
+    reportError("backup", "error", "安卓会话库生成失败，导出包将不含会话", err, "android_db_export_failed");
     return false;
   }
 }
@@ -627,7 +627,7 @@ type UploadStagingPlan = {
 // 截干保尾缀(staging 与解包都落真实文件系统,常见上限 255 字节,150 字符对多字节留足余量)。
 // 清洗后为空由调用方回退 <id>.<ext>;清洗后撞名由调用方 usedNames 去重兜底。
 export function sanitizeStagingFileName(rawName: string): string {
-  let name = rawName.replace(/[<>:"/\\|?*#\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
+  let name = rawName.replace(/[<>:"/\\|?*# -]/g, "_").replace(/[. ]+$/, "");
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(name)) name = `_${name}`;
   if (name.length > 150) {
     const ext = extname(name);
@@ -739,7 +739,7 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
       const dumped = exportPcConversationsDump(join(stageDir, "pc_conversations.db"));
       if (dumped >= 0) console.log(`[backup] pc_conversations.db staged (${dumped} conversations)`);
     } catch (dumpErr) {
-      reportError("backup", "error", "PC 会话库导出失败,zip 将缺少 pc_conversations.db(恢复将回退安卓格式库)", dumpErr);
+      reportError("backup", "error", "PC 会话库导出失败，恢复时将回退安卓格式", dumpErr, "pc_db_export_failed");
     }
     if ((getConversationsDb() ? listAllConversationMetas(getConversationsDb()!).length : 0) > 0 || memoryStore.exportFlat().length > 0) {
       onProgress?.("正在生成对话数据库...");
@@ -766,11 +766,11 @@ export function createSettingsBackupZipToPath(targetZipPath: string, onProgress?
       mkdirSync(uploadStage, { recursive: true });
       const stageResult = stageUploadFilesInto(uploadStage, uploadPlan.copies, onProgress);
       if (stageResult.failed > 0) {
-        reportError("backup", "error", `${stageResult.failed}/${uploadPlan.copies.length} 个附件暂存失败(磁盘满或文件名含非法字符?),备份 zip 不完整。首个错误: ${stageResult.firstError}`);
+        reportError("backup", "error", `${stageResult.failed}/${uploadPlan.copies.length} 个附件暂存失败，备份不完整；首个错误：${stageResult.firstError}`, undefined, "staging_failed", { failed: stageResult.failed, total: uploadPlan.copies.length, firstError: stageResult.firstError ?? "" });
       }
     }
     if (uploadPlan.missingSkipped > 0) {
-      reportError("backup", "warn", `${uploadPlan.missingSkipped}/${uploadPlan.totalFiles} 个附件源文件缺失(路径失效或已删除),未包含在备份中`);
+      reportError("backup", "warn", `${uploadPlan.missingSkipped}/${uploadPlan.totalFiles} 个附件源文件缺失，未包含在备份中`, undefined, "attachments_missing", { missing: uploadPlan.missingSkipped, total: uploadPlan.totalFiles });
     }
     if (uploadPlan.orphanSkipped > 0 || uploadPlan.dedupedCount > 0) {
       console.log(`[backup] upload staging: 跳过 ${uploadPlan.orphanSkipped} 个无引用孤儿文件, 内容去重 ${uploadPlan.dedupedCount} 个`);

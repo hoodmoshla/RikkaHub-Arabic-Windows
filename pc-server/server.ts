@@ -224,7 +224,7 @@ const { server, port } = (() => {
               console.error(err);
               // 9-1:此前只进 stdout(Tauri release 下无处可看)。请求方拿到 500,
               // 错误中心同步留痕,支持自查。
-              reportError("internal", "error", `API 请求处理异常:${url.pathname}`, err);
+              reportError("internal", "error", `接口处理异常：${url.pathname}`, err, "api_exception", { path: url.pathname });
               return error(err instanceof Error ? err.message : String(err), 500);
             }
           },
@@ -315,7 +315,7 @@ void (async () => {
     const message = err instanceof Error ? err.message : String(err);
     emitStartupFatal(1, `状态装载/迁移失败:${message}`);
     console.error("[startup] bootstrap 失败,/api 保持 503:", err);
-    reportError("internal", "error", "启动引导(状态装载/迁移)失败,应用不可用——重启会自动重试", err);
+    reportError("internal", "error", "启动引导失败，应用不可用，重启会自动重试", err, "startup_failed");
     markStartupFailed(message);
     return;
   }

@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "~/components/u
 import { JsonTree, tryParseJson } from "~/components/ui/json-tree";
 import { cn } from "~/lib/utils";
 import { SectionHeader } from "~/components/settings/shared";
-import { useAppErrorsStore } from "~/stores";
+import { appErrorText, useAppErrorsStore } from "~/stores";
 import type { AppErrorDto } from "~/types";
 
 // FE-P1-2 收编:线上契约单源在后端 foundation/types(此前本地手抄漏了 providerId)。
@@ -145,7 +145,7 @@ function AppErrorRow({ entry, onClick }: { entry: AppErrorDto; onClick: () => vo
         {entry.count > 1 ? <span className="text-xs text-muted-foreground">×{entry.count}</span> : null}
         <span className="ml-auto shrink-0 text-xs text-muted-foreground">{new Date(entry.at).toLocaleString()}</span>
       </div>
-      <div className="mt-1 truncate text-sm">{entry.message}</div>
+      <div className="mt-1 truncate text-sm">{appErrorText(entry)}</div>
     </button>
   );
 }
@@ -161,7 +161,7 @@ function AppErrorDetailDialog({ entry, onClose }: { entry: AppErrorDto | null; o
     >
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="text-sm">{entry?.message ?? ""}</DialogTitle>
+          <DialogTitle className="text-sm">{entry ? appErrorText(entry) : ""}</DialogTitle>
         </DialogHeader>
         {entry ? (
           <div className="space-y-3 text-xs">

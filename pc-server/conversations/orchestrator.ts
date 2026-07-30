@@ -393,7 +393,7 @@ async function runPostGenerationTasks(conversationId: string, snapshot: Conversa
         kind: "aux:title",
         error: titleError instanceof Error ? titleError.message : String(titleError),
       });
-      reportError("provider", "warn", "标题自动生成失败,已回退首条消息文本", titleError);
+      reportError("provider", "warn", "标题自动生成失败，已回退为首条消息文本", titleError, "title_generation_failed");
       // Title generation failed → fall back to first user message text (Android parity).
       const live = liveConversation();
       if (live && shouldAutoGenerateTitle(live)) {
@@ -432,7 +432,7 @@ async function runPostGenerationTasks(conversationId: string, snapshot: Conversa
       }
     } catch (suggestionError) {
       // Suggestions are auxiliary;正文生成状态不应受影响。
-      reportError("provider", "warn", "会话建议自动生成失败", suggestionError);
+      reportError("provider", "warn", "会话建议生成失败", suggestionError, "suggestion_generation_failed");
     }
   }
 }

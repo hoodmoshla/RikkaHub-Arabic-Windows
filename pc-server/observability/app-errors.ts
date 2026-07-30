@@ -26,13 +26,25 @@ function causeToDetail(cause: unknown): string | undefined {
   return String(cause);
 }
 
-/** 统一错误上报入口。error=用户必须知道,warn=可感知降级,info=仅进错误中心。 */
-export function reportError(domain: AppErrorDomain, severity: AppErrorSeverity, message: string, cause?: unknown): void {
+/** 统一错误上报入口。error=用户必须知道,warn=可感知降级,info=仅进错误中心。
+ *  code/params:前端文案键(settings:app_errors.codes.<code>)与插值参数,按当前界面
+ *  语言渲染、切语言即时生效;message 仍为中文原文,作 console 镜像与键缺失兜底。 */
+export function reportError(
+  domain: AppErrorDomain,
+  severity: AppErrorSeverity,
+  message: string,
+  cause?: unknown,
+  code?: string,
+  params?: Record<string, string | number>,
+): void {
   const now = Date.now();
-  // 从尾部找同 domain+message 的最近条目做风暴合并(尾部即最新,线性扫最多 200 条)
+  // 风暴合并键:有码按 码+参数 匹配(参数不同是不同错误),无码退回 message 全文
+  const mergeKey = code ? `${code}:${JSON.stringify(params ?? {})}` : message;
+  // 从尾部找同 domain 同源的最近条目做风暴合并(尾部即最新,线性扫最多 200 条)
   for (let i = ring.length - 1; i >= 0; i--) {
     const entry = ring[i]!;
-    if (entry.domain === domain && entry.message === message) {
+    const entryKey = entry.code ? `${entry.code}:${JSON.stringify(entry.params ?? {})}` : entry.message;
+    if (entry.domain === domain && entryKey === mergeKey) {
       if (now - entry.at <= MERGE_WINDOW_MS) {
         entry.at = now;
         entry.count += 1;
@@ -41,7 +53,17 @@ export function reportError(domain: AppErrorDomain, severity: AppErrorSeverity, 
       break;
     }
   }
-  const entry: AppErrorDto = { id: id(), at: now, count: 1, severity, domain, message, ...(causeToDetail(cause) !== undefined ? { detail: causeToDetail(cause) } : {}) };
+  const entry: AppErrorDto = {
+    id: id(),
+    at: now,
+    count: 1,
+    severity,
+    domain,
+    message,
+    ...(code ? { code } : {}),
+    ...(params ? { params } : {}),
+    ...(causeToDetail(cause) !== undefined ? { detail: causeToDetail(cause) } : {}),
+  };
   ring.push(entry);
   if (ring.length > RING_LIMIT) ring.splice(0, ring.length - RING_LIMIT);
   if (severity === "error") console.error(`[${domain}] ${message}`, cause ?? "");
@@ -72,9 +94,9 @@ export function installProcessSafetyNet(): void {
   if (safetyNetInstalled) return;
   safetyNetInstalled = true;
   process.on("uncaughtException", (err) => {
-    reportError("internal", "error", "未捕获异常(进程已兜底,继续运行)", err);
+    reportError("internal", "error", "未捕获异常，进程已兜底继续运行", err, "uncaught_exception");
   });
   process.on("unhandledRejection", (reason) => {
-    reportError("internal", "error", "未处理的 Promise 拒绝(进程已兜底,继续运行)", reason);
+    reportError("internal", "error", "未处理的 Promise 拒绝，进程已兜底继续运行", reason, "unhandled_rejection");
   });
 }

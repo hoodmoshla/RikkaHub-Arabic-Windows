@@ -66,7 +66,7 @@ function snapshotStateJsonBeforeImport(): void {
     copyFileSync(statePath, `${statePath}.pre-import.bak`);
     console.log(`[import] 导入前 state.json 快照已写入 ${statePath}.pre-import.bak`);
   } catch (err) {
-    reportError("backup", "warn", "导入前 state.json 快照失败(导入继续,但设置层无本地回退点)", err);
+    reportError("backup", "warn", "导入前设置快照失败，导入继续但无本地回退点", err, "pre_import_snapshot_failed");
   }
 }
 
@@ -113,12 +113,12 @@ function captureRestoreRollbackPoint(): (err: unknown) => void {
       memoryStore.importFlatMemories(memorySnapshot, "replace");
       saveState();
       broadcastSettings();
-      reportError("backup", "error", "备份恢复失败,已回滚到导入前状态(设置/记忆/会话均未改变)", err);
+      reportError("backup", "error", "备份恢复失败，已回滚到导入前状态", err, "restore_rolled_back");
     } catch (rollbackErr) {
       // 回滚自身失败的最后防线:清掉暂存,防止半应用的备份内容被后续 saveState 持久化、
       // 下次启动被当作待迁移数据灌进活库(R4-2 的事故链)。
       delete state.conversations;
-      reportError("backup", "error", "备份恢复失败且回滚异常——已清除暂存数据,请重启应用并核对设置与记忆", rollbackErr);
+      reportError("backup", "error", "备份恢复失败且回滚异常，请重启应用并核对设置与记忆", rollbackErr, "restore_rollback_failed");
     }
   };
 }
@@ -273,7 +273,7 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
         } catch (dumpErr) {
           dbReadError = dumpErr instanceof Error ? dumpErr.message : String(dumpErr);
           delete state.conversations;
-          reportError("backup", "error", "备份内 pc_conversations.db 读取失败,已跳过会话恢复(设置已恢复,现有会话保持不变)", dumpErr);
+          reportError("backup", "error", "备份内 PC 会话库读取失败，仅恢复了设置", dumpErr, "pc_db_unreadable");
         }
       } else if (existsSync(dbFile)) {
         try {
@@ -281,11 +281,11 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
         } catch (dbErr) {
           dbReadError = dbErr instanceof Error ? dbErr.message : String(dbErr);
           delete state.conversations;
-          reportError("backup", "error", "备份内 rikka_hub.db 读取失败,已跳过会话恢复(设置已恢复,现有会话保持不变)", dbErr);
+          reportError("backup", "error", "备份内安卓会话库读取失败，仅恢复了设置", dbErr, "android_db_unreadable");
         }
       } else {
         delete state.conversations;
-        reportError("backup", "warn", "备份 zip 不含会话数据库,已按 settings-only 恢复(现有会话保持不变)");
+        reportError("backup", "warn", "备份不含会话数据库，仅恢复了设置", undefined, "no_conversation_db");
       }
     }
     importSkills((body as { skills?: unknown }).skills);

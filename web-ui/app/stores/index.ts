@@ -6,7 +6,7 @@ export {
 } from "~/stores/app-store";
 export { useSettingsSubscription } from "~/stores/hooks/use-settings-subscription";
 export { useMemoryStore, useMemorySubscription } from "~/stores/memory-store";
-export { useAppErrorsStore, useAppErrorsSubscription } from "~/stores/app-errors-store";
+export { appErrorText, useAppErrorsStore, useAppErrorsSubscription } from "~/stores/app-errors-store";
 export type {
   AppStoreState,
   ChatInputSlice,

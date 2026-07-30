@@ -111,9 +111,9 @@ async function performStateSave(): Promise<void> {
   try {
     await Bun.write(`${statePath}.recovery-${Date.now()}.json`, content);
     recoverySweepArmed = true; // 磁盘上有 recovery 了,下次成功落盘后需要清
-    reportError("persistence", "error", "state.json 落盘失败(已另存 recovery 文件,重启后自动恢复)", lastError);
+    reportError("persistence", "error", "设置落盘失败，已写入抢救文件，重启后自动恢复", lastError, "state_save_failed_rescued");
   } catch (recErr) {
-    reportError("persistence", "error", "state.json 落盘失败,recovery 文件也写不出——本次变更未持久化", lastError ?? recErr);
+    reportError("persistence", "error", "设置落盘失败且抢救文件也写不出，本次变更未保存", lastError ?? recErr, "state_save_failed");
   }
 }
 
@@ -143,7 +143,7 @@ export function maybeWriteDailyBackupTo(bakPath: string, content: string, now = 
     return true;
   } catch (err) {
     dailyBackupDoneForDay = today; // 当天不再反复尝试/告警
-    reportError("persistence", "warn", "state.json 每日滚动备份写入失败(主写不受影响)", err);
+    reportError("persistence", "warn", "设置每日备份写入失败，主数据不受影响", err, "daily_backup_failed");
     return false;
   }
 }
@@ -384,7 +384,7 @@ export function writeSlimStateJsonSyncForMemory(data: State): void {
     renameSync(tempPath, statePath);
   } catch (err) {
     try { unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
-    reportError("persistence", "warn", "写瘦 state.json 失败(内存已迁移,下次启动重试)", err);
+    reportError("persistence", "warn", "写瘦设置文件失败，下次启动重试", err, "slim_state_failed");
   }
 }
 

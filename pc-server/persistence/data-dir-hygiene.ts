@@ -141,15 +141,15 @@ export async function runDataDirHygiene(): Promise<void> {
     await Bun.sleep(3_000);
     const removedCorrupt = [...sweepCorruptQuarantineIn(dataDir), ...sweepCorruptQuarantineIn(memoryDir)];
     if (removedCorrupt.length > 0) {
-      reportError("persistence", "info", `数据目录卫生:清理 ${removedCorrupt.length} 个超龄损坏隔离文件(每类均保留最新一份):${removedCorrupt.join("、")}`);
+      reportError("persistence", "info", `数据目录清理：移除 ${removedCorrupt.length} 个过期的损坏隔离文件`, removedCorrupt.join("、"), "hygiene_corrupt_cleaned", { count: removedCorrupt.length });
     }
     const removedInstallers = sweepStaleInstallersIn(updatesCacheDir, APP_VERSION);
     if (removedInstallers.length > 0) {
-      reportError("persistence", "info", `数据目录卫生:清理 ${removedInstallers.length} 个过时更新安装包/解压残留(≤ v${APP_VERSION},需要时可重新下载):${removedInstallers.join("、")}`);
+      reportError("persistence", "info", `数据目录清理：移除 ${removedInstallers.length} 个过时的更新安装包残留`, removedInstallers.join("、"), "hygiene_installers_cleaned", { count: removedInstallers.length });
     }
     const memorySplitDone = Array.isArray(state.appliedMigrations) && state.appliedMigrations.includes(MEMORY_FILE_SPLIT_MIGRATION);
     if (sweepMemorySplitFossilIn(dataDir, memorySplitDone)) {
-      reportError("persistence", "info", "数据目录卫生:清理 1.3.2 记忆迁移遗留快照 state.json.pre-memory-split.bak(迁移完成已久,代码已无读取方)");
+      reportError("persistence", "info", "数据目录清理：移除旧版迁移遗留快照", "state.json.pre-memory-split.bak", "hygiene_legacy_snapshot_cleaned");
     }
     // 孤儿附件只统计提示(全库扫节点较重,按启动次数间隔执行)
     if (state.launchCount % ORPHAN_STATS_LAUNCH_INTERVAL === 1) {
@@ -160,11 +160,19 @@ export async function runDataDirHygiene(): Promise<void> {
         reportError(
           "persistence",
           "info",
-          `附件目录统计:${stats.orphanEntries} 个附件条目已不被任何会话/画廊/设置引用(约 ${mb(stats.orphanBytes)} MB);files/ 另有 ${stats.untrackedFiles} 个无账本记录的文件(约 ${mb(stats.untrackedBytes)} MB)。当前版本不自动删除;如需释放空间,请先完整备份后人工处理`,
+          `附件目录统计：${stats.orphanEntries} 个条目已无引用，约 ${mb(stats.orphanBytes)} MB；另有 ${stats.untrackedFiles} 个无记录文件，约 ${mb(stats.untrackedBytes)} MB。不会自动删除，如需清理请先备份`,
+          undefined,
+          "orphan_stats",
+          {
+            orphans: stats.orphanEntries,
+            orphanMb: mb(stats.orphanBytes),
+            untracked: stats.untrackedFiles,
+            untrackedMb: mb(stats.untrackedBytes),
+          },
         );
       }
     }
   } catch (err) {
-    reportError("persistence", "warn", "数据目录卫生任务失败(不影响运行,下次启动重试)", err);
+    reportError("persistence", "warn", "数据目录清理任务失败，不影响运行，下次启动重试", err, "hygiene_failed");
   }
 }
