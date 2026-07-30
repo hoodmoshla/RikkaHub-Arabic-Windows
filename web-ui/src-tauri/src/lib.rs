@@ -493,7 +493,11 @@ fn tray_icon_for_scale(scale: f64) -> Option<tauri::image::Image<'static>> {
     let resized = master
         .resize_exact(target, target, image::imageops::FilterType::Lanczos3)
         .into_rgba8();
-    Some(tauri::image::Image::new_owned(resized.into_raw(), target, target))
+    // The logo's line art is ~1px wide at tray sizes and lands on fractional pixels
+    // after Lanczos, which reads as blur next to hand-hinted icons of neighboring
+    // apps. An unsharp mask pulls the edge contrast back (sigma tuned visually).
+    let sharpened = image::imageops::unsharpen(&resized, 1.2, 0);
+    Some(tauri::image::Image::new_owned(sharpened.into_raw(), target, target))
 }
 
 /// Builds the system tray icon + menu. Failure is non-fatal: we log and move on
