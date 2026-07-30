@@ -7,9 +7,7 @@ import {
   Check,
   CheckSquare,
   Images,
-  Laptop,
   Languages,
-  Moon,
   MoreHorizontal,
   MoveRight,
   Palette,
@@ -22,7 +20,6 @@ import {
   LogOut,
   Settings,
   Square,
-  Sun,
   Trash2,
   X,
 } from "lucide-react";
@@ -73,7 +70,6 @@ import {
   useTheme,
   type ColorTheme,
   type CustomThemeCss,
-  type Theme,
   type UserTheme,
 } from "~/components/theme-provider";
 import { ConversationSearchButton } from "~/components/conversation-search-button";
@@ -85,28 +81,6 @@ import { clearWebAuthToken } from "~/services/api";
 import { confirmDialog } from "~/stores/confirm-store";
 import api from "~/services/api";
 import type { AssistantAvatar, AssistantProfile, AssistantTag, ConversationListDto } from "~/types";
-
-const THEME_OPTIONS: Array<{
-  value: Theme;
-  labelKey: string;
-  icon: React.ComponentType<{ className?: string }>;
-}> = [
-  {
-    value: "light",
-    labelKey: "theme_light",
-    icon: Sun,
-  },
-  {
-    value: "dark",
-    labelKey: "theme_dark",
-    icon: Moon,
-  },
-  {
-    value: "system",
-    labelKey: "theme_system",
-    icon: Laptop,
-  },
-];
 
 const COLOR_THEME_OPTIONS: Array<{
   value: ColorTheme;
@@ -606,8 +580,6 @@ export const ConversationSidebar = React.memo(
   }: ConversationSidebarProps) => {
     const { t, i18n } = useTranslation();
     const {
-      theme,
-      setTheme,
       colorTheme,
       setColorTheme,
       userThemes,
@@ -644,10 +616,6 @@ export const ConversationSidebar = React.memo(
       avatar: userAvatar ?? { type: "dummy" },
     });
 
-    const currentTheme = theme;
-    const currentThemeOption =
-      THEME_OPTIONS.find((option) => option.value === currentTheme) ?? THEME_OPTIONS[2];
-    const CurrentThemeIcon = currentThemeOption.icon;
     const currentColorThemeOption = COLOR_THEME_OPTIONS.find(
       (option) => option.value === colorTheme,
     );
@@ -1313,7 +1281,7 @@ export const ConversationSidebar = React.memo(
             </DropdownMenu>
 
             <a
-              href="https://rikka-ai.com"
+              href="https://rikkahub-desktop.pages.dev/"
               target="_blank"
               rel="noopener noreferrer"
               className="ml-auto truncate whitespace-nowrap text-xs font-normal text-foreground/80 hover:text-foreground transition-colors"
