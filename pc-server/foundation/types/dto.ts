@@ -42,6 +42,9 @@ export type TokenUsage = {
   completionTokens: number;
   cachedTokens: number;
   totalTokens: number;
+  /** true = 本地字数折算的估算值(厂商未回报 usage,见 conversations/helpers.ts ensureUsage);
+   *  统计页命中率分母与前端上下文用量条均排除估算记录。 */
+  estimated?: boolean;
   /** 模型最大上下文窗口(models.dev 目录查得);null = 未知/无匹配,缺省 = 尚未回填。 */
   contextLimit?: number | null;
 };

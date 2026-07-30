@@ -40,11 +40,25 @@ function flushBeacon(): void {
   void api.post("activity", { ms }).catch(() => {});
 }
 
+/** 定时拍。D8(复查)硬化:焦点事件万一丢失(OS 级异常),此处自愈——丢弃本段
+ *  (方向安全的低估,至多一拍)并停表,否则未聚焦时间会被计入后续每一拍。 */
+function onBeaconTick(): void {
+  if (!isWindowActive()) {
+    if (timer !== null) {
+      window.clearInterval(timer);
+      timer = null;
+    }
+    activeSince = null;
+    return;
+  }
+  flushBeacon();
+}
+
 function syncBeaconLoop(): void {
   if (isWindowActive()) {
     if (timer !== null) return;
     activeSince = Date.now();
-    timer = window.setInterval(flushBeacon, BEACON_INTERVAL_MS);
+    timer = window.setInterval(onBeaconTick, BEACON_INTERVAL_MS);
   } else if (timer !== null) {
     window.clearInterval(timer);
     timer = null;

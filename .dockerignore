@@ -22,5 +22,8 @@ lobehub/
 kelivo/
 opencode-dev/
 tmp_doc/
+# D11(复查)注释纠偏:下面两个不属于上面那组"gitignored 参考资料"——functions/ 是
+# 入库的 Cloudflare Pages 遥测代码,analytics/ 是本地分析资料;都与桌面端 docker
+# 构建无关,同样不进上下文。
 analytics/
 functions/

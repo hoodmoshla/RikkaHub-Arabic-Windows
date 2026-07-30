@@ -268,6 +268,7 @@ export function oauthStateOf(server: Record<string, JsonValue>): McpOAuthStateRe
  *  settings 路由的防陈旧写回守卫用引用相等判定(includes(server)),换对象会让并发中的
  *  保存/同步被误判为"已被替换"而 409。 */
 function persistOauth(serverId: string, oauth: McpOAuthStateRecord | null): void {
+  refreshFailureAt.delete(serverId); // 重新授权/清除授权都让冷却失效,立刻允许下一次刷新
   const server = findServer(serverId);
   if (!server) return;
   const common = isRecord(server.commonOptions) ? server.commonOptions : {};
@@ -455,6 +456,11 @@ function tokenNeedsRefresh(oauth: McpOAuthStateRecord): boolean {
   return !oauth.accessToken || expired;
 }
 
+// D13(复查):刷新失败冷却。坏令牌端点(离线/服务下线)会让之后每次工具调用都白等一次
+// 网络超时;失败后冷却期内跳过重试,成功刷新或用户重新授权(persistOauth)即清除。
+const REFRESH_FAILURE_COOLDOWN_MS = 60_000;
+const refreshFailureAt = new Map<string, number>();
+
 async function refreshServerToken(serverId: string): Promise<void> {
   // 拿到"锁"后重读最新配置:排队期间可能已被并发刷新过。
   const server = findServer(serverId);
@@ -478,7 +484,9 @@ async function refreshServerToken(serverId: string): Promise<void> {
       expiresAt: computeExpiry(token.expires_in),
       scope: token.scope ?? oauth.scope,
     });
+    refreshFailureAt.delete(serverId);
   } catch (err) {
+    refreshFailureAt.set(serverId, Date.now());
     // 刷新失败不致命:保留旧令牌尝试请求,401 由上层错误面呈现,用户可重新授权。
     console.warn(`[mcp-oauth] 令牌刷新失败(server ${serverId}):`, err instanceof Error ? err.message : err);
   }
@@ -489,6 +497,8 @@ export async function ensureFreshMcpToken(server: Record<string, JsonValue>): Pr
   const serverId = String(server.id ?? "");
   const oauth = oauthStateOf(server);
   if (!serverId || !oauth || !tokenNeedsRefresh(oauth)) return server;
+  const failedAt = refreshFailureAt.get(serverId);
+  if (failedAt !== undefined && Date.now() - failedAt < REFRESH_FAILURE_COOLDOWN_MS) return server;
   const prev = refreshChains.get(serverId) ?? Promise.resolve();
   const run = prev.then(() => refreshServerToken(serverId));
   refreshChains.set(serverId, run.catch(() => { /* 已在 refreshServerToken 内兜底 */ }));
@@ -496,11 +506,3 @@ export async function ensureFreshMcpToken(server: Record<string, JsonValue>): Pr
   return findServer(serverId) ?? server;
 }
 
-/** 为一批服务器补新令牌(工具调用前置钩子)。刷新写回 state,调用方随后重读 settings 即可。 */
-export async function ensureFreshMcpTokens(servers: JsonValue[]): Promise<void> {
-  for (const server of servers) {
-    if (!isRecord(server)) continue;
-    const oauth = oauthStateOf(server);
-    if (oauth && tokenNeedsRefresh(oauth)) await ensureFreshMcpToken(server);
-  }
-}

@@ -216,7 +216,11 @@ export async function handleUpdateRoutes(request: Request, _url: URL, path: stri
             "下载连接超时：30s 内未收到服务器响应",
           );
           if (!res.ok || !res.body) {
-            const text = res.ok ? "no response body" : await res.text().catch(() => "");
+            // D2(复查):错误分支的正文读取同样要看门狗——非 2xx 头到达后服务器悬挂不回
+            // 正文时 res.text() 会永久挂起,进度条卡死且无报错。超时/失败都按空文案处理。
+            const text = res.ok
+              ? "no response body"
+              : await readWithIdleTimeout(() => res.text(), 10_000, "error body timeout").catch(() => "");
             send({ type: "error", message: `Download failed: ${res.status} ${String(text).slice(0, 200)}` });
             return;
           }

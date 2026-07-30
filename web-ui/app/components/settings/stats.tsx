@@ -130,7 +130,12 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
                 ? `${compactNumber(stats.totals.inputTokens)} / ${Math.min(100, Math.round((cached / denominator) * 100))}%`
                 : compactNumber(stats.totals.inputTokens);
             })(),
-            full: `${stats.totals.inputTokens.toLocaleString()} / ${(stats.totals.cachedTokens ?? 0).toLocaleString()}`,
+            // D3(复查):悬停口径写明——展示值含本地估算,命中率分母只用厂商真实回报。
+            full: t("settings:stats.t_input_tokens_cache_tip", {
+              input: stats.totals.inputTokens.toLocaleString(),
+              cached: (stats.totals.cachedTokens ?? 0).toLocaleString(),
+              reported: (stats.totals.reportedInputTokens ?? stats.totals.inputTokens).toLocaleString(),
+            }),
           },
           {
             label: t("settings:stats.t_output_tokens"),

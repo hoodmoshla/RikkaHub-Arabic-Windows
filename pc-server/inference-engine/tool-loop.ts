@@ -23,6 +23,7 @@ import type { ToolOutputEntry, ToolPart } from "../foundation/types";
 import { jsonBody, textBody } from "../model-providers";
 import { addLog } from "../api/logs";
 import { touchStream } from "../api/sse";
+import { isRecord } from "../foundation/utils";
 
 // 专题11-P1-3:usage 合并语义对齐安卓 Usage.merge——新值>0 才覆盖,否则保留旧值。
 // 流式/多轮场景里,后到的 usage 事件缺某字段(如 Google 末尾 chunk 不带
@@ -46,7 +47,6 @@ export function mergeTokenUsage(prev: Message["usage"], next: Message["usage"]):
     ...(contextLimit !== undefined ? { contextLimit: contextLimit as number | null } : {}),
   };
 }
-import { isRecord } from "../foundation/utils";
 
 export const MAX_TOOL_STEPS = 256;
 

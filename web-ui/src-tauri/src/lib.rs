@@ -687,7 +687,17 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
         // 专题8:记忆窗口尺寸/位置/最大化状态,退出时保存、启动时恢复。
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // D12(复查):排除 VISIBLE——可见性由应用自己管(就绪后 show、托盘 hide),
+        // 插件若恢复"上次退出时隐藏在托盘"的不可见态,下次启动窗口不出现;若过早
+        // 恢复可见又会在前端就绪前闪白屏。
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
         .manage(SidecarState::default())
         .invoke_handler(tauri::generate_handler![
             get_data_dir,

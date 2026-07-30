@@ -622,12 +622,12 @@ type UploadStagingPlan = {
 // R4-6:备份 staging 文件名跨平台清洗。fileName 可能来自 Linux/安卓上传(那边 :*?"<>|
 // 等字符合法),Windows 上 copyFileSync 会炸,该附件永远缺席备份且用户无解。backupName
 // 与原名本就解耦(pc-backup.json 按 backupName 回链,manifest 与 zip 同源于同一产出),
-// 清洗零副作用。四步:①非法字符与控制符 → _;②剥结尾点/空格(Windows 目录项非法尾缀);
+// 清洗零副作用。四步:①非法字符、控制符与 #(D4 复查:# 是引用 URL 的锚分隔符,含 # 的文件名跨端往返后引用失效) → _;②剥结尾点/空格(Windows 目录项非法尾缀);
 // ③CON/PRN/AUX/NUL/COM1-9/LPT1-9 设备保留名(裸名或带任意扩展名)加 _ 前缀;④超长名
 // 截干保尾缀(staging 与解包都落真实文件系统,常见上限 255 字节,150 字符对多字节留足余量)。
 // 清洗后为空由调用方回退 <id>.<ext>;清洗后撞名由调用方 usedNames 去重兜底。
 export function sanitizeStagingFileName(rawName: string): string {
-  let name = rawName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
+  let name = rawName.replace(/[<>:"/\\|?*#\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(name)) name = `_${name}`;
   if (name.length > 150) {
     const ext = extname(name);

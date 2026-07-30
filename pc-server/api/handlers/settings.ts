@@ -5,6 +5,7 @@
 import type { Assistant, JsonValue, Provider, ProxyConfig, SearchService } from "../../foundation/types";
 import type { Settings } from "../../foundation/types/settings";
 import { getStringArray, id, isRecord } from "../../foundation/utils";
+import { RUNNING_IN_CONTAINER } from "../../foundation/platform";
 import {
   applyEffectiveProxy,
   friendlyRequestError,
@@ -965,6 +966,11 @@ ${outcome.serverName ? `<p>${esc(outcome.serverName)}</p>` : ""}
     return json({ status: "ok", config: proxyConfig, ...proxyStatusPayload(state.settings.proxyConfig) });
   }
   if (path === "settings/port" && request.method === "POST") {
+    // D6(复查):容器内端口固定且启动时跳过该设置——静默接受会给用户"改了会生效"的
+    // 假象,直接拒写并说明出路。
+    if (RUNNING_IN_CONTAINER) {
+      return error("容器部署的端口由 docker run -p 宿主机映射决定,应用内端口设置不生效。", 400);
+    }
     const body = await readJson<{ port?: number | null }>(request).catch(
       () => ({}) as { port?: number | null },
     );

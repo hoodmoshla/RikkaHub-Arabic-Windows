@@ -378,13 +378,14 @@ export async function syncMcpServerTools(server: Record<string, JsonValue>, log?
   }
 }
 
-export async function callMcpTool(
+/** 解析工具名归属的服务器与原始工具名。D13(复查):调用前只补新目标服务器的令牌,
+ *  需要先知道目标是谁;与 callMcpTool 共用同一筛选口径(助手选中/服务器启用/工具级
+ *  开关放行),两处判定永不漂移。 */
+export function resolveMcpToolServer(
   assistant: Assistant,
   toolName: string,
-  args: Record<string, JsonValue>,
   mcpServers: JsonValue[],
-  log?: McpLogCallback,
-) {
+): { server: Record<string, JsonValue>; rawToolName: string } | null {
   const selected = new Set(getStringArray(assistant.mcpServers));
   const servers = (mcpServers as Array<Record<string, JsonValue>>)
     .filter((server) => selected.has(String(server.id ?? "")) && isRecord(server.commonOptions) && server.commonOptions.enable !== false);
@@ -395,9 +396,19 @@ export async function callMcpTool(
       isMcpToolEnabledForAssistant(assistant, String(server.id ?? ""), tool)
       && `mcp__${String(tool.name ?? "").replace(/[^a-zA-Z0-9_-]/g, "_")}` === toolName,
     );
-    if (!matched) continue;
-    const result = await mcpJsonRpc(server, "tools/call", { name: String(matched.name), arguments: args }, log);
-    return result;
+    if (matched) return { server, rawToolName: String(matched.name) };
   }
-  throw new Error(`MCP tool '${toolName}' is not available for this assistant`);
+  return null;
+}
+
+export async function callMcpTool(
+  assistant: Assistant,
+  toolName: string,
+  args: Record<string, JsonValue>,
+  mcpServers: JsonValue[],
+  log?: McpLogCallback,
+) {
+  const resolved = resolveMcpToolServer(assistant, toolName, mcpServers);
+  if (!resolved) throw new Error(`MCP tool '${toolName}' is not available for this assistant`);
+  return mcpJsonRpc(resolved.server, "tools/call", { name: resolved.rawToolName, arguments: args }, log);
 }

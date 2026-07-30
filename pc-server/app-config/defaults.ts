@@ -37,6 +37,12 @@ export const SUNSET_TTS_PROVIDER_IDS = new Set<string>([
 //   - 不阻塞:fetch 出错只能被 Promise 链吞掉,绝不能冒泡成 UnhandledRejection
 //   - 不持久错误状态:连续失败不退避、不停跳,因为我们根本不关心是否送达
 
+/** 默认助手系统提示词(a63d46b 起为天级 Date: {{cur_date}}——秒级 cur_datetime 会让
+ *  每条消息的 system 都变,从该行起前缀缓存全部失效)。改动本串时注意 state-load 的
+ *  D7 迁移链:旧串由本串反推,"与旧默认逐字相等"才替换。 */
+export const DEFAULT_ASSISTANT_SYSTEM_PROMPT =
+  "You are a helpful assistant, called {{char}}, based on model {{model_name}}.\n\n## Info\n- Date: {{cur_date}}\n- Locale: {{locale}}\n- Timezone: {{timezone}}\n- Device Info: {{device_info}}\n- System Version: {{system_version}}\n- User Nickname: {{user}}\n\n## Hint\n- If the user does not specify a language, reply in the user's primary language.\n- Remember to use Markdown syntax for formatting, and use latex for mathematical expressions.\n\n## Search\n- You must use English keywords when searching to get higher quality sources.\n- Chinese sources are generally of low quality.";
+
 export function defaultSettings(): Settings {
   const assistant = defaultAssistant();
   return {
@@ -100,8 +106,7 @@ export function defaultSettings(): Settings {
       {
         ...defaultAssistant(),
         id: "3d47790c-c415-4b90-9388-751128adb0a0",
-        systemPrompt:
-          "You are a helpful assistant, called {{char}}, based on model {{model_name}}.\n\n## Info\n- Date: {{cur_date}}\n- Locale: {{locale}}\n- Timezone: {{timezone}}\n- Device Info: {{device_info}}\n- System Version: {{system_version}}\n- User Nickname: {{user}}\n\n## Hint\n- If the user does not specify a language, reply in the user's primary language.\n- Remember to use Markdown syntax for formatting, and use latex for mathematical expressions.\n\n## Search\n- You must use English keywords when searching to get higher quality sources.\n- Chinese sources are generally of low quality.",
+        systemPrompt: DEFAULT_ASSISTANT_SYSTEM_PROMPT,
       },
     ],
     assistantTags: [],

@@ -13,8 +13,8 @@ import { addLog } from "../api/logs";
 import { broadcastMemoryUpdate } from "../api/sse";
 import { memoryStore } from "../memory";
 import { runScrapeWeb, runSearchWeb } from "../search";
-import { callMcpTool } from "./mcp";
-import { ensureFreshMcpTokens } from "./mcp-oauth";
+import { callMcpTool, resolveMcpToolServer } from "./mcp";
+import { ensureFreshMcpToken } from "./mcp-oauth";
 import { runAskUserTool, runClipboardTool, runGetTimeInfoTool, runTextToSpeechTool } from "./local";
 import { readSkillBody, safeSkillFile } from "./skills";
 
@@ -120,8 +120,11 @@ export async function executeToolCall(
   }
   if (name.startsWith("mcp__")) {
     bumpAnalyticsMcpCount();
-    // 专题9 MCP OAuth 2.1:调用前补新临期令牌(刷新结果写回 state,故重读 settings)。
-    await ensureFreshMcpTokens(state.settings.mcpServers);
+    // 专题9 MCP OAuth 2.1 + D13(复查):调用前只补新"目标服务器"的临期令牌——旧实现
+    // 串行刷全部服务器,一个坏端点的网络超时会拖慢所有无关工具调用。刷新结果写回
+    // state,后续取 state.settings.mcpServers 即最新。
+    const target = resolveMcpToolServer(assistant, name, state.settings.mcpServers);
+    if (target) await ensureFreshMcpToken(target.server);
     return callMcpTool(assistant, name, args, state.settings.mcpServers, addLog);
   }
   throw new Error(`Unknown tool: ${name}`);

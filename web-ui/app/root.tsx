@@ -144,7 +144,14 @@ function AppContent() {
     const warm = () => {
       void document.fonts.load('400 16px "KaTeX_Main"');
       void document.fonts.load('italic 400 16px "KaTeX_Math"');
+      // D9(复查):补齐常用字体族——Size1/3/4(定界符与大算符各档)与 AMS(黑板体/特殊
+      // 符号),否则首次遇到 mathbb 或多层定界符仍会触发按需加载+整列重排。空闲期预取,
+      // 每个 woff2 仅十几 KB 且走本地服务,代价可忽略。
+      void document.fonts.load('400 16px "KaTeX_Size1"');
       void document.fonts.load('400 16px "KaTeX_Size2"');
+      void document.fonts.load('400 16px "KaTeX_Size3"');
+      void document.fonts.load('400 16px "KaTeX_Size4"');
+      void document.fonts.load('400 16px "KaTeX_AMS"');
     };
     if (typeof window.requestIdleCallback === "function") {
       const h = window.requestIdleCallback(warm, { timeout: 3000 });

@@ -30,7 +30,7 @@ import { hashFileSha256, rewriteAndroidFileUrlsDeep, rewritePcFileUrlsDeep } fro
 import { writeExtractedTextSidecar } from "../files/index";
 import { rebuildFtsFromNodeTable } from "../conversations/fts";
 import { normalizeRequestStats } from "../api/logs";
-import { SUNSET_TTS_PROVIDER_IDS, defaultSettings, defaultState } from "../app-config/defaults";
+import { DEFAULT_ASSISTANT_SYSTEM_PROMPT, SUNSET_TTS_PROVIDER_IDS, defaultSettings, defaultState } from "../app-config/defaults";
 import {
   DEFAULT_COMPRESS_PROMPT,
   DEFAULT_OCR_PROMPT,
@@ -95,6 +95,16 @@ export function normalizeState(input: Partial<State>): State {
     models: (providerItem.models ?? []).map((item) => enrichModel(item)),
   }));
   normalized.settings.assistants = mergeById(normalized.settings.assistants ?? [], defaults.assistants);
+  // D7(复查):默认提示词曾把秒级 "Time: {{cur_datetime}}" 改为天级 "Date: {{cur_date}}"
+  // (a63d46b,秒级时间让 system 每条消息都变、前缀缓存从该行起全部失效),但存量用户的
+  // 助手仍带旧串。与 R1-11 同一模式:仅对"与旧默认逐字相等"的提示词做一次性替换,
+  // 用户改过一个字都不动;无迁移标记,幂等且随备份天然往返。
+  const legacyDefaultPrompt = DEFAULT_ASSISTANT_SYSTEM_PROMPT.replace("- Date: {{cur_date}}", "- Time: {{cur_datetime}}");
+  normalized.settings.assistants = normalized.settings.assistants.map((assistant) =>
+    assistant.systemPrompt === legacyDefaultPrompt
+      ? { ...assistant, systemPrompt: DEFAULT_ASSISTANT_SYSTEM_PROMPT }
+      : assistant,
+  );
   // Backfill mcpToolOverrides for assistants saved before this field existed. Default empty
   // object = inherit all globally-enabled tools, no per-assistant overrides applied.
   normalized.settings.assistants = normalized.settings.assistants.map((assistant) => {

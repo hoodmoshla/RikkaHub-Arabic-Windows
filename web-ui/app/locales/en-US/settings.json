@@ -377,6 +377,7 @@
     "t_conversations": "Conversations",
     "t_messages": "Messages",
     "t_input_tokens_cache": "Input tokens / cache hit",
+    "t_input_tokens_cache_tip": "Input {{input}} (incl. local estimates) - hits {{cached}} - hit rate divides by provider-reported input {{reported}}",
     "t_output_tokens": "Output tokens",
     "t_launches": "App launches",
     "heatmap": "Message heatmap",

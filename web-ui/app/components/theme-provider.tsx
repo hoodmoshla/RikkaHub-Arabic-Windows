@@ -299,10 +299,15 @@ export function ThemeProvider({
         // 按键逐个补传:用户可能在迁移完成前已改过某一项(后端只有那一个键),
         // 整体判断会漏传其余旧值(如自定义主题列表)却清掉旧键 → 数据丢失。
         const ds = fresh.displaySetting ?? ({} as DisplaySetting);
+        // D14(复查):GET 在途窗口内用户可能已改过某键(persistDisplayPatch 会先乐观写
+        // store 镜像)——陈旧 GET 快照看不到它,若仍按旧值补传会把用户刚设的值覆盖回去。
+        // 以"后端快照或本地镜像任一已有该键"为准,只补两边都没有的键。
+        const mirror = useSettingsStore.getState().settings?.displaySetting ?? ({} as DisplaySetting);
+        const has = (key: keyof DisplaySetting) => key in ds || key in mirror;
         const patch: Partial<DisplaySetting> = {};
-        if (!("themeMode" in ds)) patch.themeMode = legacy.mode;
-        if (!("colorTheme" in ds)) patch.colorTheme = legacy.colorTheme;
-        if (!("userThemes" in ds)) patch.userThemes = legacy.userThemes;
+        if (!has("themeMode")) patch.themeMode = legacy.mode;
+        if (!has("colorTheme")) patch.colorTheme = legacy.colorTheme;
+        if (!has("userThemes")) patch.userThemes = legacy.userThemes;
         // A3(专题8复查):旧键是补传失败时的唯一重试源——必须等 POST 确认后端已落盘
         // 才能清除。此前 fire-and-forget 即清,GET 成功但 POST 失败的窄窗口会让
         // 自定义主题永久丢失(本地镜像随后被无主题键的权威快照重写)。

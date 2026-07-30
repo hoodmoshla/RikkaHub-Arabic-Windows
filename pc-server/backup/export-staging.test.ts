@@ -74,6 +74,7 @@ describe("sanitizeStagingFileName(R4-6)", () => {
   test("Windows 非法字符与控制符清洗为 _,结尾点/空格剥除", () => {
     expect(sanitizeStagingFileName("安卓:截图*2024?.png")).toBe("安卓_截图_2024_.png");
     expect(sanitizeStagingFileName("a<b>c|d.txt")).toBe("a_b_c_d.txt");
+    expect(sanitizeStagingFileName("附件#3.png")).toBe("附件_3.png"); // D4:# 是引用锚分隔符
     expect(sanitizeStagingFileName(`tab${String.fromCharCode(9)}name.txt`)).toBe("tab_name.txt");
     expect(sanitizeStagingFileName("trailing. ")).toBe("trailing");
     expect(sanitizeStagingFileName("normal-file.pdf")).toBe("normal-file.pdf");
