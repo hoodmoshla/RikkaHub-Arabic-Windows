@@ -400,8 +400,10 @@
   "logs": {
     "title": "App logs",
     "subtitle": "Model and search request records, plus app errors from background tasks.",
-    "section_requests": "Request logs",
-    "empty": "No request logs yet",
+    "filter_all": "All",
+    "filter_requests": "Requests",
+    "filter_errors": "Errors",
+    "empty": "No logs yet",
     "copy": "Copy",
     "copied": "{{title}} copied",
     "no_request_body": "No request body recorded",
@@ -819,11 +821,6 @@
     }
   },
   "app_errors": {
-    "title": "App errors",
-    "badge_empty": "None",
-    "subtitle": "Faults and degradations from background tasks such as backup, storage and generation. Cleared on restart.",
-    "empty": "No records. Everything is running fine.",
-    "clear": "Clear",
     "severity_error": "Error",
     "severity_warn": "Warning",
     "severity_info": "Info",

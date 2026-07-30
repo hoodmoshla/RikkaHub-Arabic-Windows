@@ -9,25 +9,66 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "~/components/u
 import { JsonTree, tryParseJson } from "~/components/ui/json-tree";
 import { cn } from "~/lib/utils";
 import { SectionHeader } from "~/components/settings/shared";
+import { useAppErrorsStore } from "~/stores";
+import type { AppErrorDto } from "~/types";
 
 // FE-P1-2 收编:线上契约单源在后端 foundation/types(此前本地手抄漏了 providerId)。
 export type { RequestLog } from "@server/foundation/types";
 import type { RequestLog } from "@server/foundation/types";
 
-export function LogsSection({ logs, onClear, children }: { logs: RequestLog[]; onClear: () => void; children?: React.ReactNode }) {
+type LogFilter = "all" | "requests" | "errors";
+
+// 2026-07-30 用户拍板:请求日志与应用错误完全并列,合入同一条时间线(按时间倒序),
+// 顶部筛选片 全部/请求/错误 决定纳入哪类,默认全部;清空按钮作用于当前筛选可见的类别。
+export function LogsSection({ logs, onClear }: { logs: RequestLog[]; onClear: () => void }) {
   const { t } = useTranslation();
   const [active, setActive] = React.useState<RequestLog | null>(null);
+  const [activeError, setActiveError] = React.useState<AppErrorDto | null>(null);
+  const [filter, setFilter] = React.useState<LogFilter>("all");
+  const errors = useAppErrorsStore((s) => s.errors);
+  const clearErrors = useAppErrorsStore((s) => s.clearErrors);
+  const feed = React.useMemo(() => {
+    const items: Array<{ at: number; log?: RequestLog; error?: AppErrorDto }> = [];
+    if (filter !== "errors") for (const log of logs) items.push({ at: Number(log.at) || 0, log });
+    if (filter !== "requests") for (const error of errors) items.push({ at: error.at, error });
+    items.sort((a, b) => b.at - a.at);
+    return items;
+  }, [logs, errors, filter]);
+  const clearVisible = React.useCallback(() => {
+    if (filter !== "errors") onClear();
+    if (filter !== "requests") void clearErrors();
+  }, [filter, onClear, clearErrors]);
+  const filterOptions: Array<{ id: LogFilter; label: string }> = [
+    { id: "all", label: t("settings:logs.filter_all") },
+    { id: "requests", label: t("settings:logs.filter_requests") },
+    { id: "errors", label: t("settings:logs.filter_errors") },
+  ];
   return (
     <>
       <SectionHeader icon={FileClock} title={t("settings:logs.title")} subtitle={t("settings:logs.subtitle")} />
-      {/* 本页现为"应用日志":先是应用错误折叠条,再是请求日志小节(2026-07-30 用户拍板合并) */}
-      {children ? <div className="-mt-2 mb-4">{children}</div> : null}
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-medium">{t("settings:logs.section_requests")}</span>
-        {logs.length > 0 ? (
+      <div className="-mt-2 mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          {filterOptions.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setFilter(id)}
+              aria-pressed={filter === id}
+              className={cn(
+                "rounded-full border px-3 py-1 text-xs transition",
+                filter === id
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {feed.length > 0 ? (
           <button
             type="button"
-            onClick={onClear}
+            onClick={clearVisible}
             className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs text-destructive transition hover:bg-destructive/10"
           >
             <Trash2 className="size-3.5" />
@@ -36,41 +77,112 @@ export function LogsSection({ logs, onClear, children }: { logs: RequestLog[]; o
         ) : null}
       </div>
       <div className="space-y-2">
-        {logs.length === 0 ? (
+        {feed.length === 0 ? (
           <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
             {t("settings:logs.empty")}
           </div>
         ) : null}
-        {logs.map((log) => (
-          <button
-            key={log.id}
-            type="button"
-            onClick={() => setActive(log)}
-            className="block w-full rounded-lg border bg-card p-3 text-left transition hover:shadow-sm"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-semibold text-primary">{log.method ?? "POST"}</span>
-              <span className={cn("text-xs font-medium", log.ok ? "text-emerald-600" : "text-destructive")}>
-                {log.status}
-              </span>
-            </div>
-            <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{log.url}</div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-              <span>{new Date(log.at).toLocaleString()}</span>
-              <span>{log.durationMs ?? 0}ms</span>
-              <span className="truncate">
-                {log.providerName}
-                {log.kind ? ` · ${log.kind}` : ""}
-              </span>
-            </div>
-            {log.error ? <div className="mt-1 truncate text-xs text-destructive">{log.error}</div> : null}
-          </button>
-        ))}
+        {feed.map((item) =>
+          item.log ? (
+            <RequestLogRow key={`req-${item.log.id}`} log={item.log} onClick={() => setActive(item.log!)} />
+          ) : (
+            <AppErrorRow key={`err-${item.error!.id}`} entry={item.error!} onClick={() => setActiveError(item.error!)} />
+          ),
+        )}
       </div>
       <LogDetailDialog log={active} onClose={() => setActive(null)} />
+      <AppErrorDetailDialog entry={activeError} onClose={() => setActiveError(null)} />
     </>
   );
 }
+
+function RequestLogRow({ log, onClick }: { log: RequestLog; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="block w-full rounded-lg border bg-card p-3 text-left transition hover:shadow-sm"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-primary">{log.method ?? "POST"}</span>
+        <span className={cn("text-xs font-medium", log.ok ? "text-emerald-600" : "text-destructive")}>
+          {log.status}
+        </span>
+      </div>
+      <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{log.url}</div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+        <span>{new Date(log.at).toLocaleString()}</span>
+        <span>{log.durationMs ?? 0}ms</span>
+        <span className="truncate">
+          {log.providerName}
+          {log.kind ? ` · ${log.kind}` : ""}
+        </span>
+      </div>
+      {log.error ? <div className="mt-1 truncate text-xs text-destructive">{log.error}</div> : null}
+    </button>
+  );
+}
+
+const SEVERITY_STYLE: Record<AppErrorDto["severity"], string> = {
+  error: "bg-destructive/10 text-destructive",
+  warn: "bg-amber-500/10 text-amber-600",
+  info: "bg-muted text-muted-foreground",
+};
+
+function AppErrorRow({ entry, onClick }: { entry: AppErrorDto; onClick: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="block w-full rounded-lg border bg-card p-3 text-left transition hover:shadow-sm"
+    >
+      <div className="flex items-center gap-2">
+        <span className={cn("rounded px-1.5 py-0.5 text-xs font-medium", SEVERITY_STYLE[entry.severity])}>
+          {t(`settings:app_errors.severity_${entry.severity}`)}
+        </span>
+        <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">{entry.domain}</span>
+        {entry.count > 1 ? <span className="text-xs text-muted-foreground">×{entry.count}</span> : null}
+        <span className="ml-auto shrink-0 text-xs text-muted-foreground">{new Date(entry.at).toLocaleString()}</span>
+      </div>
+      <div className="mt-1 truncate text-sm">{entry.message}</div>
+    </button>
+  );
+}
+
+function AppErrorDetailDialog({ entry, onClose }: { entry: AppErrorDto | null; onClose: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <Dialog
+      open={entry !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="text-sm">{entry?.message ?? ""}</DialogTitle>
+        </DialogHeader>
+        {entry ? (
+          <div className="space-y-3 text-xs">
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+              <span>{t(`settings:app_errors.severity_${entry.severity}`)}</span>
+              <span className="font-mono">{entry.domain}</span>
+              <span>{new Date(entry.at).toLocaleString()}</span>
+              {entry.count > 1 ? <span>{t("settings:app_errors.merged_count", { count: entry.count })}</span> : null}
+            </div>
+            {entry.detail ? (
+              <pre className="max-h-[400px] overflow-auto rounded-lg border bg-muted/30 p-2 whitespace-pre-wrap">{entry.detail}</pre>
+            ) : (
+              <div className="text-muted-foreground">{t("settings:app_errors.no_detail")}</div>
+            )}
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 
 function LogDetailDialog({ log, onClose }: { log: RequestLog | null; onClose: () => void }) {
   const { t } = useTranslation();

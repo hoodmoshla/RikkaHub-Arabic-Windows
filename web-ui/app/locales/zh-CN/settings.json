@@ -400,8 +400,10 @@
   "logs": {
     "title": "应用日志",
     "subtitle": "模型与搜索等请求的记录，以及后台环节的应用错误。",
-    "section_requests": "请求日志",
-    "empty": "暂无请求日志",
+    "filter_all": "全部",
+    "filter_requests": "请求",
+    "filter_errors": "错误",
+    "empty": "暂无日志记录",
     "copy": "复制",
     "copied": "{{title}} 已复制",
     "no_request_body": "无请求体记录",
@@ -819,11 +821,6 @@
     }
   },
   "app_errors": {
-    "title": "应用错误",
-    "subtitle": "记录备份、存储、生成等后台环节的故障与降级，重启后自动清空。",
-    "badge_empty": "暂无记录",
-    "empty": "暂无记录，应用运行正常。",
-    "clear": "清空记录",
     "severity_error": "错误",
     "severity_warn": "警告",
     "severity_info": "信息",
