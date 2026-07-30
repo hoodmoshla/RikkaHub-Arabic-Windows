@@ -20,10 +20,11 @@ export function LogsSection({ logs, onClear, children }: { logs: RequestLog[]; o
   return (
     <>
       <SectionHeader icon={FileClock} title={t("settings:logs.title")} subtitle={t("settings:logs.subtitle")} />
-      {/* 诊断插槽:应用错误折叠条嵌在标题与日志列表之间,视觉上是本页的一条特殊行 */}
+      {/* 本页现为"应用日志":先是应用错误折叠条,再是请求日志小节(2026-07-30 用户拍板合并) */}
       {children ? <div className="-mt-2 mb-4">{children}</div> : null}
-      {logs.length > 0 ? (
-        <div className="-mt-4 mb-2 flex justify-end">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-medium">{t("settings:logs.section_requests")}</span>
+        {logs.length > 0 ? (
           <button
             type="button"
             onClick={onClear}
@@ -32,8 +33,8 @@ export function LogsSection({ logs, onClear, children }: { logs: RequestLog[]; o
             <Trash2 className="size-3.5" />
             {t("settings:logs.clear")}
           </button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
       <div className="space-y-2">
         {logs.length === 0 ? (
           <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">

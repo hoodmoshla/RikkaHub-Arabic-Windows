@@ -11,7 +11,7 @@
     "memory": "记忆",
     "data": "数据设置",
     "stats": "统计",
-    "logs": "请求日志",
+    "logs": "应用日志",
     "proxy": "代理与端口",
     "about": "关于",
     "donate": "赞助",
@@ -398,8 +398,9 @@
     "no_provider_requests": "暂无请求记录"
   },
   "logs": {
-    "title": "请求日志",
-    "subtitle": "记录每个 provider 请求的端点、状态码、耗时与错误摘要。",
+    "title": "应用日志",
+    "subtitle": "模型与搜索等请求的记录，以及后台环节的应用错误。",
+    "section_requests": "请求日志",
     "empty": "暂无请求日志",
     "copy": "复制",
     "copied": "{{title}} 已复制",

@@ -11,7 +11,7 @@
     "memory": "Memory",
     "data": "Data",
     "stats": "Statistics",
-    "logs": "Request logs",
+    "logs": "App logs",
     "proxy": "Proxy & port",
     "about": "About",
     "donate": "Donate",
@@ -398,8 +398,9 @@
     "no_provider_requests": "No request records"
   },
   "logs": {
-    "title": "Request logs",
-    "subtitle": "Endpoint, status code, duration and error summary for every provider request.",
+    "title": "App logs",
+    "subtitle": "Model and search request records, plus app errors from background tasks.",
+    "section_requests": "Request logs",
     "empty": "No request logs yet",
     "copy": "Copy",
     "copied": "{{title}} copied",
