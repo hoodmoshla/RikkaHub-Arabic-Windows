@@ -709,6 +709,14 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
+            // 专题8续(尺寸记忆跳动):主窗口在 tauri.conf.json 里以 visible:false 创建,
+            // window-state 插件在窗口创建钩子里(先于 setup)已把记忆的尺寸/位置/最大化
+            // 恢复到隐藏窗口上,此刻再显示——首帧即上次几何,消除"默认大小闪现→跳到
+            // 记忆大小"的割裂。放在 setup 最前,保持"启动即见窗"的原有体验。
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.show();
+            }
+
             // 安装器数据目录交接必须先于 spawn_sidecar(内部 resolve_data_dir 决定
             // 传给后端的 RIKKAHUB_PC_DATA_DIR),否则全新安装的首次启动用错目录。
             consume_installer_data_dir_handoff(&handle);

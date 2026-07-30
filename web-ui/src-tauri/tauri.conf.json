@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "visible": false,
         "title": "Rikkahub",
         "url": "http://localhost:8080",
         "width": 1280,
