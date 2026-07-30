@@ -9,6 +9,7 @@
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU16, Ordering},
@@ -130,14 +131,33 @@ fn load_user_config(app: &AppHandle) -> UserConfig {
     }
 }
 
+/// B2(专题8复查):config 的 load-modify-save 无锁并发会互吃字段(后写者整文件覆盖先
+/// 写者的修改),且所有写路径共用同一 tmp 文件,并发写 tmp 会互相截断。所有
+/// "读-改-写"路径(set_data_dir/set_minimize_to_tray/安装器交接合并)持锁完成。
+/// 毒化锁降级为继续持有(配置写入不因某次 panic 永久拒写)。
+static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_config_write() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn save_user_config(app: &AppHandle, cfg: &UserConfig) -> Result<(), String> {
     let path = config_path(app)?;
     let text = serde_json::to_string_pretty(cfg)
         .map_err(|e| format!("Failed to serialize config: {e}"))?;
     // 专题8:temp+rename 原子写。此前 fs::write 直接覆盖,崩溃/断电时写一半,
     // 下次启动解析失败 → data_dir 丢失,应用指回默认数据目录。
+    // B2(专题8复查):rename 前 sync_all 强制数据落盘——否则断电时 rename 元数据可能
+    // 先于文件内容持久化,目标变空/截断文件,原子写形同虚设。
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, text).map_err(|e| format!("Failed to write config: {e}"))?;
+    {
+        let mut file = fs::File::create(&tmp).map_err(|e| format!("Failed to write config: {e}"))?;
+        file.write_all(text.as_bytes())
+            .map_err(|e| format!("Failed to write config: {e}"))?;
+        file.sync_all().map_err(|e| format!("Failed to flush config: {e}"))?;
+    }
     fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit config: {e}"))?;
     Ok(())
 }
@@ -150,16 +170,38 @@ fn save_user_config(app: &AppHandle, cfg: &UserConfig) -> Result<(), String> {
 /// load-modify-save (all other fields survive), then delete the handoff.
 /// Must run before the first resolve_data_dir call so a fresh install's choice takes
 /// effect on the very first launch.
+/// B3(专题6复查):交接文件双格式解码。新版安装器用 FileWriteUTF16LE /BOM 写
+/// (Unicode NSIS 的 FileWrite 按系统 ANSI 码页写,中文路径不是合法 UTF-8);
+/// 无 BOM 则按 UTF-8 尝试(兼容旧版安装器的纯 ASCII 路径)。
+fn decode_handoff_text(bytes: &[u8]) -> Option<String> {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        return String::from_utf16(&units).ok();
+    }
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
 fn consume_installer_data_dir_handoff(app: &AppHandle) {
     let Ok(config_dir) = app.path().app_config_dir() else {
         return;
     };
     let handoff = config_dir.join("installer-data-dir.txt");
-    let Ok(text) = fs::read_to_string(&handoff) else {
+    let Ok(bytes) = fs::read(&handoff) else {
+        return;
+    };
+    let Some(text) = decode_handoff_text(&bytes) else {
+        // B3:解不出来(旧版安装器 ANSI 写的非 ASCII 路径)必须删文件——重试永远
+        // 同样失败,不删则每次启动都重试一遍且文件永久残留。记日志便于排查。
+        eprintln!("[rikkahub] installer handoff file is neither UTF-16LE(BOM) nor UTF-8; discarding");
+        let _ = fs::remove_file(&handoff);
         return;
     };
     let path = text.trim();
     if !path.is_empty() {
+        let _guard = lock_config_write();
         let mut cfg = load_user_config(app);
         if cfg.data_dir.as_deref() != Some(path) {
             cfg.data_dir = Some(path.to_string());
@@ -425,6 +467,7 @@ fn get_data_dir(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn set_data_dir(app: AppHandle, path: String) -> Result<(), String> {
     let trimmed = path.trim().to_string();
+    let _guard = lock_config_write();
     let mut cfg = load_user_config(&app);
     cfg.data_dir = if trimmed.is_empty() { None } else { Some(trimmed) };
     save_user_config(&app, &cfg)
@@ -550,6 +593,7 @@ fn get_minimize_to_tray(app: AppHandle) -> bool {
 
 #[tauri::command]
 fn set_minimize_to_tray(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let _guard = lock_config_write();
     let mut cfg = load_user_config(&app);
     cfg.minimize_to_tray = Some(enabled);
     save_user_config(&app, &cfg)

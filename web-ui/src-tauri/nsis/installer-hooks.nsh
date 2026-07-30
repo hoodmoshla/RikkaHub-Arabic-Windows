@@ -31,6 +31,11 @@ Var RIKKAHUB_DATA_DIR
 Var RIKKAHUB_DATA_TEXT
 Var RIKKAHUB_DATA_BROWSE
 Var RIKKAHUB_EXISTING_DATA_DIR
+; B3(专题6复查):"1" = 用户真的在数据目录页上确认过选择(PageLeave 只在页面展示时运行)。
+; 升级路径里页面被 Abort 跳过时,$RIKKAHUB_DATA_DIR 来自旧配置的 ANSI 回读(中文路径
+; 会乱码),而那条路径下交接文件本就是纯冗余(同值幂等重写)——不写即可彻底断开
+; "乱码预填 → 写回交接 → 壳层合并污染好配置"的链条。
+Var RIKKAHUB_DATA_DIR_FROM_PAGE
 
 Function RikkahubDataDirPageCreate
   ${If} $RIKKAHUB_DATA_DIR == ""
@@ -76,6 +81,7 @@ Function RikkahubDataDirPageLeave
   ${If} $RIKKAHUB_DATA_DIR == ""
     StrCpy $RIKKAHUB_DATA_DIR "$INSTDIR\pc-data"
   ${EndIf}
+  StrCpy $RIKKAHUB_DATA_DIR_FROM_PAGE "1"
 FunctionEnd
 
 Function RikkahubDataDirBrowse
@@ -135,8 +141,18 @@ rded_handoff:
   ClearErrors
   FileOpen $0 "$APPDATA\com.rikkahub.pc\installer-data-dir.txt" r
   IfErrors rded_done
+  ; B3:新版交接文件是 UTF-16LE 带 BOM(FF FE),旧版安装器是 ANSI。嗅探 BOM 分派:
+  ; FileReadUTF16LE 自动跳过 BOM(NSIS 3.0b3+),ANSI 旧文件走原 FileRead 兼容。
+  FileReadByte $0 $2
+  FileReadByte $0 $3
+  FileSeek $0 0 SET
   ClearErrors
-  FileRead $0 $1
+  ${If} $2 = 255
+  ${AndIf} $3 = 254
+    FileReadUTF16LE $0 $1
+  ${Else}
+    FileRead $0 $1
+  ${EndIf}
   FileClose $0
   IfErrors rded_done
   StrCpy $RIKKAHUB_EXISTING_DATA_DIR $1
@@ -149,15 +165,20 @@ FunctionEnd
 ; write user-config.json here: rewriting a JSON we don't fully parse clobbers every
 ; field we don't know about (this is how minimize_to_tray kept resurrecting on updates).
 ;
-; On upgrade where RikkahubDataDirPageCreate skipped the page, $RIKKAHUB_DATA_DIR was
-; copied from the existing config and the shell's merge re-writes the same value
-; (idempotent). On a fresh install we hand off whatever the user picked.
+; B3(专题6复查)两处改动:
+; 1. 只在用户真的在页面上确认过选择时才写交接(FROM_PAGE 门禁)。页面被跳过的升级
+;    路径里配置已持有同值,重写是纯冗余,且 ANSI 回读的中文路径已乱码——写回反而
+;    把好配置改坏(用户会以为数据全丢)。静默安装(/S)不进自定义页,同样不写。
+; 2. FileWriteUTF16LE /BOM 代替 FileWrite:Unicode NSIS 的 FileWrite 按系统 ANSI 码页
+;    写出,壳层按 UTF-8 读,含中文路径必读失败 → 安装器选择被静默忽略且文件永不
+;    删除。壳层侧按 BOM 双格式解码(兼容旧 ANSI 文件),同安装包内两侧天然同版。
 ; No trailing newline — the shell and RikkahubReadExistingDataDir read the line as-is.
 !macro NSIS_HOOK_POSTINSTALL
   ${If} $RIKKAHUB_DATA_DIR != ""
+  ${AndIf} $RIKKAHUB_DATA_DIR_FROM_PAGE == "1"
     CreateDirectory "$APPDATA\com.rikkahub.pc"
     FileOpen $1 "$APPDATA\com.rikkahub.pc\installer-data-dir.txt" w
-    FileWrite $1 '$RIKKAHUB_DATA_DIR'
+    FileWriteUTF16LE /BOM $1 '$RIKKAHUB_DATA_DIR'
     FileClose $1
     CreateDirectory "$RIKKAHUB_DATA_DIR"
   ${EndIf}

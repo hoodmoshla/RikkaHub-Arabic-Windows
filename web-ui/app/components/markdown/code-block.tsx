@@ -168,11 +168,16 @@ let highlightDrainScheduled = false;
 
 function drainOneHighlightJob(): void {
   const job = pendingHighlightJobs.shift();
-  job?.();
-  if (pendingHighlightJobs.length > 0) {
-    scheduleHighlightDrain();
-  } else {
-    highlightDrainScheduled = false;
+  // B1(专题1/2复查):job 抛错也必须重调度/复位,否则 highlightDrainScheduled 永久卡 true,
+  // 后续所有代码块只入队不消费,全局高亮静默失效。单个坏任务不得拖垮队列。
+  try {
+    job?.();
+  } finally {
+    if (pendingHighlightJobs.length > 0) {
+      scheduleHighlightDrain();
+    } else {
+      highlightDrainScheduled = false;
+    }
   }
 }
 
