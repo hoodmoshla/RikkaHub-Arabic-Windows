@@ -21,22 +21,27 @@ let analyticsImgCount = 0;     // 图像生成次数
 // 专题6:使用时长的口径是"用户实际在用"而非"进程在线"。此前 hb 每次 ping 无条件
 // +1,而 ping 只要 server 进程活着就发——托盘常驻/Docker 7×24 部署把"使用时长"灌成
 // "进程在线时长"(dashboard 曾出现日均 645 分钟的荒谬均值)。现在由前端在窗口可见
-// 且聚焦时每 60s 上报活动信标(POST /api/activity → markUiActivity):
-//   am = 按信标间隔累计的活跃分钟数(分钟级精度,dashboard 优先采用)
+// 且聚焦时上报活动信标(POST /api/activity → markUiActivity):
+//   am = 累计的活跃分钟数(分钟级精度,dashboard 优先采用)
 //   hb = 收到过信标的 10 分钟 tick 数(粗粒度,兼容老 dashboard 的 hb×10 估算)
 // 无 UI 交互的空转进程两者恒为 0。
+// C3(专题6复查):升级为前端权威计量——信标携带自上一拍以来的真实聚焦毫秒数,
+// 后端只做钳制累加。旧的"到达间隔≤90s 全额计 + 突发首拍固定记 60s"启发式在
+// 碎片化使用(频繁切窗)下高估可达 2 倍:失焦 30s 再回来,间隔全额入账;聚焦 1 秒
+// 也记满 60s。真实聚焦时长只有前端知道,后端启发式再精也只是猜。
 let lastUiActivityAt = 0;
-let lastBeaconAt = 0;
 let analyticsActiveSeconds = 0;
-export function markUiActivity(): void {
-  const now = Date.now();
-  const gapSec = (now - lastBeaconAt) / 1000;
-  // 信标每 60s 一发:间隔 ≤90s(60s + 网络/定时器抖动余量)视为连续活跃,按实际
-  // 间隔累计;更长间隔说明中间失焦断流,新一拍只记一个信标周期。多标签页同时发
-  // 也成立:间隔越密单拍学分越小,总和仍不超过墙钟时间。
-  analyticsActiveSeconds += gapSec <= 90 ? gapSec : 60;
-  lastBeaconAt = now;
-  lastUiActivityAt = now;
+
+/** 一拍学分钳制(纯函数,供测试)。正常拍 ≤60s+定时器抖动;90s 上限防时钟异常、
+ *  睡眠唤醒后的超长段、或畸形请求膨胀计数。非法输入记 0。 */
+export function beaconCreditSeconds(focusedMs: number): number {
+  if (!Number.isFinite(focusedMs)) return 0;
+  return Math.min(Math.max(focusedMs / 1000, 0), 90);
+}
+
+export function markUiActivity(focusedMs: number): void {
+  analyticsActiveSeconds += beaconCreditSeconds(focusedMs);
+  lastUiActivityAt = Date.now();
 }
 
 // 3.5c-4: 埋点分散在各域模块(会话/工具/媒体),经函数递增计数(let 变量无法跨模块赋值)。

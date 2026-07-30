@@ -24,7 +24,10 @@ export async function handleSystemRoutes(request: Request, url: URL, path: strin
   // 专题6:UI 活动信标——前端在窗口可见且聚焦时定期上报,analytics 据此把"使用
   // 时长"心跳限定在用户实际在用的时间段(托盘常驻/无头部署不再灌时长)。
   if (path === "activity" && request.method === "POST") {
-    markUiActivity();
+    // C3:信标携带自上一拍以来的真实聚焦毫秒数(前端权威计量),后端钳制累加。
+    // 信标是 fire-and-forget 统计信号,畸形 body 按 0 处理,永不报错。
+    const body = await readJson<{ ms?: number }>(request).catch(() => ({}) as { ms?: number });
+    markUiActivity(Number(body?.ms ?? 0));
     return json({ ok: true });
   }
   // 单一应用事件通道(连接预算纪律,详见 api/sse.ts 顶部注释):设置/记忆/错误/列表失效
