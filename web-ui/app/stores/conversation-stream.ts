@@ -422,6 +422,23 @@ export async function ensureFullConversationDetail(id: string): Promise<Conversa
     withSummaryBridge(id, () => {
       applyPolledConversationSnapshot(data);
     });
+    // A2(专题2复查):生成期间 SSE 每帧(33ms)推进本地 updateAt,上面的全量快照在
+    // GET 在途的几十 ms 内几乎必被 R7-3 单调守卫判陈旧拒收 → 旧实现直接返回 null,
+    // 窗口化会话的导出/分享/搜索定位在生成中稳定失败。本函数的目的只是补全
+    // [0, nodesOffset) 的历史前缀——前缀不随生成变化,守卫拒收后从(整体上"陈旧"的)
+    // 全量快照切出前缀,按翻页分片语义拼接(applyConversationNodesPage 内部复检
+    // 紧邻性,窗口在途漂移则 stale 空操作)。缝合点 id 对不上说明窗口结构变了,
+    // 维持失败语义,调用方按数据完整性红线放弃操作。
+    const current = getDetail(id);
+    const offset = current?.nodesOffset ?? 0;
+    if (current && offset > 0 && data.messages[offset]?.id === current.messages[0]?.id) {
+      applyConversationNodesPage(id, {
+        nodes: data.messages.slice(0, offset),
+        stamps: (data.nodeStamps ?? []).slice(0, offset),
+        offset: 0,
+        updateAt: data.updateAt,
+      });
+    }
   } catch (fetchError) {
     console.error("Ensure full conversation detail failed:", fetchError);
     return null;

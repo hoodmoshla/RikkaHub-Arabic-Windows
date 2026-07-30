@@ -166,8 +166,17 @@ function AppContent() {
     if (displaySetting === undefined) return; // settings 尚未就绪(无镜像的首次运行)
     if (dsLanguage === undefined) {
       persistLanguage(i18n.language);
-    } else if (dsLanguage !== i18n.language) {
-      void i18n.changeLanguage(dsLanguage);
+    } else {
+      if (dsLanguage !== i18n.language) {
+        void i18n.changeLanguage(dsLanguage);
+      }
+      // A3 收尾(专题8复查):语言权威已落在后端/镜像,旧 "lang" 键使命完成——清除,
+      // 与主题侧 clearLegacyPrefs 对称(此前只删写入不删旧键,兜底读取永不失效)。
+      try {
+        window.localStorage.removeItem("lang");
+      } catch {
+        /* 隐私模式:残留无害 */
+      }
     }
   }, [displaySetting, dsLanguage]);
   React.useEffect(() => {

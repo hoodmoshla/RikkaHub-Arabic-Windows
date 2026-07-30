@@ -13,7 +13,7 @@ import { refreshSettingsStore } from "~/lib/settings-sync";
 import { safeStringArray } from "~/lib/type-guards";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
-import { useConversationEntry } from "~/stores/conversation-store";
+import { useConversationStore } from "~/stores/conversation-store";
 import type { LorebookProfile, ModeInjectionProfile, QuickMessage } from "~/types";
 import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
@@ -92,10 +92,26 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
   // allowConversationPromptInjection 且当前在某个会话里时，注入/世界书的勾选读写
   // 会话上的同名字段；快捷消息与 Skills 始终是助手级。
   const { id: routeConversationId } = useParams();
-  const conversationEntry = useConversationEntry(routeConversationId ?? null);
-  const conversation = conversationEntry?.detail ?? null;
+  // D1(专题9复查):窄订阅——本组件只消费"会话是否存在 + 两个 id 集"三个标量。
+  // 订阅整个 entry 会让常驻输入区在流式期间随每帧 text_delta 重渲染(entry 每帧重建),
+  // 违反 D 族"流式帧只重渲染正在生成的节点"的纪律。id 集编码成 \n 连接串保持
+  // 引用稳定(id 是 uuid 不含换行),变化时才触发重渲染。
+  const conversationId = routeConversationId ?? null;
+  const conversationExists = useConversationStore((s) =>
+    Boolean(conversationId && s.entries[conversationId]?.detail),
+  );
+  const conversationModeIdsKey = useConversationStore((s) =>
+    conversationId
+      ? safeStringArray(s.entries[conversationId]?.detail?.modeInjectionIds).join("\n")
+      : "",
+  );
+  const conversationLorebookIdsKey = useConversationStore((s) =>
+    conversationId
+      ? safeStringArray(s.entries[conversationId]?.detail?.lorebookIds).join("\n")
+      : "",
+  );
   const useConversationInjections =
-    currentAssistant?.allowConversationPromptInjection === true && conversation != null;
+    currentAssistant?.allowConversationPromptInjection === true && conversationExists;
 
   const [activeTab, setActiveTab] = React.useState<ActiveTab>("quickmessages");
   const [skills, setSkills] = React.useState<SkillProfile[]>([]);
@@ -126,17 +142,17 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
 
   const selectedModeInjectionIds = React.useMemo(
     () =>
-      safeStringArray(
-        useConversationInjections ? conversation?.modeInjectionIds : currentAssistant?.modeInjectionIds,
-      ),
-    [useConversationInjections, conversation?.modeInjectionIds, currentAssistant?.modeInjectionIds],
+      useConversationInjections
+        ? (conversationModeIdsKey ? conversationModeIdsKey.split("\n") : [])
+        : safeStringArray(currentAssistant?.modeInjectionIds),
+    [useConversationInjections, conversationModeIdsKey, currentAssistant?.modeInjectionIds],
   );
   const selectedLorebookIds = React.useMemo(
     () =>
-      safeStringArray(
-        useConversationInjections ? conversation?.lorebookIds : currentAssistant?.lorebookIds,
-      ),
-    [useConversationInjections, conversation?.lorebookIds, currentAssistant?.lorebookIds],
+      useConversationInjections
+        ? (conversationLorebookIdsKey ? conversationLorebookIdsKey.split("\n") : [])
+        : safeStringArray(currentAssistant?.lorebookIds),
+    [useConversationInjections, conversationLorebookIdsKey, currentAssistant?.lorebookIds],
   );
   const selectedQuickMessageIds = React.useMemo(
     () => safeStringArray(currentAssistant?.quickMessageIds),
@@ -289,7 +305,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       else nextIds.delete(id);
       if (useConversationInjections) {
         updateConversationInjectionsMutation.mutate({
-          conversationId: conversation!.id,
+          conversationId: conversationId!,
           modeInjectionIds: Array.from(nextIds),
           key: `mode:${id}`,
         });
@@ -303,7 +319,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
     [
       canUse,
       currentAssistant,
-      conversation,
+      conversationId,
       useConversationInjections,
       modeInjectionIdSet,
       selectedModeInjectionIds,
@@ -320,7 +336,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       else nextIds.delete(id);
       if (useConversationInjections) {
         updateConversationInjectionsMutation.mutate({
-          conversationId: conversation!.id,
+          conversationId: conversationId!,
           lorebookIds: Array.from(nextIds),
           key: `lorebook:${id}`,
         });
@@ -334,7 +350,7 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
     [
       canUse,
       currentAssistant,
-      conversation,
+      conversationId,
       useConversationInjections,
       lorebookIdSet,
       selectedLorebookIds,

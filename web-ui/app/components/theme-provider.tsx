@@ -236,16 +236,21 @@ function clearLegacyPrefs(storageKey: string): void {
 }
 
 /** 乐观更新 store(settings 镜像随之落盘)并 POST 后端;失败静默——本地已生效,
- *  下次改动或权威快照到达后自然校正。 */
-function persistDisplayPatch(patch: Partial<DisplaySetting>): void {
+ *  下次改动或权威快照到达后自然校正。返回 POST 是否成功:常规交互路径不关心,
+ *  一次性迁移路径(A3)必须确认后端落盘才能清 localStorage 旧键。 */
+async function persistDisplayPatch(patch: Partial<DisplaySetting>): Promise<boolean> {
   const store = useSettingsStore.getState();
   const current = store.settings;
   if (current) {
     store.setSettings({ ...current, displaySetting: { ...current.displaySetting, ...patch } });
   }
-  void api.post<{ status: string }>("settings/display", patch).catch(() => {
+  try {
+    await api.post<{ status: string }>("settings/display", patch);
+    return true;
+  } catch {
     /* 离线/后端重启窗口:本地状态已生效,放弃本次落盘 */
-  });
+    return false;
+  }
 }
 
 export function ThemeProvider({
@@ -298,7 +303,13 @@ export function ThemeProvider({
         if (!("themeMode" in ds)) patch.themeMode = legacy.mode;
         if (!("colorTheme" in ds)) patch.colorTheme = legacy.colorTheme;
         if (!("userThemes" in ds)) patch.userThemes = legacy.userThemes;
-        if (Object.keys(patch).length > 0) persistDisplayPatch(patch);
+        // A3(专题8复查):旧键是补传失败时的唯一重试源——必须等 POST 确认后端已落盘
+        // 才能清除。此前 fire-and-forget 即清,GET 成功但 POST 失败的窄窗口会让
+        // 自定义主题永久丢失(本地镜像随后被无主题键的权威快照重写)。
+        if (Object.keys(patch).length > 0) {
+          const persisted = await persistDisplayPatch(patch);
+          if (!persisted || cancelled) return; // 旧键保留,下次启动重试迁移
+        }
         // 首帧初值已按"镜像 → 旧 localStorage"解析,这里无需再 setPrefs;
         // 后端已有的键以快照跟随效果器为准。
         clearLegacyPrefs(storageKey);
@@ -378,12 +389,12 @@ export function ThemeProvider({
 
   const setTheme = useCallback((next: ThemeMode) => {
     setPrefs((prev) => ({ ...prev, mode: next }));
-    persistDisplayPatch({ themeMode: next });
+    void persistDisplayPatch({ themeMode: next });
   }, []);
 
   const setColorTheme = useCallback((next: ColorTheme) => {
     setPrefs((prev) => ({ ...prev, colorTheme: next }));
-    persistDisplayPatch({ colorTheme: next });
+    void persistDisplayPatch({ colorTheme: next });
   }, []);
 
   const addUserTheme = useCallback(
@@ -395,7 +406,7 @@ export function ThemeProvider({
       };
       const next = [...userThemes, created];
       setPrefs((prev) => ({ ...prev, userThemes: next }));
-      persistDisplayPatch({ userThemes: next });
+      void persistDisplayPatch({ userThemes: next });
       return created;
     },
     [userThemes],
@@ -413,7 +424,7 @@ export function ThemeProvider({
           : u,
       );
       setPrefs((prev) => ({ ...prev, userThemes: next }));
-      persistDisplayPatch({ userThemes: next });
+      void persistDisplayPatch({ userThemes: next });
     },
     [userThemes],
   );
@@ -426,7 +437,7 @@ export function ThemeProvider({
       const nextColor = colorTheme === id ? "default" : colorTheme;
       if (nextColor !== colorTheme) patch.colorTheme = nextColor;
       setPrefs((prev) => ({ ...prev, userThemes: next, colorTheme: nextColor }));
-      persistDisplayPatch(patch);
+      void persistDisplayPatch(patch);
     },
     [userThemes, colorTheme],
   );

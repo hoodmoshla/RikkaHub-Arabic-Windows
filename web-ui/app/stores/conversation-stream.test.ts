@@ -518,4 +518,71 @@ describe("窗口化翻页与全量确保(专题2 I-2)", () => {
     streams[0]!.emit("snapshot", { type: "snapshot", seq: 1, conversation: windowedSnapshot(), serverTime: Date.now() } as ConversationStreamEvent);
     expect(await ensureFullConversationDetail("a")).toBeNull();
   });
+
+  // A2 回归(复查):生成期间 SSE 每帧推进本地 updateAt,全量 REST 快照必被 R7-3
+  // 单调守卫判陈旧拒收——旧实现导出/分享在生成中稳定失败。历史前缀不随生成变化,
+  // 守卫拒收后应从全量快照切前缀按分片语义拼接,保留(更新的)本地窗口。
+  test("ensureFullConversationDetail:本地比全量快照新(生成中)→ 拼前缀成功,本地窗口保留", async () => {
+    installConversationStreamTestSeam({
+      transport: fakeTransport,
+      fetchConversationSnapshot: () =>
+        Promise.resolve(
+          conversation("a", {
+            messages: [node("n0", "零"), node("n1", "一"), node("n2", "二(陈旧)")],
+            nodesOffset: 0,
+            nodeStamps: ["s0", "s1", "s2-old"],
+            updateAt: 100, // 早于本地 200 → 单调守卫拒收整体
+          }),
+        ),
+    });
+    acquireConversationStream("a");
+    streams[0]!.emit("snapshot", {
+      type: "snapshot",
+      seq: 1,
+      conversation: conversation("a", {
+        messages: [node("n2", "二(生成中,较新)")],
+        nodesOffset: 2,
+        nodeStamps: ["s0", "s1", "s2"],
+        updateAt: 200,
+      }),
+      serverTime: Date.now(),
+    } as ConversationStreamEvent);
+
+    const full = await ensureFullConversationDetail("a");
+    expect(full).not.toBeNull();
+    expect(full!.nodesOffset).toBe(0);
+    expect(full!.messages.map((n) => n.id)).toEqual(["n0", "n1", "n2"]);
+    // 本地窗口(更新的生成中内容)保留,不被陈旧全量覆盖
+    expect(full!.messages[2]!.messages[0]!.parts).toEqual([{ type: "text", text: "二(生成中,较新)" }]);
+    expect(full!.updateAt).toBe(200);
+  });
+
+  test("ensureFullConversationDetail:缝合点 id 对不上(窗口结构漂移)→ 返回 null 不硬拼", async () => {
+    installConversationStreamTestSeam({
+      transport: fakeTransport,
+      fetchConversationSnapshot: () =>
+        Promise.resolve(
+          conversation("a", {
+            messages: [node("n0", "零"), node("n1", "一"), node("nX", "结构已变")],
+            nodesOffset: 0,
+            nodeStamps: ["s0", "s1", "sX"],
+            updateAt: 100,
+          }),
+        ),
+    });
+    acquireConversationStream("a");
+    streams[0]!.emit("snapshot", {
+      type: "snapshot",
+      seq: 1,
+      conversation: conversation("a", {
+        messages: [node("n2", "二")],
+        nodesOffset: 2,
+        nodeStamps: ["s0", "s1", "s2"],
+        updateAt: 200,
+      }),
+      serverTime: Date.now(),
+    } as ConversationStreamEvent);
+
+    expect(await ensureFullConversationDetail("a")).toBeNull();
+  });
 });

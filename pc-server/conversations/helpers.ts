@@ -2,7 +2,7 @@
 // 纪律：纯搬迁自 server.ts（阶段 5.3f），行为不变；原私有函数为跨模块使用统一补 export。
 
 import type { Assistant, Conversation, JsonValue, Message, MessageNode, MessagePart } from "../foundation/types";
-import { estimateTokens, id, isRecord, message, reasoningFromParts, textFromParts } from "../foundation/utils";
+import { estimateTokens, getStringArray, id, isRecord, message, reasoningFromParts, textFromParts } from "../foundation/utils";
 import { state } from "../persistence/json-store";
 import { broadcastList, dropConversationSse } from "../api/sse";
 import { deletePcConversations, flushConvDirtyNow, getConversation, persistConversation, selectedConversationMessages } from "./index";
@@ -46,6 +46,17 @@ export function findAssistant(idValue = state.settings.assistantId) {
   return findAssistantCore(state.settings.assistants, idValue);
 }
 
+/** A1(专题9复查):开启"会话级注入绑定"的助手,新会话从助手级播种生效集。
+ *  PC 会话在首条消息才创建(不提前建,防死会话),home 页的勾选只能落在助手级;
+ *  而 override 语义是"会话集(含空集)完全取代助手级"(对齐安卓 collectInjections),
+ *  不播种则新会话诞生即空集,用户在新聊天页的勾选静默失效。安卓无此窗口
+ *  (ChatPage 始终持有会话对象,勾选从第一刻就写会话级)。 */
+export function seedConversationInjectionBinding(conversation: Conversation, assistant: Assistant): void {
+  if (assistant.allowConversationPromptInjection !== true) return;
+  conversation.modeInjectionIds = getStringArray(assistant.modeInjectionIds);
+  conversation.lorebookIds = getStringArray(assistant.lorebookIds);
+}
+
 export function ensureConversation(idValue: string) {
   let conversation = getConversation(idValue);
   if (!conversation) {
@@ -62,6 +73,7 @@ export function ensureConversation(idValue: string) {
       createAt: now,
       updateAt: now,
     };
+    seedConversationInjectionBinding(conversation, assistant);
     registerConversation(conversation); // 新建:内存即权威,防 checkout 从活库读空树反向覆盖
     // 1.2.6:新建会话 persist 进活库(建会话行),否则后续流式 upsert 该会话的节点时
     // FK 失败(pc_message_node.conversation_id 引用 pc_conversation.id),且流式中崩溃

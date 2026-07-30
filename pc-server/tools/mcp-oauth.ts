@@ -21,6 +21,11 @@ export interface McpOAuthStateRecord {
   enabled?: boolean;
   clientId?: string | null;
   clientSecret?: string | null;
+  /** A4(专题9复查):DCR 注册时固化的回调地址。仅在我们自己动态注册/授权成功时写入;
+   *  端口顺延/手改后与当前地址不一致时用于触发自动重注册(见 startMcpOAuth)。
+   *  预配置 clientId 的服务器不写此字段(不能擅自换身份)。安卓侧无此字段,
+   *  其 Json 配置 ignoreUnknownKeys,跨端备份透传无害。 */
+  redirectUri?: string | null;
   authorizationEndpoint?: string | null;
   tokenEndpoint?: string | null;
   registrationEndpoint?: string | null;
@@ -283,6 +288,23 @@ function sweepExpiredPending(): void {
 
 /** 发起授权:发现元数据 → (必要时)动态注册 → 生成 PKCE/state → 返回浏览器授权 URL。
  *  中间产物(端点/clientId)先落盘,令牌在回调完成后落盘。 */
+/** A4(专题9复查):端口漂移防护决策。DCR 把 redirect_uris 固化成注册时的
+ *  localhost:<端口>,而本项目端口会被占用顺延/可手改——旧 clientId 带旧回调地址,
+ *  授权服务器会以 invalid redirect_uri 拒绝,且报错发生在浏览器侧、应用内无提示。
+ *  回调地址已变时:支持动态注册就换新身份重注册(旧授权作废属预期);不支持则
+ *  应用内明确报错。existing.redirectUri 缺失 = 预配置 clientId 或本字段引入前的
+ *  旧授权状态 → 不动(不能擅自换预配置身份;旧状态在下次授权成功时自愈,见回调)。 */
+export function redirectUriDriftAction(
+  existing: McpOAuthStateRecord | null,
+  currentRedirectUri: string,
+  hasRegistrationEndpoint: boolean,
+): "keep" | "reregister" | "fail" {
+  const clientId = existing?.clientId ?? null;
+  const registered = existing?.redirectUri ?? null;
+  if (!clientId || !registered || registered === currentRedirectUri) return "keep";
+  return hasRegistrationEndpoint ? "reregister" : "fail";
+}
+
 export async function startMcpOAuth(serverId: string, redirectUri: string): Promise<{ authorizationUrl: string }> {
   sweepExpiredPending();
   const server = findServer(serverId);
@@ -306,11 +328,25 @@ export async function startMcpOAuth(serverId: string, redirectUri: string): Prom
 
   let clientId = existing?.clientId ?? null;
   let clientSecret = existing?.clientSecret ?? null;
+  const registeredRedirectUri = existing?.redirectUri ?? null;
+  const drift = redirectUriDriftAction(existing, redirectUri, Boolean(metadata.registration_endpoint));
+  if (drift === "fail") {
+    throw new Error(
+      `应用回调地址已变化(注册时 ${registeredRedirectUri},当前 ${redirectUri}),`
+        + "且授权服务器不支持动态注册。请清除授权后重试,或将应用端口改回原值",
+    );
+  }
+  if (drift === "reregister") {
+    clientId = null;
+    clientSecret = null;
+  }
+  let registeredNow = false;
   if (!clientId) {
     if (!metadata.registration_endpoint) throw new Error("授权服务器不支持动态注册,且未预配置 client_id");
     const registration = await registerClient(metadata.registration_endpoint, serverName, redirectUri, scope);
     clientId = registration.clientId;
     clientSecret = registration.clientSecret;
+    registeredNow = true;
   }
 
   const pkce = generatePkce();
@@ -321,6 +357,8 @@ export async function startMcpOAuth(serverId: string, redirectUri: string): Prom
     enabled: true,
     clientId,
     clientSecret,
+    // 本次新注册才可断言注册地址;沿用旧 clientId 时保留旧记录(缺失即保持缺失)。
+    redirectUri: registeredNow ? redirectUri : registeredRedirectUri,
     authorizationEndpoint,
     tokenEndpoint,
     registrationEndpoint: metadata.registration_endpoint ?? null,
@@ -385,6 +423,9 @@ export async function completeMcpOAuth(params: {
     enabled: true,
     clientId: pending.clientId,
     clientSecret: pending.clientSecret,
+    // A4:授权走通即实证该回调地址与此 clientId 匹配——落盘供漂移检测,
+    // 顺带把本字段引入前的旧授权状态自愈成可检测形态。
+    redirectUri: pending.redirectUri,
     authorizationEndpoint: pending.authorizationEndpoint,
     tokenEndpoint: pending.tokenEndpoint,
     registrationEndpoint: pending.registrationEndpoint,
