@@ -109,10 +109,12 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
       />
       <div className="grid gap-4 md:grid-cols-5">
         {[
+          // 用户拍板(2026-07-30):撤掉"总对话数"腾出空间,命中率独立成卡保两位小数
+          // ——合并格"505.1k / 20%"会在卡内换行。顺序:启动、消息、输入、输出、命中率。
           {
-            label: t("settings:stats.t_conversations"),
-            value: compactNumber(stats.totals.conversations),
-            full: stats.totals.conversations.toLocaleString(),
+            label: t("settings:stats.t_launches"),
+            value: compactNumber(stats.totals.launchCount),
+            full: stats.totals.launchCount.toLocaleString(),
           },
           {
             label: t("settings:stats.t_messages"),
@@ -120,21 +122,11 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
             full: stats.totals.messages.toLocaleString(),
           },
           {
-            // 全局缓存命中率合并格:分母用厂商真实回报的输入量(排除本地估算,
-            // 其 cached 恒 0 会稀释比例);无命中数据时只显示输入量。
-            label: t("settings:stats.t_input_tokens_cache"),
-            value: (() => {
-              const cached = stats.totals.cachedTokens ?? 0;
-              const denominator = stats.totals.reportedInputTokens ?? stats.totals.inputTokens;
-              return cached > 0 && denominator > 0
-                ? `${compactNumber(stats.totals.inputTokens)} / ${Math.min(100, Math.round((cached / denominator) * 100))}%`
-                : compactNumber(stats.totals.inputTokens);
-            })(),
-            // D3(复查):悬停口径写明——展示值含本地估算,命中率分母只用厂商真实回报。
-            full: t("settings:stats.t_input_tokens_cache_tip", {
+            label: t("settings:stats.t_input_tokens"),
+            value: compactNumber(stats.totals.inputTokens),
+            // D3(复查):悬停写明展示值含本地估算。
+            full: t("settings:stats.t_input_tokens_tip", {
               input: stats.totals.inputTokens.toLocaleString(),
-              cached: (stats.totals.cachedTokens ?? 0).toLocaleString(),
-              reported: (stats.totals.reportedInputTokens ?? stats.totals.inputTokens).toLocaleString(),
             }),
           },
           {
@@ -143,9 +135,21 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
             full: stats.totals.outputTokens.toLocaleString(),
           },
           {
-            label: t("settings:stats.t_launches"),
-            value: compactNumber(stats.totals.launchCount),
-            full: stats.totals.launchCount.toLocaleString(),
+            // 全局缓存命中率:分母用厂商真实回报的输入量(排除本地估算,其命中恒 0
+            // 会稀释比例);从未有厂商回报时显示占位符。
+            label: t("settings:stats.t_cache_hit_rate"),
+            value: (() => {
+              const cached = stats.totals.cachedTokens ?? 0;
+              const denominator = stats.totals.reportedInputTokens ?? 0;
+              return denominator > 0
+                ? `${Math.min(100, (cached / denominator) * 100).toFixed(2)}%`
+                : "—";
+            })(),
+            // D3(复查):悬停口径写明命中率分母只用厂商真实回报。
+            full: t("settings:stats.t_cache_hit_rate_tip", {
+              cached: (stats.totals.cachedTokens ?? 0).toLocaleString(),
+              reported: (stats.totals.reportedInputTokens ?? 0).toLocaleString(),
+            }),
           },
         ].map(({ label, value, full }) => (
           <div key={label} className="rounded-lg border bg-card p-4" title={full}>
