@@ -24,6 +24,7 @@ import { listSkills } from "../../tools/skills";
 import { testSearchService } from "../../search/index";
 import { callImageGeneration } from "../../media/image-gen";
 import { memoryStore } from "../../memory/index";
+import { invalidateContextSnapshots } from "../../inference-engine/context-snapshots";
 import { addLog } from "../logs";
 import { error, json, readJson, sseHeaders } from "../request";
 import { broadcastMemoryUpdate, sseFrame } from "../sse";
@@ -142,6 +143,7 @@ export async function handleSettingsRoutes(request: Request, url: URL, path: str
     // M4:默认保留记忆为孤儿(防误删助手导致记忆连带丢失);仅 deleteMemories=true 时连带清。
     if (deleteMemories) {
       memoryStore.deleteMemoriesByAssistant(idValue);
+      invalidateContextSnapshots();
       broadcastMemoryUpdate();
     }
     updateSettings({

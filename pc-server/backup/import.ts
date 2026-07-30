@@ -12,6 +12,7 @@ import { dataDir, filesDir, skillsDir, statePath } from "../foundation/paths";
 import { tempDir } from "../foundation/platform";
 import { CONVERSATIONS_SQLITE_MIGRATION, MEMORY_FILE_SPLIT_MIGRATION, saveState, setState, state } from "../persistence/json-store";
 import { GLOBAL_MEMORY_ID, memoryStore } from "../memory/index";
+import { invalidateContextSnapshots } from "../inference-engine/context-snapshots";
 import { clearConvDirtyState, DEFAULT_ASSISTANT_ID, getConversationsDb, loadAllConversationsFromDb, resetConversationsDbTo, snapshotConversationsDbBeforeImport } from "../conversations";
 import { reportError } from "../observability/app-errors";
 import { hashFileSha256, rewriteAndroidFileUrlsDeep, rewritePcFileUrlsDeep } from "./file-refs";
@@ -111,6 +112,7 @@ function captureRestoreRollbackPoint(): (err: unknown) => void {
     try {
       setState(stateSnapshot);
       memoryStore.importFlatMemories(memorySnapshot, "replace");
+      invalidateContextSnapshots();
       saveState();
       broadcastSettings();
       reportError("backup", "error", "备份恢复失败，已回滚到导入前状态", err, "restore_rolled_back");
@@ -166,6 +168,7 @@ export function applyBackupPayload(body: { state?: Partial<State>; skills?: unkn
     // pending 一并清空(备份不含 pending,恢复即丢弃待确认队列——前端应在恢复前弹警告)。
     const incomingMemories = Array.isArray(state.memories) ? state.memories : [];
     memoryStore.importFlatMemories(incomingMemories, "replace");
+    invalidateContextSnapshots();
     delete state.memories;
     delete state.nextMemoryId;
     importSkills(body.skills);
@@ -250,6 +253,7 @@ function applyPcBackupFromExtractDir(extractDir: string, pcBackupPath: string): 
     // state.memories;交给 memoryStore 接管(replace),然后从 state 移除。
     const incomingMemories = Array.isArray(state.memories) ? state.memories : [];
     memoryStore.importFlatMemories(incomingMemories, "replace");
+    invalidateContextSnapshots();
     delete state.memories;
     delete state.nextMemoryId;
     settingsImported = true;
@@ -907,6 +911,7 @@ function importAndroidConversations(extractDir: string, dbPath: string, androidF
         updatedAt: 0,
       }));
       memoryStore.importFlatMemories(flat, "merge");
+      invalidateContextSnapshots();
     } catch (err) {
       console.warn("[import] failed to read MemoryEntity table:", err);
     }

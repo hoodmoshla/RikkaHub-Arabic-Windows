@@ -99,6 +99,7 @@ export function provider(input: Partial<Provider> & Pick<Provider, "id" | "name"
     includeHistoryReasoning: true,
     promptCaching: false,
     promptCacheTtl: "5m",
+    promptCacheKey: false,
     testPassed: input.name === "RikkaHub" || input.id === "a8d2d463-e8c0-41f2-b89e-f5eb8e716cce",
     models: [],
     balanceOption: { enabled: false, apiPath: "/credits", resultPath: "data.total_usage" },

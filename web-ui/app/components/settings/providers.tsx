@@ -904,34 +904,37 @@ export function ProvidersSection({
                 {t("settings:providers.models_url", { url: modelListEndpointPreview(draft) })}
               </span>
             </label>
-            <div className="space-y-2 rounded-md border px-3 py-2">
-              <span className="text-sm font-medium">Chat Completions Path</span>
-              <Input
-                disabled={kind !== "openai" || draft.useResponseApi === true}
-                value={
-                  textValue(draft.chatCompletionsPath) ||
-                  defaultPathForKind(kind, draft.useResponseApi === true)
-                }
-                onChange={(event) => patchDraft({ chatCompletionsPath: event.target.value })}
-              />
-            </div>
-            <div className="flex items-end justify-between gap-3 rounded-md border px-3 py-2">
-              <div>
-                <div className="text-sm font-medium">Response API</div>
-                <div className="text-xs text-muted-foreground">
-                  {t("settings:providers.response_api_desc")}
+            <div className="grid gap-x-6 gap-y-3 rounded-md border px-3 py-3 md:col-span-2 md:grid-cols-2">
+              <label className="space-y-2">
+                <span className="text-sm font-medium">Chat Completions Path</span>
+                <Input
+                  disabled={kind !== "openai" || draft.useResponseApi === true}
+                  value={
+                    textValue(draft.chatCompletionsPath) ||
+                    defaultPathForKind(kind, draft.useResponseApi === true)
+                  }
+                  onChange={(event) => patchDraft({ chatCompletionsPath: event.target.value })}
+                />
+              </label>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <div className="text-sm font-medium">Response API</div>
+                  <div className="text-xs leading-relaxed text-muted-foreground">
+                    {t("settings:providers.response_api_desc")}
+                  </div>
                 </div>
+                <Switch
+                  className="shrink-0"
+                  disabled={kind !== "openai"}
+                  checked={draft.useResponseApi === true}
+                  onCheckedChange={(useResponseApi) =>
+                    patchDraft({
+                      useResponseApi,
+                      chatCompletionsPath: defaultPathForKind("openai", useResponseApi),
+                    })
+                  }
+                />
               </div>
-              <Switch
-                disabled={kind !== "openai"}
-                checked={draft.useResponseApi === true}
-                onCheckedChange={(useResponseApi) =>
-                  patchDraft({
-                    useResponseApi,
-                    chatCompletionsPath: defaultPathForKind("openai", useResponseApi),
-                  })
-                }
-              />
             </div>
             {kind === "openai" ? (
               <div className="flex items-start justify-between gap-3 rounded-md border px-3 py-3 md:col-span-2">
@@ -947,6 +950,21 @@ export function ProvidersSection({
                   onCheckedChange={(includeHistoryReasoning) =>
                     patchDraft({ includeHistoryReasoning })
                   }
+                />
+              </div>
+            ) : null}
+            {kind === "openai" ? (
+              <div className="flex items-start justify-between gap-3 rounded-md border px-3 py-3 md:col-span-2">
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="text-sm font-medium">{t("settings:providers.prompt_cache_key_title")}</div>
+                  <div className="text-xs leading-relaxed text-muted-foreground">
+                    {t("settings:providers.prompt_cache_key_desc")}
+                  </div>
+                </div>
+                <Switch
+                  className="mt-1 shrink-0"
+                  checked={draft.promptCacheKey === true}
+                  onCheckedChange={(promptCacheKey) => patchDraft({ promptCacheKey })}
                 />
               </div>
             ) : null}

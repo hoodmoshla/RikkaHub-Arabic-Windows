@@ -6,7 +6,7 @@ import type { ApiMessage, Assistant, Conversation, JsonValue, Message, Model } f
 import { applyPlaceholders, cloneJson, getStringArray, message, renderTemplate, textFromParts } from "../foundation/utils";
 import { state } from "../persistence/json-store";
 import { activePromptInjections as activePromptInjectionsCore, applyMessageTemplateToParts, applyPromptInjectionsToMessages, templateVariables as templateVariablesCore } from "../assistants";
-import { buildMemoryPrompt, buildRecentChatsPrompt } from "../memory";
+import { frozenContextBlocks } from "./context-snapshots";
 import { buildSearchContext } from "../search";
 import { findModel } from "../model-providers";
 import { listSkills } from "../tools/skills";
@@ -140,17 +140,16 @@ function conversationTransformedMessages(conversation: Conversation, assistant: 
     ? String(conversation.systemPrompt ?? "").trim()
     : "";
   const effectiveSystemPrompt = conversationSystemPrompt || assistant.systemPrompt.trim();
-  // 专题11-P1-2:system 各区块按“稳定→易变”排列,把变化频率高的段落挪到末尾,
-  // 前缀缓存失效范围最小化:提示词/Skills/搜索(仅随配置变) → 记忆(记忆工具写入时变)
-  // → 最近会话(任何其他会话被使用都会变)。
+  // 专题11-P1-2:system 各区块按“稳定→易变”排列。专题12 进一步把记忆/最近会话
+  // 冻结为会话级快照(context-snapshots.ts)——它们在 system 里一变,后面整个会话
+  // 历史的前缀缓存都会失效;冻结后同一会话内 system 逐字节不变。
   const systemParts = [
     effectiveSystemPrompt
       ? renderTemplate(effectiveSystemPrompt, templateVariables("", "system", assistant, picked.model))
       : "",
     buildSkillsContext(assistant),
     buildSearchContext(),
-    buildMemoryPrompt(assistant),
-    buildRecentChatsPrompt(assistant, conversation.id),
+    ...frozenContextBlocks(assistant, conversation.id),
   ].filter(Boolean);
 
   const internalMessages: Message[] = [];

@@ -248,6 +248,8 @@ export interface ProviderProfile {
   models: ProviderModel[];
   promptCaching?: boolean;
   promptCacheTtl?: "5m" | "1h";
+  /** OpenAI providers only — 请求附带 prompt_cache_key=会话ID 提高官方端缓存命中(专题12),默认关。 */
+  promptCacheKey?: boolean;
   /** OpenAI providers only — 是否在历史回放里把 reasoning_content 回传给上游（默认开启）。对齐安卓 e63d017。 */
   includeHistoryReasoning?: boolean;
   [key: string]: unknown;

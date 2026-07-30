@@ -175,6 +175,7 @@ export async function callProvider(
       ...(assistant.maxTokens != null ? { max_output_tokens: assistant.maxTokens } : {}),
       ...(reasoning ? { reasoning } : {}),
       ...(include ? { include } : {}),
+      ...(providerItem.promptCacheKey === true ? { prompt_cache_key: conversation.id } : {}),
       tools: [
         ...functionTools.map((tool: any) => ({
           type: "function",
@@ -199,6 +200,7 @@ export async function callProvider(
     ...reasoningPayloadForProvider(providerItem, picked.model, assistant.reasoningLevel),
     tools: tools.length ? tools : undefined,
     tool_choice: tools.length ? "auto" : undefined,
+    ...(providerItem.promptCacheKey === true ? { prompt_cache_key: conversation.id } : {}),
   };
   return fetchOpenAiText(url, headers, applyCustomBody(body, assistant, picked.model), providerItem, assistant, signal, hooks);
 }
@@ -265,6 +267,7 @@ export async function callProviderStreaming(
       ...(assistant.maxTokens != null ? { max_output_tokens: assistant.maxTokens } : {}),
       ...(reasoning ? { reasoning } : {}),
       ...(include ? { include } : {}),
+      ...(providerItem.promptCacheKey === true ? { prompt_cache_key: conversation.id } : {}),
       tools: responseTools.length ? responseTools : undefined,
     }, assistant, picked.model);
     return fetchOpenAiTextStreaming(url, headers, body, providerItem, assistant, hooks, ctx.signal);
@@ -279,6 +282,7 @@ export async function callProviderStreaming(
     ...reasoningPayloadForProvider(providerItem, picked.model, assistant.reasoningLevel),
     tools: tools.length ? tools : undefined,
     tool_choice: tools.length ? "auto" : undefined,
+    ...(providerItem.promptCacheKey === true ? { prompt_cache_key: conversation.id } : {}),
     stream: true,
     stream_options: hostOfProvider(providerItem) === "api.mistral.ai" ? undefined : { include_usage: true },
   }, assistant, picked.model);

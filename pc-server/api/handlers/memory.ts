@@ -5,6 +5,7 @@ import { saveState, state } from "../../persistence/json-store";
 import { memoryStore } from "../../memory/index";
 import { error, json, readJson } from "../request";
 import { broadcastMemoryUpdate, broadcastSettings } from "../sse";
+import { invalidateContextSnapshots } from "../../inference-engine/context-snapshots";
 import { updateSettings } from "../../app-config";
 
 export async function handleMemoryRoutes(request: Request, _url: URL, path: string): Promise<Response | null> {
@@ -18,6 +19,7 @@ export async function handleMemoryRoutes(request: Request, _url: URL, path: stri
     const body = await readJson<{ items?: Array<{ pendingId: string; action: "global" | "assistant" | "discard"; content?: string }> }>(request);
     if (!Array.isArray(body?.items)) return error("items array is required", 400);
     const results = await memoryStore.resolvePendingBatch(body.items);
+    invalidateContextSnapshots();
     broadcastMemoryUpdate();
     return json({ status: "ok", results });
   }
@@ -32,6 +34,7 @@ export async function handleMemoryRoutes(request: Request, _url: URL, path: stri
       }
       const result = await memoryStore.resolvePending(pendingId, action, body.content);
       if (!result.resolved) return error(`Pending ${pendingId} not found`, 404);
+      invalidateContextSnapshots();
       broadcastMemoryUpdate();
       return json({ status: "ok", memory: result.memory });
     }
@@ -67,6 +70,7 @@ export async function handleMemoryRoutes(request: Request, _url: URL, path: stri
     const memory = Number.isInteger(Number(body.id)) && Number(body.id) > 0
       ? memoryStore.updateMemory(Number(body.id), content)
       : memoryStore.addMemory({ scope: "global", content, source: "manual" });
+    invalidateContextSnapshots();
     broadcastMemoryUpdate();
     return json({ status: "ok", memory });
   }
@@ -75,6 +79,7 @@ export async function handleMemoryRoutes(request: Request, _url: URL, path: stri
     if (m && request.method === "DELETE") {
       const memoryId = Number(m[1]);
       if (!memoryStore.deleteMemory(memoryId)) return error(`Memory record #${memoryId} not found`, 404);
+      invalidateContextSnapshots();
       broadcastMemoryUpdate();
       return json({ status: "deleted" });
     }
@@ -93,6 +98,7 @@ export async function handleMemoryRoutes(request: Request, _url: URL, path: stri
       const memory = Number.isInteger(Number(body.id)) && Number(body.id) > 0
         ? memoryStore.updateMemory(Number(body.id), content)
         : memoryStore.addMemory({ scope: "assistant", assistantId, content, source: "manual" });
+      invalidateContextSnapshots();
       broadcastMemoryUpdate();
       return json({ status: "ok", memory });
     }
@@ -102,6 +108,7 @@ export async function handleMemoryRoutes(request: Request, _url: URL, path: stri
     if (m && request.method === "DELETE") {
       const memoryId = Number(m[2]);
       if (!memoryStore.deleteMemory(memoryId)) return error(`Memory record #${memoryId} not found`, 404);
+      invalidateContextSnapshots();
       broadcastMemoryUpdate();
       return json({ status: "deleted" });
     }
@@ -114,6 +121,7 @@ export async function handleMemoryRoutes(request: Request, _url: URL, path: stri
     } catch (err) {
       return error(String(err instanceof Error ? err.message : String(err)), 400);
     }
+    invalidateContextSnapshots();
     broadcastMemoryUpdate();
     return json({ status: "ok" });
   }
@@ -124,6 +132,7 @@ export async function handleMemoryRoutes(request: Request, _url: URL, path: stri
     } catch (err) {
       return error(String(err instanceof Error ? err.message : String(err)), 400);
     }
+    invalidateContextSnapshots();
     broadcastMemoryUpdate();
     return json({ status: "ok" });
   }

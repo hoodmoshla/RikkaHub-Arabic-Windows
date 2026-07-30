@@ -46,6 +46,10 @@ export interface Provider {
   includeHistoryReasoning?: boolean;
   promptCaching?: boolean;
   promptCacheTtl?: "5m" | "1h";
+  // 专题12:OpenAI 系请求附带 prompt_cache_key=会话ID,官方端据此把同一会话路由到
+  // 同一缓存分片提高命中率(codex 同款)。第三方兼容端可能不识别该字段报 400,
+  // 故做成 provider 级开关,默认关。
+  promptCacheKey?: boolean;
   testPassed?: boolean;
   testPassedAt?: number;
   models: Model[];
