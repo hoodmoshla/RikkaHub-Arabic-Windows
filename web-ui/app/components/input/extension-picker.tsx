@@ -280,6 +280,10 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
       ? updateConversationInjectionsMutation.variables?.key
       : undefined;
 
+  // A1复检修正:助手级端点(settings/assistant/injections)是三数组整体覆盖,payload 的
+  // mode/lorebook 兜底值必须恒取"助手级"现值。会话级绑定开启时 selected* 是会话的集,
+  // 若沿用,在会话里勾一个快捷消息就会把本会话的注入集写回助手默认——播种后助手
+  // 默认是所有未来新会话的种子,污染会扩散。开关关闭时两者等值,行为不变。
   const buildPayload = (overrides: {
     modeInjectionIds?: string[];
     lorebookIds?: string[];
@@ -288,8 +292,10 @@ export function ExtensionPickerButtonImpl({ disabled = false, className }: Exten
     assistantId: currentAssistant!.id,
     modeInjectionIds:
       overrides.modeInjectionIds ??
-      selectedModeInjectionIds.filter((id) => modeInjectionIdSet.has(id)),
-    lorebookIds: overrides.lorebookIds ?? selectedLorebookIds.filter((id) => lorebookIdSet.has(id)),
+      safeStringArray(currentAssistant?.modeInjectionIds).filter((id) => modeInjectionIdSet.has(id)),
+    lorebookIds:
+      overrides.lorebookIds ??
+      safeStringArray(currentAssistant?.lorebookIds).filter((id) => lorebookIdSet.has(id)),
     quickMessageIds:
       overrides.quickMessageIds ??
       selectedQuickMessageIds.filter((id) => quickMessageIdSet.has(id)),
