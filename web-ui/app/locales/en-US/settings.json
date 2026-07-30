@@ -819,8 +819,9 @@
   },
   "app_errors": {
     "title": "App errors",
-    "subtitle": "Degradations and failures across generation, backup and persistence (cleared on restart).",
-    "empty": "No app errors yet",
+    "badge_empty": "None",
+    "subtitle": "Faults and degradations from background tasks such as backup, storage and generation. Cleared on restart.",
+    "empty": "No records. Everything is running fine.",
     "clear": "Clear",
     "severity_error": "Error",
     "severity_warn": "Warning",

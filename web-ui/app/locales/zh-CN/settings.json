@@ -819,8 +819,9 @@
   },
   "app_errors": {
     "title": "应用错误",
-    "subtitle": "生成、备份、持久化等环节的降级与故障记录(重启后清空)。",
-    "empty": "暂无应用错误",
+    "subtitle": "记录备份、存储、生成等后台环节的故障与降级，重启后自动清空。",
+    "badge_empty": "暂无记录",
+    "empty": "暂无记录，应用运行正常。",
     "clear": "清空记录",
     "severity_error": "错误",
     "severity_warn": "警告",

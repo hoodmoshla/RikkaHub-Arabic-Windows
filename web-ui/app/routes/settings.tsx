@@ -241,9 +241,9 @@ export default function SettingsPage() {
             {section === "stats" && <StatsSection stats={stats} />}
             {section === "logs" && (
               <>
-                <AppErrorsSection />
-                <div className="h-6" />
-                <LogsSection logs={logs} onClear={clearLogs} />
+                <LogsSection logs={logs} onClear={clearLogs}>
+                  <AppErrorsSection />
+                </LogsSection>
               </>
             )}
             {section === "proxy" && <ProxySection settings={settings} onSettings={updateLocal} />}

@@ -14,12 +14,14 @@ import { SectionHeader } from "~/components/settings/shared";
 export type { RequestLog } from "@server/foundation/types";
 import type { RequestLog } from "@server/foundation/types";
 
-export function LogsSection({ logs, onClear }: { logs: RequestLog[]; onClear: () => void }) {
+export function LogsSection({ logs, onClear, children }: { logs: RequestLog[]; onClear: () => void; children?: React.ReactNode }) {
   const { t } = useTranslation();
   const [active, setActive] = React.useState<RequestLog | null>(null);
   return (
     <>
       <SectionHeader icon={FileClock} title={t("settings:logs.title")} subtitle={t("settings:logs.subtitle")} />
+      {/* 诊断插槽:应用错误折叠条嵌在标题与日志列表之间,视觉上是本页的一条特殊行 */}
+      {children ? <div className="-mt-2 mb-4">{children}</div> : null}
       {logs.length > 0 ? (
         <div className="-mt-4 mb-2 flex justify-end">
           <button
