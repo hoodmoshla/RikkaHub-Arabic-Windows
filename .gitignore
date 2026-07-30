@@ -37,6 +37,7 @@ cherry-studio/
 lobehub/
 opencode-dev/
 kelivo/
+codex/
 
 # 过程文档(本地私有,确认稳定后删除,不入库)
 /tmp_doc/
