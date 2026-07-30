@@ -396,20 +396,24 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       const nodeIndex = conversation.messages.findIndex((node) => node.messages.some((msg) => msg.id === messageId));
       if (nodeIndex < 0) return error("Message not found", 404);
       const node = conversation.messages[nodeIndex];
-      const msgIndex = node.messages.findIndex((msg) => msg.id === messageId);
-      const msg = node.messages[msgIndex];
+      const msg = node.messages.find((item) => item.id === messageId)!;
       const assistant = findAssistant(conversation.assistantId);
       const picked = findModel(assistant.chatModelId ?? state.settings.chatModelId);
       // 边界断言：body.parts 来自前端，契约即 UIMessagePart[]
       const editedParts = msg.role === "USER"
         ? applyInputRegexTransformParts((body.parts ?? msg.parts) as MessagePart[], assistant)
         : (body.parts ?? msg.parts) as MessagePart[];
-      msg.parts = markOcrPendingParts(editedParts, picked.model);
-      msg.translation = null;
-      msg.finishedAt = msg.role === "ASSISTANT" ? new Date().toISOString() : null;
-      node.selectIndex = msgIndex;
-      conversation.messages = conversation.messages.slice(0, nodeIndex + 1);
-      conversation.chatSuggestions = [];
+      // 对齐安卓 ChatService.editMessage:编辑不覆盖原文,而是在同一节点追加新分支并
+      // 选中——旧版本保留,气泡下出现 <1/2> 切换器。USER 编辑沿用 PC 一步式语义
+      // (等价安卓的 编辑+重新发送 两步):截断后续并重新生成;ASSISTANT 编辑对齐安卓,
+      // 只加分支,不截断后续、不重新生成。
+      const edited = message(msg.role, markOcrPendingParts(editedParts, picked.model), msg.modelId);
+      node.messages.push(edited);
+      node.selectIndex = node.messages.length - 1;
+      if (msg.role === "USER") {
+        conversation.messages = conversation.messages.slice(0, nodeIndex + 1);
+        conversation.chatSuggestions = [];
+      }
       conversation.updateAt = Date.now();
       persistConversation(conversation);
       // I-2:被编辑节点按 id 推 node_update(理由同分支切换);其后的截断由快照清单捕获。
@@ -420,7 +424,7 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
           // R2-2:同 messages POST 续体——自持引用覆盖 OCR 全程,防实例被 sweep 后分叉。
           checkoutConversation(conversation.id);
           try {
-            msg.parts = await attachOcrToImageParts(msg.parts, picked.model);
+            edited.parts = await attachOcrToImageParts(edited.parts, picked.model);
             // 批6复审 G1:同 messages POST 续体——会话已删/被替换时丢弃结果,防复活。
             if (getConversation(conversation.id) !== conversation) return;
             conversation.updateAt = Date.now();
