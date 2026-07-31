@@ -74,7 +74,7 @@ const CODE_LANGUAGE_EXTENSION_MAP: Record<string, string> = {
 
 function buildInlinePreviewDocument(code: string, language: string): string {
   if (language === "svg") {
-    return `<!doctype html><html><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /></head><body style="margin:0;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;background:white;">${code}</body></html>`;
+    return `<!doctype html><html><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /></head><body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;background:white;">${code}</body></html>`;
   }
   return code;
 }
@@ -853,19 +853,10 @@ function CodeBlockModeSwitch({
   );
 }
 
-// iframe 预览高度上报脚本:sandbox 只给 allow-scripts(不给 allow-same-origin,
-// LLM 生成的任意 HTML 必须保持不可信隔离),父页面因此读不到 contentDocument,
-// 高度只能由 iframe 内部经 postMessage 上报。父侧用 event.source 比对
-// contentWindow 归属,无需 id 协商。
-const PREVIEW_HEIGHT_MESSAGE_TYPE = "rikkahub:preview-height";
-const PREVIEW_HEIGHT_REPORTER = `<script>(function(){var post=function(){try{var d=document,h=Math.max(d.documentElement.scrollHeight,d.body?d.body.scrollHeight:0);parent.postMessage({type:"${PREVIEW_HEIGHT_MESSAGE_TYPE}",height:h},"*")}catch(e){}};if(typeof ResizeObserver==="function"){var ro=new ResizeObserver(post);var watch=function(){ro.observe(document.documentElement);if(document.body)ro.observe(document.body);post()};if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",watch)}else{watch()}}window.addEventListener("load",post);setTimeout(post,120);setTimeout(post,600);post()})()</${"script"}>`;
-
-function withHeightReporter(doc: string): string {
-  if (/<\/body>/i.test(doc)) {
-    return doc.replace(/<\/body>/i, `${PREVIEW_HEIGHT_REPORTER}</body>`);
-  }
-  return doc + PREVIEW_HEIGHT_REPORTER;
-}
+// 源码/预览共享同一固定块高(产品稿:无论内容多长,块最多这么大,内部滚动)。
+// 两个字面量必须保持一致:body 是上限,iframe 撑满它。
+const CODE_BLOCK_BODY_MAX_HEIGHT_CLASS = "max-h-[420px]";
+const CODE_BLOCK_PREVIEW_IFRAME_HEIGHT_CLASS = "h-[420px]";
 
 export function CodeBlock({
   className,
@@ -935,7 +926,7 @@ export function CodeBlock({
   const iframeDoc = React.useMemo(() => {
     if (!previewLanguage) return "";
     if (previewLanguage === "html" || previewLanguage === "svg") {
-      return withHeightReporter(buildInlinePreviewDocument(code, previewLanguage));
+      return buildInlinePreviewDocument(code, previewLanguage);
     }
     if (previewLanguage === "mermaid") {
       const encodedCode = encodeURIComponent(code);
@@ -946,7 +937,7 @@ export function CodeBlock({
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <style>
       html, body { margin: 0; padding: 0; background: #ffffff; color: #1f2937; font-family: ui-sans-serif, system-ui, sans-serif; }
-      #container { box-sizing: border-box; padding: 16px; display: flex; justify-content: center; }
+      #container { min-height: 100vh; box-sizing: border-box; padding: 16px; display: flex; justify-content: center; }
       #diagram { width: 100%; }
       #error { display: none; width: 100%; white-space: pre-wrap; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px; font-size: 12px; }
     </style>
@@ -975,28 +966,11 @@ export function CodeBlock({
         }
       }
     </script>
-    ${PREVIEW_HEIGHT_REPORTER}
   </body>
 </html>`;
     }
     return "";
   }, [code, previewLanguage]);
-
-  // 预览动态高度:监听 iframe 内部上报,块高随内容伸缩(产品稿:预览一眼看全貌,
-  // 不需要内部滚动)。钳制下限防空文档塌陷,上限防异常文档把会话流撑爆。
-  const iframeRef = React.useRef<HTMLIFrameElement>(null);
-  const [iframeHeight, setIframeHeight] = React.useState(360);
-  React.useEffect(() => {
-    if (!showPreview || previewLanguage === "markdown" || !iframeDoc) return;
-    const onMessage = (event: MessageEvent) => {
-      if (event.source !== iframeRef.current?.contentWindow) return;
-      const data = event.data as { type?: string; height?: number };
-      if (data?.type !== PREVIEW_HEIGHT_MESSAGE_TYPE || typeof data.height !== "number") return;
-      setIframeHeight(Math.min(2400, Math.max(160, Math.ceil(data.height) + 2)));
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [showPreview, previewLanguage, iframeDoc]);
 
   const LazyMarkdown = React.useMemo(
     () => React.lazy(() => import("./markdown")),
@@ -1036,9 +1010,7 @@ export function CodeBlock({
           onScroll={handleBodyScroll}
           className={cn(
             "code-block-body overflow-auto",
-            // 产品稿:源码态"无论代码多长,块最多这么大"(内部滚动);预览态高度
-            // 完全随内容伸缩,一眼看全貌。
-            showPreview ? "" : "max-h-[420px]",
+            CODE_BLOCK_BODY_MAX_HEIGHT_CLASS,
             collapsed && "hidden",
           )}
         >
@@ -1057,12 +1029,13 @@ export function CodeBlock({
               </React.Suspense>
             ) : (
               <iframe
-                ref={iframeRef}
                 title={`${displayLanguage} preview`}
                 sandbox="allow-scripts"
                 srcDoc={iframeDoc}
-                style={{ height: iframeHeight }}
-                className="block w-full border-0"
+                className={cn(
+                  "block w-full border-0",
+                  CODE_BLOCK_PREVIEW_IFRAME_HEIGHT_CLASS,
+                )}
               />
             )
           ) : (
