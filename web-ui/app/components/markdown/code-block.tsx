@@ -35,16 +35,6 @@ const SHIKI_CACHE_LIMIT = 200;
 const SHIKI_THEME_LIGHT = "catppuccin-latte";
 const SHIKI_THEME_DARK = "catppuccin-mocha";
 
-interface KeyedToken {
-  key: string;
-  token: ThemedToken;
-}
-
-interface KeyedLine {
-  key: string;
-  tokens: KeyedToken[];
-}
-
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
   language: string;
@@ -133,8 +123,12 @@ function resolveShikiLanguage(language: string): BundledLanguage | null {
   return normalized as BundledLanguage;
 }
 
+// NUL 分隔符(语言名/代码文本中都不可能出现)。用 fromCharCode 构造而非 \u0000
+// 字面量:后者在部分编辑工具链下会被还原成真实 NUL 字节,把本源文件变成二进制。
+const TOKENS_CACHE_KEY_SEPARATOR = String.fromCharCode(0);
+
 function getTokensCacheKey(code: string, language: BundledLanguage): string {
-  return `${language}\u0000${code}`;
+  return `${language}${TOKENS_CACHE_KEY_SEPARATOR}${code}`;
 }
 
 function readTokensFromCache(cacheKey: string): TokenizedCode | null {
@@ -227,16 +221,6 @@ function createRawTokens(code: string): TokenizedCode {
           ],
     ),
   };
-}
-
-function addKeysToTokens(lines: ThemedToken[][]): KeyedLine[] {
-  return lines.map((line, lineIndex) => ({
-    key: `line-${lineIndex}`,
-    tokens: line.map((token, tokenIndex) => ({
-      key: `line-${lineIndex}-${tokenIndex}`,
-      token,
-    })),
-  }));
 }
 
 function isItalic(fontStyle: number | undefined): boolean {
@@ -374,21 +358,28 @@ function TokenSpan({ token }: { token: ThemedToken }) {
   );
 }
 
-function LineSpan({
-  keyedLine,
+// 1.5.0 内测 bug3(思维链含代码块时流式极卡)根修之一:行级 memo。
+// H-a 的增量分词器已让"分词"成本与代码总长解耦(已完成行的 token 数组引用稳定,
+// 每帧只新建尾行),但旧渲染层 addKeysToTokens 每帧把所有行/token 重新包装成新对象,
+// React 仍要逐帧协调整个代码块的全部 span(几百行 × 每行若干 token)——代码越长
+// 每帧越贵,吃掉了增量分词攒下的全部预算。改为直接以行 token 数组为 prop 的 memo
+// 组件:引用相等即跳过,每帧真正协调的只有正在生长的尾行。行号用索引作 key 与
+// 语义一致(增量路径行只追加;全量重分词时引用全变,自然整体重画)。
+const CodeLine = React.memo(function CodeLine({
+  line,
   showLineNumbers,
 }: {
-  keyedLine: KeyedLine;
+  line: ThemedToken[];
   showLineNumbers: boolean;
 }) {
   return (
     <span className={showLineNumbers ? LINE_NUMBER_CLASSES : "block"}>
-      {keyedLine.tokens.length === 0
+      {line.length === 0
         ? "\n"
-        : keyedLine.tokens.map(({ key, token }) => <TokenSpan key={key} token={token} />)}
+        : line.map((token, tokenIndex) => <TokenSpan key={tokenIndex} token={token} />)}
     </span>
   );
-}
+});
 
 const CodeBlockBody = React.memo(
   ({
@@ -410,8 +401,6 @@ const CodeBlockBody = React.memo(
       [tokenized.bg, tokenized.fg],
     );
 
-    const keyedLines = React.useMemo(() => addKeysToTokens(tokenized.tokens), [tokenized.tokens]);
-
     return (
       <pre
         className={cn(
@@ -427,8 +416,8 @@ const CodeBlockBody = React.memo(
             showLineNumbers && "[counter-increment:line_0] [counter-reset:line]",
           )}
         >
-          {keyedLines.map((keyedLine) => (
-            <LineSpan key={keyedLine.key} keyedLine={keyedLine} showLineNumbers={showLineNumbers} />
+          {tokenized.tokens.map((line, lineIndex) => (
+            <CodeLine key={lineIndex} line={line} showLineNumbers={showLineNumbers} />
           ))}
         </code>
       </pre>
@@ -489,7 +478,27 @@ export function CodeBlockContent({
   showLineNumbers?: boolean;
   wrapLines?: boolean;
 }) {
-  const rawTokens = React.useMemo(() => createRawTokens(code), [code]);
+  // bug3 根修之二:原文渲染路径(超过 MAX_SHIKI_CODE_LENGTH 的超长代码、高亮器装载期)
+  // 的行数组按内容复用上一帧引用。旧实现每帧对全文重建所有行 → CodeLine 的引用 memo
+  // 全部失效,超长代码块流式时仍是逐帧全量协调。复用后未变化的行引用稳定,与高亮
+  // 路径享受同一条"每帧只协调尾行"的通道。(ref 在 useMemo 内更新:幂等,双调无害。)
+  const rawLinesRef = React.useRef<{ source: string[]; lines: ThemedToken[][] }>({
+    source: [],
+    lines: [],
+  });
+  const rawTokens = React.useMemo<TokenizedCode>(() => {
+    const source = code.split("\n");
+    const previous = rawLinesRef.current;
+    const lines = source.map((text, index) =>
+      previous.source[index] === text
+        ? previous.lines[index]!
+        : text === ""
+          ? []
+          : [{ color: "inherit", content: text } as ThemedToken],
+    );
+    rawLinesRef.current = { source, lines };
+    return { bg: "transparent", fg: "inherit", tokens: lines };
+  }, [code]);
   const shouldHighlight = Boolean(language) && code.length <= MAX_SHIKI_CODE_LENGTH;
 
   // H-a(专题2):行级增量分词器,组件实例级。流式中的代码块每帧增长,全文缓存键

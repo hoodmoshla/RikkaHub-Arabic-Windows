@@ -51,10 +51,10 @@ export function ReasoningStepPart({
   const [expandState, setExpandState] = React.useState<ReasoningCardState>(
     ReasoningCardState.Collapsed,
   );
-  const contentRef = React.useRef<HTMLDivElement>(null);
+  // 标题只在流式中展示:完成态(历史消息批量挂载)跳过全文逐行扫描。
   const thinkingTitle = React.useMemo(
-    () => extractThinkingTitle(reasoning.reasoning),
-    [reasoning.reasoning],
+    () => (loading ? extractThinkingTitle(reasoning.reasoning) : null),
+    [loading, reasoning.reasoning],
   );
   const showThinkingTitle = loading && thinkingTitle != null;
 
@@ -80,12 +80,6 @@ export function ReasoningStepPart({
     displaySetting?.showThinkingContent,
     displaySetting?.autoCloseThinking,
   ]);
-
-  React.useEffect(() => {
-    if (loading && expandState === ReasoningCardState.Preview && contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight;
-    }
-  }, [loading, expandState, reasoning.reasoning]);
 
   const onExpandedChange = (nextExpanded: boolean) => {
     if (loading) {
@@ -145,15 +139,23 @@ export function ReasoningStepPart({
         }
         contentVisible={expandState !== ReasoningCardState.Collapsed}
       >
+        {/* bug3 根修之三:预览窗贴底改纯 CSS(column-reverse 天然锚定底部,内容用单一
+            子元素包裹保持视觉顺序)。旧实现用效果器每个 delta 帧读 scrollHeight 再写
+            scrollTop——对刚变更的大子树(思维链含代码块时是数千个 span)每帧强制一次
+            同步 reflow,是"思维链流式卡、正文流式不卡"的思维链独有放大器。顺带修正
+            旧行为的一个小毛病:用户在预览窗里往上翻阅时不再被每帧强行拽回底部。 */}
         <div
-          ref={contentRef}
-          className={preview ? "styled-scrollbar relative max-h-24 overflow-y-auto" : undefined}
+          className={
+            preview ? "styled-scrollbar relative flex max-h-24 flex-col-reverse overflow-y-auto" : undefined
+          }
         >
-          <Markdown
-            content={reasoning.reasoning}
-            className="reasoning-markdown text-xs !leading-[1.03125rem] [&_*]:!leading-[1.03125rem] [&_li]:mt-1 [&_ol]:my-2 [&_p+p]:mt-2 [&_p]:my-1 [&_ul]:my-2"
-            isAnimating={loading}
-          />
+          <div>
+            <Markdown
+              content={reasoning.reasoning}
+              className="reasoning-markdown text-xs !leading-[1.03125rem] [&_*]:!leading-[1.03125rem] [&_li]:mt-1 [&_ol]:my-2 [&_p+p]:mt-2 [&_p]:my-1 [&_ul]:my-2"
+              isAnimating={loading}
+            />
+          </div>
         </div>
       </ControlledChainOfThoughtStep>
     </div>
