@@ -887,7 +887,19 @@ export function ToolPart({
                     } catch {
                       parsed = part.text;
                     }
-                    return <JsonBlock key={i} value={parsed} maxHeightClass="max-h-none" />;
+                    // 结构化 JSON 保持等宽缩进块;纯文本(多为工具的自然语言/Markdown
+                    // 输出)走富文本渲染,与技能内容(UseSkillPreview)的呈现一致。
+                    if (parsed !== null && typeof parsed === "object") {
+                      return <JsonBlock key={i} value={parsed} maxHeightClass="max-h-none" />;
+                    }
+                    return (
+                      <div key={i} className="rounded-md border bg-muted/20 p-3">
+                        <Markdown
+                          content={typeof parsed === "string" ? parsed : part.text}
+                          className="text-sm"
+                        />
+                      </div>
+                    );
                   }
                   if (part.type === "image")
                     return <ImagePartRenderer key={i} url={part.url} />;
