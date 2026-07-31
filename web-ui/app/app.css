@@ -50,6 +50,11 @@
   --font-mono:
     "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
+  /* 默认代码字体:参考现代 IDE 与图1等宽观感,优先尝试 Maple Mono / JetBrains Mono / Fira Code,
+     系统中未安装则回退到系统默认等宽栈。块内代码文本使用此变量,块 UI 文字仍走对话字体。 */
+  --rikkahub-code-font:
+    "Maple Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", ui-monospace,
+    SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   --radius: 0.75rem;
   --shadow-x: 0;
   --shadow-y: 1px;
@@ -1217,22 +1222,29 @@
   background: var(--muted) !important;
   color: var(--primary) !important;
   padding: 0.1rem 0.32rem !important;
-  /* 对齐安卓 commit 436603c9: 代码相关元素统一使用等宽字体，不被聊天字体覆盖 */
-  font-family: var(--font-mono) !important;
+  /* 默认代码字体栈,可被 --rikkahub-code-font 覆盖 */
+  font-family: var(--rikkahub-code-font) !important;
   font-size: 0.95em !important;
 }
 
-/* 对齐安卓 commit 436603c9: pre/code 与语言标签也强制等宽字体 */
+/* 代码块内容使用默认代码字体;块 UI 文字(标题/按钮/标签)继承对话字体,不在这里强制等宽。 */
 .message-markdown pre,
 .message-markdown pre code,
 .message-markdown .code-block-content,
 .message-markdown .code-block-content pre,
 .message-markdown .code-block-content pre code,
-.message-markdown .code-block-language,
 [data-message-role] .message-markdown pre,
 [data-message-role] .message-markdown pre code,
+[data-message-role] .message-markdown .code-block-content,
+[data-message-role] .message-markdown .code-block-content pre,
+[data-message-role] .message-markdown .code-block-content pre code {
+  font-family: var(--rikkahub-code-font) !important;
+}
+
+/* 语言标签跟随对话字体,与块 UI 文字观感一致。 */
+.message-markdown .code-block-language,
 [data-message-role] .message-markdown .code-block-language {
-  font-family: var(--font-mono) !important;
+  font-family: var(--rikkahub-chat-font, var(--font-sans)) !important;
 }
 
 [data-message-role],

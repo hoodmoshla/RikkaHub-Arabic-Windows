@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { ComponentProps, CSSProperties, HTMLAttributes } from "react";
 
-import { Check, Code2, Copy, Download, Eye } from "lucide-react";
+import { Check, Code2, Copy, Download, ExternalLink, Eye } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -38,7 +38,7 @@ const SHIKI_THEME_DARK = "catppuccin-mocha";
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
   language: string;
-  onPreview?: () => void;
+  isAnimating?: boolean;
   showLineNumbers?: boolean;
   wrapLines?: boolean;
 };
@@ -825,6 +825,96 @@ export function CodeBlockDownloadButton({
   );
 }
 
+export type CodeBlockOpenButtonProps = ComponentProps<typeof Button> & {
+  onOpen?: () => void;
+  onError?: (error: Error) => void;
+};
+
+export function CodeBlockOpenButton({
+  children,
+  className,
+  onOpen,
+  onError,
+  timeout = 2000,
+  ...props
+}: CodeBlockOpenButtonProps & { timeout?: number }) {
+  const { t } = useTranslation("markdown");
+  const { code, language } = React.useContext(CodeBlockContext);
+  const [isOpened, setIsOpened] = React.useState(false);
+  const timeoutRef = React.useRef<number>(0);
+
+  const handleOpen = React.useCallback(() => {
+    if (isOpened) return;
+
+    if (typeof window === "undefined") {
+      onError?.(new Error(t("code_block.window_not_available")));
+      return;
+    }
+
+    try {
+      const normalized = language.trim().toLowerCase();
+      let mime = "text/plain;charset=utf-8";
+      let targetUrl: string | undefined;
+
+      if (normalized === "html" || normalized === "svg") {
+        const doc =
+          normalized === "svg"
+            ? buildInlinePreviewDocument(code, "svg")
+            : code;
+        mime = normalized === "svg" ? "image/svg+xml;charset=utf-8" : "text/html;charset=utf-8";
+        const blob = new Blob([doc], { type: mime });
+        targetUrl = window.URL.createObjectURL(blob);
+      } else {
+        const blob = new Blob([code], { type: mime });
+        targetUrl = window.URL.createObjectURL(blob);
+      }
+
+      if (targetUrl) {
+        window.open(targetUrl, "_blank", "noopener,noreferrer");
+        setIsOpened(true);
+        onOpen?.();
+        timeoutRef.current = window.setTimeout(() => {
+          setIsOpened(false);
+        }, timeout);
+      }
+    } catch (error) {
+      onError?.(error as Error);
+    }
+  }, [code, isOpened, language, onOpen, onError, t, timeout]);
+
+  React.useEffect(
+    () => () => {
+      window.clearTimeout(timeoutRef.current);
+    },
+    [],
+  );
+
+  return (
+    <Button
+      aria-label={t("code_block.open_in_browser")}
+      className={cn("code-block-copy h-6 px-1.5", className)}
+      onClick={handleOpen}
+      size="xs"
+      type="button"
+      variant="ghost"
+      {...props}
+    >
+      {children ??
+        (isOpened ? (
+          <>
+            <Check className="size-3" />
+            <span>{t("code_block.opened")}</span>
+          </>
+        ) : (
+          <>
+            <ExternalLink className="size-3" />
+            <span>{t("code_block.open")}</span>
+          </>
+        ))}
+    </Button>
+  );
+}
+
 export type CodeBlockLanguageSelectorProps = ComponentProps<typeof Select>;
 
 export function CodeBlockLanguageSelector(props: CodeBlockLanguageSelectorProps) {
@@ -871,24 +961,122 @@ export function CodeBlock({
   className,
   code,
   language,
-  onPreview,
+  isAnimating = false,
   showLineNumbers = false,
   wrapLines = false,
   ...props
 }: CodeBlockProps) {
+  const { t } = useTranslation("markdown");
   const displayLanguage = language || "text";
   const previewLanguage = React.useMemo(() => getCodePreviewLanguage(language), [language]);
-  const canPreview = Boolean(onPreview && previewLanguage);
-  const canInlinePreview = previewLanguage === "html" || previewLanguage === "svg";
-  // 默认显示源码,不自动渲染 HTML/SVG 预览:流式输出时 iframe 的 srcDoc 会随每个 delta
-  // 变化导致疯狂重载闪动(尚未完成的 HTML 一直在高频重绘,视觉灾难);且多数场景用户只
-  // 想读代码。需要看渲染效果时点头部"预览"按钮手动切换到 iframe 渲染层。
-  const [inlinePreview, setInlinePreview] = React.useState(false);
+  const canPreview = Boolean(previewLanguage);
   const shikiLanguage = React.useMemo(() => resolveShikiLanguage(language), [language]);
   const contextValue = React.useMemo(
     () => ({ code, language: displayLanguage }),
     [code, displayLanguage],
   );
+
+  // 生成中必须看源码(流式输出逐字增长,iframe/Markdown 预览会疯狂抖动/重载);
+  // 生成完成后,若该块可预览,自动切换到预览模式,减少用户操作。
+  const [mode, setMode] = React.useState<"source" | "preview">("source");
+  const prevAnimatingRef = React.useRef(isAnimating);
+  React.useEffect(() => {
+    if (isAnimating) {
+      setMode("source");
+    } else if (prevAnimatingRef.current && canPreview) {
+      setMode("preview");
+    }
+    prevAnimatingRef.current = isAnimating;
+  }, [isAnimating, canPreview]);
+
+  const toggleMode = React.useCallback(() => {
+    if (isAnimating) return;
+    setMode((current) => (current === "source" ? "preview" : "source"));
+  }, [isAnimating]);
+
+  const iframeDoc = React.useMemo(() => {
+    if (!previewLanguage) return "";
+    if (previewLanguage === "html") return code;
+    if (previewLanguage === "svg") {
+      return `<!doctype html><html><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /></head><body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;background:white;">${code}</body></html>`;
+    }
+    if (previewLanguage === "mermaid") {
+      const encodedCode = encodeURIComponent(code);
+      return `<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      html, body { margin: 0; padding: 0; background: #ffffff; color: #1f2937; font-family: ui-sans-serif, system-ui, sans-serif; }
+      #container { min-height: 100vh; box-sizing: border-box; padding: 16px; display: flex; justify-content: center; }
+      #diagram { width: 100%; }
+      #error { display: none; width: 100%; white-space: pre-wrap; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div id="container">
+      <div id="diagram"></div>
+      <pre id="error"></pre>
+    </div>
+    <script type="module">
+      import mermaid from "https://esm.sh/mermaid@11";
+
+      const source = decodeURIComponent("${encodedCode}");
+      const diagram = document.getElementById("diagram");
+      const errorEl = document.getElementById("error");
+
+      mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+      try {
+        const id = "mermaid-" + Math.random().toString(36).slice(2);
+        const result = await mermaid.render(id, source.trim());
+        if (diagram) diagram.innerHTML = result.svg;
+      } catch (error) {
+        if (errorEl) {
+          errorEl.style.display = "block";
+          errorEl.textContent = error instanceof Error ? error.message : String(error);
+        }
+      }
+    </script>
+  </body>
+</html>`;
+    }
+    return "";
+  }, [code, previewLanguage]);
+
+  // iframe 预览动态高度:同源 blob/srcDoc 可读 contentDocument.body.scrollHeight。
+  // Mermaid 等异步渲染通过延迟重读兜底,不要求精确,能覆盖大多数场景。
+  const iframeRef = React.useRef<HTMLIFrameElement>(null);
+  const [iframeHeight, setIframeHeight] = React.useState(360);
+  const updateIframeHeight = React.useCallback(() => {
+    try {
+      const doc = iframeRef.current?.contentDocument;
+      if (doc?.body) {
+        setIframeHeight(Math.max(220, doc.body.scrollHeight + 8));
+      }
+    } catch {
+      // 跨域或沙箱限制时保持默认高度
+    }
+  }, []);
+  React.useEffect(() => {
+    if (mode !== "preview" || previewLanguage === "markdown" || !iframeDoc) return;
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    updateIframeHeight();
+    iframe.addEventListener("load", updateIframeHeight);
+    const timers = [window.setTimeout(updateIframeHeight, 50), window.setTimeout(updateIframeHeight, 300)];
+    return () => {
+      iframe.removeEventListener("load", updateIframeHeight);
+      timers.forEach(window.clearTimeout);
+    };
+  }, [mode, previewLanguage, iframeDoc, updateIframeHeight]);
+
+  const LazyMarkdown = React.useMemo(
+    () => React.lazy(() => import("./markdown")),
+    [],
+  );
+
+  const showPreview = mode === "preview" && canPreview;
 
   return (
     <CodeBlockContext.Provider value={contextValue}>
@@ -898,34 +1086,57 @@ export function CodeBlock({
             <CodeBlockLanguage>{displayLanguage}</CodeBlockLanguage>
           </CodeBlockTitle>
           <CodeBlockActions>
-            {canInlinePreview ? (
+            <CodeBlockCopyButton />
+            <CodeBlockOpenButton />
+            <CodeBlockDownloadButton />
+            {canPreview ? (
               <CodeBlockPreviewButton
-                active={inlinePreview}
-                onPreview={() => setInlinePreview((current) => !current)}
+                active={mode === "preview"}
+                disabled={isAnimating}
+                onPreview={toggleMode}
               />
             ) : null}
-            {canPreview && onPreview && <CodeBlockPreviewButton onPreview={onPreview} />}
-            <CodeBlockDownloadButton />
-            <CodeBlockCopyButton />
           </CodeBlockActions>
         </CodeBlockHeader>
-        {inlinePreview && canInlinePreview ? (
-          <div className="border-t bg-white">
-            <iframe
-              title={`${displayLanguage} preview`}
-              sandbox="allow-scripts"
-              srcDoc={buildInlinePreviewDocument(code, previewLanguage)}
-              className="h-[220px] w-full border-0"
+        <div
+          className={cn(
+            "code-block-body",
+            mode === "source" ? "max-h-[320px]" : "max-h-[720px]",
+            "overflow-auto",
+          )}
+        >
+          {showPreview ? (
+            previewLanguage === "markdown" ? (
+              <React.Suspense
+                fallback={
+                  <div className="flex h-[180px] items-center justify-center text-sm text-muted-foreground">
+                    {t("code_block.preview_loading")}
+                  </div>
+                }
+              >
+                <div className="p-4">
+                  <LazyMarkdown content={code} />
+                </div>
+              </React.Suspense>
+            ) : (
+              <iframe
+                ref={iframeRef}
+                title={`${displayLanguage} preview`}
+                sandbox="allow-scripts"
+                srcDoc={iframeDoc}
+                style={{ height: iframeHeight }}
+                className="w-full min-h-[220px] border-0"
+              />
+            )
+          ) : (
+            <CodeBlockContent
+              code={code}
+              language={shikiLanguage}
+              showLineNumbers={showLineNumbers}
+              wrapLines={wrapLines}
             />
-          </div>
-        ) : (
-          <CodeBlockContent
-            code={code}
-            language={shikiLanguage}
-            showLineNumbers={showLineNumbers}
-            wrapLines={wrapLines}
-          />
-        )}
+          )}
+        </div>
       </CodeBlockContainer>
     </CodeBlockContext.Provider>
   );
