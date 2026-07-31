@@ -160,6 +160,12 @@ const EDIT_DRAFT_ATTACHMENT_MARK = "__from_message_attachment";
 const EDIT_DRAFT_SOURCE_INDEX = "__from_message_source_index";
 const EMPTY_INPUT_ATTACHMENTS: UIMessagePart[] = [];
 const EMPTY_SUGGESTIONS: string[] = [];
+// Virtuoso 的 components 必须引用稳定(官方文档明确要求):内联对象每次渲染都是
+// 新的组件类型,Header/Footer 被反复卸载重挂 → 尺寸重测(skipAnimationFrameIn-
+// ResizeObserver 下同帧同步)→ rangeChanged → setState → 再渲染 → 又是新类型……
+// 嵌套更新超 50 次即 React #185 白屏(桌面端快速切换会话高发,崩溃栈实锤 rangeChanged)。
+const VirtuosoListPadding = () => <div className="h-4" />;
+const VIRTUOSO_COMPONENTS = { Header: VirtuosoListPadding, Footer: VirtuosoListPadding };
 const COMPRESS_TOKEN_OPTIONS = [500, 1000, 2000, 4000];
 const COMPRESS_KEEP_OPTIONS = [0, 16, 32, 64];
 const TRANSLATION_LANGUAGES = [
@@ -586,6 +592,56 @@ const ChatInputArea = React.memo(function ChatInputArea({
   );
 });
 
+interface QuickJumpRangeHandle {
+  setRange: (start: number, end: number) => void;
+}
+
+// 滚动范围状态的唯一消费者是快速跳转条,收进独立小组件:Virtuoso 的 rangeChanged
+// 高频回调经命令式 ref 只重渲染本组件,巨型 ConversationTimeline(含 Virtuoso)完全
+// 不在传播路径上。这不仅是滚动性能优化,更是白屏 bug 的根治:此前 rangeChanged →
+// setState 重渲染整个 Timeline,Virtuoso 全套函数 props 换新引用,特定会话上范围
+// 计算被扰动回摆,"rangeChanged→重渲染→范围又变"正反馈同步嵌套,直至击穿 React
+// 50 层更新深度上限(#185),被 root ErrorBoundary 接住即 "Oops!" 白屏(桌面端快速
+// 切换会话高发)。
+const QuickJumpOverlay = React.forwardRef<
+  QuickJumpRangeHandle,
+  {
+    seedKey: string;
+    initialIndex: number;
+    itemCount: number;
+    isAtBottom: boolean;
+    isAtTop: boolean;
+    items: ConversationQuickJumpItem[];
+    onItemClick: (index: number) => void;
+  }
+>(function QuickJumpOverlay(
+  { seedKey, initialIndex, itemCount, isAtBottom, isAtTop, items, onItemClick },
+  ref,
+) {
+  const [range, setRange] = React.useState({ start: initialIndex, end: initialIndex });
+  // C 族闪动修复(播种逻辑随状态一起搬入):切换会话/详情迟到时在 render 期重置,
+  // 避免挂载稳定期 rangeChanged 尚未回调时指示器闪指第 1 轮。
+  const seedRef = React.useRef<string | null>(null);
+  if (seedRef.current !== seedKey) {
+    seedRef.current = seedKey;
+    setRange({ start: initialIndex, end: initialIndex });
+  }
+  React.useImperativeHandle(
+    ref,
+    () => ({
+      setRange: (start, end) =>
+        setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end })),
+    }),
+    [],
+  );
+  const activeIndex = isAtBottom
+    ? itemCount - 1
+    : isAtTop
+      ? 0
+      : Math.round((range.start + range.end) / 2);
+  return <ConversationQuickJump items={items} activeIndex={activeIndex} onItemClick={onItemClick} />;
+});
+
 const ConversationTimeline = React.memo(
   ({
     activeId,
@@ -780,8 +836,7 @@ const ConversationTimeline = React.memo(
       return () => window.clearTimeout(timer);
     }, [overscanExpanded, hasRenderedContent]);
     const [isAtTop, setIsAtTop] = React.useState(false);
-    const [topVisibleIndex, setTopVisibleIndex] = React.useState(0);
-    const [topEndIndex, setTopEndIndex] = React.useState(0);
+    const quickJumpRangeRef = React.useRef<QuickJumpRangeHandle | null>(null);
     const didInitialScrollRef = React.useRef<string | null>(null);
     const ensureFullForFocusRef = React.useRef<string | null>(null);
 
@@ -968,8 +1023,6 @@ const ConversationTimeline = React.memo(
       scrollSeedRef.current = { activeId, wasEmpty: selectedNodeMessages.length === 0 };
       setIsAtBottom(!focusMessageId);
       setIsAtTop(false);
-      setTopVisibleIndex(initialLocation.index);
-      setTopEndIndex(initialLocation.index);
     }
 
     // 轮次条条目身份保持(D 族支柱③):以消息对象为键的 WeakMap 缓存 ——
@@ -1056,6 +1109,8 @@ const ConversationTimeline = React.memo(
             // 尺寸测量不等下一帧(官方对新浏览器的推荐配置):Virtuoso 缺省把
             // ResizeObserver 回调推迟到 rAF,挂载稳定期的"渲染→测量"要迭代多轮,
             // 每轮至少一帧,纯帧等待就 100-200ms(性能探针实测)。关掉后同帧完成。
+            // 前提:rangeChanged 绝不重渲染本组件(见 QuickJumpOverlay),否则
+            // "测量→回调→重渲染→再测量"同步嵌套会击穿 React 更新深度上限(#185)。
             skipAnimationFrameInResizeObserver
             computeItemKey={(_, item) => item.message.id}
             // "auto" 瞬时贴底(D 族支柱④):流式每 chunk 都触发 followOutput,"smooth"
@@ -1074,15 +1129,13 @@ const ConversationTimeline = React.memo(
             atTopStateChange={setIsAtTop}
             totalListHeightChanged={handleTotalListHeightChanged}
             rangeChanged={({ startIndex, endIndex }) => {
-              // I-2:firstItemIndex 使回调下标携带全局偏移;轮次条等用已加载数组的本地坐标
-              setTopVisibleIndex(startIndex - nodesOffset);
-              setTopEndIndex(endIndex - nodesOffset);
+              // I-2:firstItemIndex 使回调下标携带全局偏移;轮次条用已加载数组的本地坐标。
+              // 只走命令式通道更新快速跳转条,绝不 setState 重渲染本组件(根治 #185
+              // 白屏正反馈,见 QuickJumpOverlay 注释)。
+              quickJumpRangeRef.current?.setRange(startIndex - nodesOffset, endIndex - nodesOffset);
             }}
             increaseViewportBy={overscanExpanded ? 800 : 0}
-            components={{
-              Header: () => <div className="h-4" />,
-              Footer: () => <div className="h-4" />,
-            }}
+            components={VIRTUOSO_COMPONENTS}
             itemContent={(index, { node, message }) => {
               const model = message.modelId
                 ? (modelById.get(message.modelId) ?? fallbackModel)
@@ -1182,15 +1235,14 @@ const ConversationTimeline = React.memo(
               </Button>
             ) : null}
             {canQuickJump ? (
-              <ConversationQuickJump
+              <QuickJumpOverlay
+                ref={quickJumpRangeRef}
+                seedKey={`${activeId ?? "home"}:${selectedNodeMessages.length === 0}`}
+                initialIndex={initialLocation.index}
+                itemCount={selectedNodeMessages.length}
+                isAtBottom={isAtBottom}
+                isAtTop={isAtTop}
                 items={quickJumpItems}
-                activeIndex={
-                  isAtBottom
-                    ? selectedNodeMessages.length - 1
-                    : isAtTop
-                      ? 0
-                      : Math.round((topVisibleIndex + topEndIndex) / 2)
-                }
                 onItemClick={(index) =>
                   virtuosoRef.current?.scrollToIndex({ index, behavior: "smooth", align: "start" })
                 }
