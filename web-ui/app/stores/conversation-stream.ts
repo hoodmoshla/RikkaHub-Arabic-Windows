@@ -22,6 +22,7 @@ import api, { ApiError, sse } from "~/services/api";
 import { useAppStore } from "~/stores/app-store";
 import {
   applyConversationNodesPage,
+  applyConversationNodesRangeReplace,
   applyConversationNodeUpdate,
   applyConversationSnapshot,
   applyConversationSnapshotMeta,
@@ -171,9 +172,9 @@ const GENERATING_POLL_INTERVAL_MS = 10_000;
 // 避免污染同进程的其它测试文件)。
 const defaultFetchSnapshot = (id: string): Promise<ConversationDto> =>
   api.get<ConversationDto>(`conversations/${id}`);
-const defaultFetchNodesPage = (id: string, before: number, beforeId: string): Promise<ConversationNodesPageDto> =>
+const defaultFetchNodesPage = (id: string, before: number, beforeId: string, limit?: number): Promise<ConversationNodesPageDto> =>
   api.get<ConversationNodesPageDto>(`conversations/${id}/nodes`, {
-    searchParams: { before, beforeId },
+    searchParams: limit ? { before, beforeId, limit } : { before, beforeId },
   });
 let transport: typeof sse = sse;
 let fetchConversationSnapshot = defaultFetchSnapshot;
@@ -226,10 +227,9 @@ function openStream(id: string, record: StreamRecord, options?: { negotiate?: bo
 
         if (event === "snapshot" && data.type === "snapshot") {
           useAppStore.getState().setClockOffset(data.serverTime);
-          withSummaryBridge(id, () => {
-            applyConversationSnapshot(data.conversation);
-          });
+          const staleRange = withSummaryBridge(id, () => applyConversationSnapshot(data.conversation));
           rememberNegotiationToken(id, data.conversation.updateAt, data.negotiationToken);
+          if (staleRange) void repairStaleNodes(id, staleRange.from, staleRange.to);
           syncPolling(id, record);
           return;
         }
@@ -409,6 +409,40 @@ export async function loadOlderConversationNodes(id: string): Promise<void> {
   }
 }
 
+const staleRepairInFlight = new Set<string>();
+
+/**
+ * 陈旧前缀修复(bug1 根修,与 lib/conversation-sync.ts mergeConversationSnapshot 配套):
+ * 窗口化快照合并时发现 [from, to) 的本地节点与服务端分叉,但为了不让 react-virtuoso
+ * 遭遇 firstItemIndex 原地增大(尺寸树错乱 → 底部幽灵空白),旧内容被原样保留。
+ * 这里从 `to` 锚点向下逐分片拉权威版本原地替换。任何失配(409/越界/窗口漂移)都
+ * 直接放弃——下一次快照合并会重新报脏,永不硬拼。
+ */
+async function repairStaleNodes(id: string, from: number, to: number): Promise<void> {
+  if (staleRepairInFlight.has(id)) return;
+  staleRepairInFlight.add(id);
+  try {
+    let cursor = to;
+    while (cursor > from) {
+      const detail = getDetail(id);
+      if (!detail) return;
+      const anchorId = detail.messages[cursor - (detail.nodesOffset ?? 0)]?.id;
+      if (!anchorId) return;
+      // limit 夹在待修区间内,分片不越过已加载窗口下界(replaceNodesRange 越界即拒)
+      const page = await fetchConversationNodesPage(id, cursor, anchorId, Math.min(cursor - from, 200));
+      if (page.nodes.length === 0) return;
+      const outcome = withSummaryBridge(id, () => applyConversationNodesRangeReplace(id, page));
+      if (outcome !== "applied") return;
+      cursor = page.offset;
+    }
+  } catch (repairError) {
+    // 网络失败静默:内容仍是可读的旧版,下一次快照会重新触发修复
+    console.error("Repair stale conversation nodes failed:", repairError);
+  } finally {
+    staleRepairInFlight.delete(id);
+  }
+}
+
 /**
  * 需要完整历史的场景(导出/分享/搜索定位未加载节点)按需拉全量:REST 详情端点
  * 保持全量语义(见服务端注释)。返回拉取后的 detail;拿不到完整历史(网络失败)
@@ -459,7 +493,7 @@ export function useConversationSubscription(id: string | null): void {
 export function installConversationStreamTestSeam(seam: {
   transport?: typeof sse;
   fetchConversationSnapshot?: (id: string) => Promise<ConversationDto>;
-  fetchConversationNodesPage?: (id: string, before: number, beforeId: string) => Promise<ConversationNodesPageDto>;
+  fetchConversationNodesPage?: (id: string, before: number, beforeId: string, limit?: number) => Promise<ConversationNodesPageDto>;
 }): void {
   if (seam.transport) transport = seam.transport;
   if (seam.fetchConversationSnapshot) fetchConversationSnapshot = seam.fetchConversationSnapshot;

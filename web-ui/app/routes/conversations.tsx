@@ -629,6 +629,20 @@ const ConversationTimeline = React.memo(
     // 一律使用"已加载数组的本地下标",只在 itemContent/rangeChanged(回调携带全局
     // 偏移)处换算。scrollToIndex/initialTopMostItemIndex 本就是本地坐标,无需换算。
     const nodesOffset = detail?.nodesOffset ?? 0;
+    // bug1 兜底:react-virtuoso 不支持 firstItemIndex 原地增大(尺寸树错乱 → 底部
+    // 幽灵空白/尾部条目消失)。数据层已尽力避免(mergeConversationSnapshot 前缀保留),
+    // 但仍有合法缩窗路径(如离开期间新增消息超过一个快照窗口,本地前缀接不上)——
+    // 此时唯一正确的处理是重挂载列表。render 期播种(与 knownIdsRef 同模式)。
+    const offsetEpochRef = React.useRef({ activeId: null as string | null, offset: 0, epoch: 0 });
+    if (offsetEpochRef.current.activeId !== activeId) {
+      offsetEpochRef.current = { activeId, offset: nodesOffset, epoch: 0 };
+    } else if (nodesOffset > offsetEpochRef.current.offset) {
+      offsetEpochRef.current.epoch += 1;
+      offsetEpochRef.current.offset = nodesOffset;
+    } else if (nodesOffset < offsetEpochRef.current.offset) {
+      offsetEpochRef.current.offset = nodesOffset; // 向上翻页(prepend)是受支持方向,只跟踪
+    }
+    const listRemountEpoch = offsetEpochRef.current.epoch;
     // 缓存命中时即使订阅尚未建立也不进加载态 —— 内容已在屏上,快照到达后静默校正
     const detailLoading = (entry?.subscribing ?? false) && detail === null;
     const detailError = entry?.error ?? null;
@@ -712,6 +726,9 @@ const ConversationTimeline = React.memo(
     }
 
     const virtuosoRef = React.useRef<VirtuosoHandle>(null);
+    // "回到底部"按钮的滚动距离判定用(复现实测:平滑滚动跨越大段未测量的巨型条目时
+    // 会因尺寸修正中途卡死,永远到不了底;远距离改瞬时跳转,近距离保留平滑动画)
+    const scrollerElRef = React.useRef<HTMLElement | Window | null>(null);
     // I-2:滚到已加载顶部时向上翻页(去重/到头判断在 loadOlderConversationNodes 内)
     const handleStartReached = React.useCallback(() => {
       if (activeId) void loadOlderConversationNodes(activeId);
@@ -1017,8 +1034,11 @@ const ConversationTimeline = React.memo(
           )
         ) : (
           <Virtuoso
-            key={activeId ?? "home"}
+            key={`${activeId ?? "home"}:${listRemountEpoch}`}
             ref={virtuosoRef}
+            scrollerRef={(el) => {
+              scrollerElRef.current = el;
+            }}
             className="h-full"
             data={selectedNodeMessages}
             // I-2:顶部插入的滚动锚定。prepend 时 store 原子地同步减小 offset 与增长
@@ -1141,13 +1161,19 @@ const ConversationTimeline = React.memo(
               <Button
                 aria-label={t("conversations.scroll_to_bottom", "滚动到底部")}
                 className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full shadow-md transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg dark:bg-background dark:hover:bg-muted"
-                onClick={() =>
+                onClick={() => {
+                  // 距离超过 3 屏改瞬时:平滑滚动跨大段未测量条目会中途卡死(实测),
+                  // 且长距离平滑动画本身也无导向价值
+                  const el = scrollerElRef.current;
+                  const far =
+                    el instanceof HTMLElement &&
+                    el.scrollHeight - el.scrollTop - el.clientHeight > el.clientHeight * 3;
                   virtuosoRef.current?.scrollToIndex({
                     index: selectedNodeMessages.length - 1,
-                    behavior: "smooth",
+                    behavior: far ? "auto" : "smooth",
                     align: "end",
-                  })
-                }
+                  });
+                }}
                 size="icon"
                 type="button"
                 variant="outline"

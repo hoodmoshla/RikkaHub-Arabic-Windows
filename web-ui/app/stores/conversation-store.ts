@@ -15,7 +15,7 @@
 // conversation-stream.ts(它是 retain/release 的唯一调用方)。
 import { create } from "zustand";
 
-import { applyNodeUpdate, applyTextDelta, mergeConversationSnapshot, prependOlderNodes } from "~/lib/conversation-sync";
+import { applyNodeUpdate, applyTextDelta, mergeConversationSnapshot, prependOlderNodes, replaceNodesRange } from "~/lib/conversation-sync";
 import type { ConversationDto, ConversationNodesPageDto, ConversationNodeUpdateEventDto, ConversationSnapshotMetaEventDto, ConversationTextDeltaEventDto } from "~/types";
 
 export interface ConversationEntry {
@@ -81,15 +81,24 @@ export const useConversationStore = create<ConversationStoreState>(() => ({
 
 /** 快照落地:清错误、结束订阅建立态。窗口化快照(I-2)与本地已加载的更早历史做
  *  可验证前缀合并(见 lib/conversation-sync.ts mergeConversationSnapshot);全量快照
- *  语义不变(合并函数原样采用)。 */
-export function applyConversationSnapshot(conversation: ConversationDto): void {
-  useConversationStore.setState((state) => ({
-    entries: writeEntry(state.entries, conversation.id, {
-      detail: mergeConversationSnapshot(state.entries[conversation.id]?.detail ?? null, conversation),
-      subscribing: false,
-      error: null,
-    }),
-  }));
+ *  语义不变(合并函数原样采用)。返回失配的陈旧区间(绝对下标 [from, to)),由调用方
+ *  (conversation-stream)调度分片重拉修复;null = 无需修复。 */
+export function applyConversationSnapshot(
+  conversation: ConversationDto,
+): { from: number; to: number } | null {
+  let staleRange: { from: number; to: number } | null = null;
+  useConversationStore.setState((state) => {
+    const merge = mergeConversationSnapshot(state.entries[conversation.id]?.detail ?? null, conversation);
+    staleRange = merge.staleRange;
+    return {
+      entries: writeEntry(state.entries, conversation.id, {
+        detail: merge.detail,
+        subscribing: false,
+        error: null,
+      }),
+    };
+  });
+  return staleRange;
 }
 
 /**
@@ -109,6 +118,31 @@ export function applyConversationNodesPage(
       return state;
     }
     const next = prependOlderNodes(entry.detail, page);
+    if (next === "stale") {
+      result = "stale";
+      return state;
+    }
+    return { entries: writeEntry(state.entries, id, { ...entry, detail: next }) };
+  });
+  return result;
+}
+
+/**
+ * 陈旧区间修复分片落地(bug1 根修):把权威节点原地替换进已加载窗口,长度与
+ * nodesOffset 不变。"stale" = 分片越界(修复期间窗口漂移),调用方放弃本轮。
+ */
+export function applyConversationNodesRangeReplace(
+  id: string,
+  page: ConversationNodesPageDto,
+): "applied" | "stale" | "no_detail" {
+  let result: "applied" | "stale" | "no_detail" = "applied";
+  useConversationStore.setState((state) => {
+    const entry = state.entries[id];
+    if (!entry?.detail) {
+      result = "no_detail";
+      return state;
+    }
+    const next = replaceNodesRange(entry.detail, page);
     if (next === "stale") {
       result = "stale";
       return state;

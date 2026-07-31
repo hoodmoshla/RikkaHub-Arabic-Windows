@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { ConversationDto, ConversationNodesPageDto, ConversationNodeUpdateEventDto, ConversationTextDeltaEventDto, MessageNodeDto } from "~/types";
-import { applyNodeUpdate, applyTextDelta, mergeConversationSnapshot, prependOlderNodes } from "./conversation-sync";
+import { applyNodeUpdate, applyTextDelta, mergeConversationSnapshot, prependOlderNodes, replaceNodesRange } from "./conversation-sync";
 
 function node(id: string, text: string): MessageNodeDto {
   return {
@@ -225,23 +225,24 @@ describe("applyNodeUpdate(窗口化,I-2)", () => {
   });
 });
 
-describe("mergeConversationSnapshot(I-2)", () => {
+describe("mergeConversationSnapshot(I-2 + bug1 前缀保留)", () => {
   test("全量快照(offset 0/缺省)原样采用", () => {
     const existing = conversation([node("n1", "旧")]);
     const incoming = conversation([node("n1", "新")]);
-    expect(mergeConversationSnapshot(existing, incoming)).toBe(incoming);
+    expect(mergeConversationSnapshot(existing, incoming).detail).toBe(incoming);
     const full = { ...incoming, nodesOffset: 0, nodeStamps: ["a"] };
-    expect(mergeConversationSnapshot(existing, full)).toBe(full);
+    expect(mergeConversationSnapshot(existing, full).detail).toBe(full);
   });
 
-  test("清单一致的已加载前缀被保留(对象身份不变),offset 前移", () => {
+  test("清单一致的已加载前缀被保留(对象身份不变),offset 不抬升", () => {
     const existing = windowed(
       [node("n1", "一"), node("n2", "二"), node("n3", "三"), node("n4", "四")],
       1,
       ["s0", "s1", "s2", "s3", "s4"],
     );
     const incoming = windowed([node("n3", "三新"), node("n4", "四新")], 3, ["s0", "s1", "s2", "s3", "s4"]);
-    const merged = mergeConversationSnapshot(existing, incoming);
+    const { detail: merged, staleRange } = mergeConversationSnapshot(existing, incoming);
+    expect(staleRange).toBeNull();
     expect(merged.nodesOffset).toBe(1);
     expect(merged.messages.map((n) => n.id)).toEqual(["n1", "n2", "n3", "n4"]);
     // 保留的前缀保持对象身份;窗口内以新快照为准
@@ -251,36 +252,80 @@ describe("mergeConversationSnapshot(I-2)", () => {
     expect(merged.nodeStamps).toBe(incoming.nodeStamps);
   });
 
-  test("首个戳不一致处停止延伸,其更早的历史被丢弃(保守自愈)", () => {
+  test("戳失配段不再原地丢弃:旧内容保留渲染,清单维持本地旧戳,区间报给调用方修复", () => {
     const existing = windowed(
       [node("n0", "零"), node("n1", "一"), node("n2", "二"), node("n3", "三")],
       0,
       ["s0", "s1-旧", "s2", "s3"],
     );
     const incoming = windowed([node("n3", "三新")], 3, ["s0", "s1-新", "s2", "s3"]);
-    const merged = mergeConversationSnapshot(existing, incoming);
-    // n2 一致保留;n1 戳不同 → 停,n0/n1 丢弃
-    expect(merged.nodesOffset).toBe(2);
-    expect(merged.messages.map((n) => n.id)).toEqual(["n2", "n3"]);
+    const { detail: merged, staleRange } = mergeConversationSnapshot(existing, incoming);
+    // n2 一致;n1 戳不同 → [0,2) 陈旧但保留,offset 不变(Virtuoso 不遭遇 firstItemIndex 增大)
+    expect(merged.nodesOffset).toBe(0);
+    expect(merged.messages.map((n) => n.id)).toEqual(["n0", "n1", "n2", "n3"]);
+    expect(merged.messages[3]).toBe(incoming.messages[0]!);
+    // 陈旧段清单保留本地旧戳(反映本地真实版本,修复前的后续合并仍能识别陈旧)
+    expect(merged.nodeStamps).toEqual(["s0", "s1-旧", "s2", "s3"]);
+    expect(staleRange).toEqual({ from: 0, to: 2 });
   });
 
-  test("结构漂移(节点删除导致整体错位)时全部前缀被丢弃", () => {
+  test("结构漂移(节点删除导致整体错位)时全部前缀标脏保留", () => {
     const existing = windowed(
       [node("n0", "零"), node("n1", "一"), node("n2", "二")],
       0,
       ["s0", "s1", "s2"],
     );
-    // 服务端删除了 n1:清单错位,所有位置的戳都对不上
+    // 服务端删除了一个节点:清单错位,所有位置的戳都对不上
     const incoming = windowed([node("n2", "二")], 1, ["s0-x", "s2-x"]);
-    const merged = mergeConversationSnapshot(existing, incoming);
-    expect(merged.nodesOffset).toBe(1);
-    expect(merged.messages.map((n) => n.id)).toEqual(["n2"]);
+    const { detail: merged, staleRange } = mergeConversationSnapshot(existing, incoming);
+    expect(merged.nodesOffset).toBe(0);
+    expect(merged.messages.map((n) => n.id)).toEqual(["n0", "n2"]);
+    expect(merged.nodeStamps).toEqual(["s0", "s2-x"]);
+    expect(staleRange).toEqual({ from: 0, to: 1 });
+  });
+
+  test("本地已加载段接不上新窗口起点(中间有空洞)时原样采用新快照", () => {
+    const existing = windowed([node("n0", "零"), node("n1", "一")], 0, ["s0", "s1"]);
+    // 离开期间追加了很多节点,新窗口从 abs 5 开始,本地 [0,2) 与之有空洞
+    const incoming = windowed([node("n5", "五")], 5, ["s0", "s1", "s2", "s3", "s4", "s5"]);
+    const result = mergeConversationSnapshot(existing, incoming);
+    expect(result.detail).toBe(incoming);
+    expect(result.staleRange).toBeNull();
   });
 
   test("本地无清单(极老缓存形状)时原样采用新快照", () => {
     const existing = conversation([node("n1", "一"), node("n2", "二")]);
     const incoming = windowed([node("n2", "二")], 1, ["s0", "s1"]);
-    expect(mergeConversationSnapshot(existing, incoming)).toBe(incoming);
+    expect(mergeConversationSnapshot(existing, incoming).detail).toBe(incoming);
+  });
+});
+
+describe("replaceNodesRange(bug1 陈旧前缀修复)", () => {
+  function page(nodes: MessageNodeDto[], offset: number, stamps: string[]): ConversationNodesPageDto {
+    return { nodes, stamps, offset, updateAt: 500 };
+  }
+
+  test("对齐分片原地替换节点与清单戳,长度与 offset 不变", () => {
+    const conv = windowed(
+      [node("n0", "旧零"), node("n1", "旧一"), node("n2", "二")],
+      1,
+      ["s0", "s1-旧", "s2-旧", "s3"],
+    );
+    const next = replaceNodesRange(conv, page([node("n0", "新零"), node("n1", "新一")], 1, ["s1-新", "s2-新"]));
+    expect(next).not.toBe("stale");
+    if (next === "stale") return;
+    expect(next.nodesOffset).toBe(1);
+    expect(next.messages.map((n) => n.id)).toEqual(["n0", "n1", "n2"]);
+    expect(next.messages[0]!.messages[0]!.parts).toEqual([{ type: "text", text: "新零" }]);
+    expect(next.messages[2]).toBe(conv.messages[2]!); // 区间外节点身份不变
+    expect(next.nodeStamps).toEqual(["s0", "s1-新", "s2-新", "s3"]);
+  });
+
+  test("分片越过已加载窗口边界或为空时拒绝(stale)", () => {
+    const conv = windowed([node("n1", "一"), node("n2", "二")], 1, ["s0", "s1", "s2"]);
+    expect(replaceNodesRange(conv, page([node("n0", "零"), node("n1", "一")], 0, ["s0", "s1"]))).toBe("stale");
+    expect(replaceNodesRange(conv, page([node("n2", "二"), node("n3", "三")], 2, ["s2", "s3"]))).toBe("stale");
+    expect(replaceNodesRange(conv, page([], 1, []))).toBe("stale");
   });
 });
 
