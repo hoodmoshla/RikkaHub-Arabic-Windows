@@ -8,6 +8,7 @@ import type { AssistantProfile, MessageDto, MessageNodeDto, ProviderProfile, Pro
 
 import { copyTextToClipboard } from "~/lib/clipboard";
 import { openExternal } from "~/lib/external-link";
+import { useStableMap } from "~/lib/stable-map";
 import { cn } from "~/lib/utils";
 import { getAudioPlaybackKey, stopAudio, useAudioPlaybackKey } from "~/lib/global-audio";
 import { ttsController, useIsTtsActiveForKey } from "~/lib/tts/tts-controller";
@@ -956,13 +957,22 @@ export const ChatMessage = React.memo(
       : "/settings?section=providers";
     const showActions = selecting ? false : isLastMessage ? !loading : hasMessageContent;
     const showAssistantBubble = !isUser && displaySetting?.showAssistantBubble === true;
-    const citationUrlMap = React.useMemo(
-      () => buildCitationUrlMap(message.parts, message.annotations),
-      [message.annotations, message.parts],
+    // 值稳定化(代码块流式重挂载根修):流式期间 message.parts 每个 delta 都是新数组,
+    // 若 Map 每帧换新引用,会沿 Markdown 的 components useMemo 一路把 components.code
+    // 变成新函数身份 → React 每帧整棵重挂载代码块(实测 45ms/次:高亮闪烁、滚动清零、
+    // 完成后观察不到 isAnimating 转换)。Map 内容只随 annotations/工具输出变,按内容
+    // 比较复用旧引用,引用链在纯文本流式期间保持稳定。
+    const citationUrlMap = useStableMap(
+      React.useMemo(
+        () => buildCitationUrlMap(message.parts, message.annotations),
+        [message.annotations, message.parts],
+      ),
     );
-    const citationOrdinalMap = React.useMemo(
-      () => buildCitationOrdinalMap(message.parts, message.annotations),
-      [message.annotations, message.parts],
+    const citationOrdinalMap = useStableMap(
+      React.useMemo(
+        () => buildCitationOrdinalMap(message.parts, message.annotations),
+        [message.annotations, message.parts],
+      ),
     );
     const handleClickCitation = React.useCallback(
       (citationId: string) => {
