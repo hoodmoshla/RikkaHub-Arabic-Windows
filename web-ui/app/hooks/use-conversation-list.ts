@@ -152,6 +152,7 @@ export function useConversationList({
   const previousAssistantIdRef = React.useRef<string | null>(currentAssistantId);
   const refreshTimerRef = React.useRef<number | null>(null);
   const listRequestEpochRef = React.useRef(0);
+  const loadMoreInFlightRef = React.useRef(false);
 
   // FE-P1-3:排序/合并/刷新纯逻辑迁至 lib/conversation-list-ops.ts(可单测),
   // 这里保留 useCallback 包装以维持既有调用点与依赖数组形状不变。
@@ -285,7 +286,15 @@ export function useConversationList({
       .then((data) => {
         if (!active || requestEpoch !== listRequestEpochRef.current) return;
 
-        const pagination = { hasMore: data.hasMore, nextOffset: data.nextOffset ?? null };
+        // bug2 根修(1.5.0 内测):刷新游标只进不退。刷新的 limit 封顶 maxRefreshLimit,
+        // 已加载超过封顶、或在途 loadMore 先落地时,服务端返回的 nextOffset 会落后于
+        // 本地游标 —— 直接覆盖会让后续翻页拉回整页重复项。hasMore=false 仍无条件收敛
+        // 为 null(总量收缩场景以服务端为准);游标曾到底(null)而服务端说还有更多
+        // (封顶刷新看不到已加载的尾部)时,从已加载条数续探,由下一页响应自然收敛。
+        const cursor = !data.hasMore
+          ? null
+          : Math.max(data.nextOffset ?? 0, nextOffsetRef.current ?? conversationsRef.current.length);
+        const pagination = { hasMore: data.hasMore, nextOffset: cursor };
         if (loadedCount === 0) {
           const sorted = sortConversations(data.items);
           rememberList(currentAssistantId, sorted, pagination);
@@ -297,7 +306,7 @@ export function useConversationList({
             return next;
           });
         }
-        nextOffsetRef.current = data.nextOffset ?? null;
+        nextOffsetRef.current = cursor;
         setHasMore(data.hasMore);
 
         if (routeId) {
@@ -337,7 +346,10 @@ export function useConversationList({
 
   const loadMore = React.useCallback(() => {
     const offset = nextOffsetRef.current;
-    if (offset === null) return;
+    // 在途去重:滚动检测层(infinite-scroll-area)会在滚动/数据变化时反复调用,
+    // 去重统一收敛在数据层这一处,调用方无需自带状态。
+    if (offset === null || loadMoreInFlightRef.current) return;
+    loadMoreInFlightRef.current = true;
 
     const requestEpoch = listRequestEpochRef.current;
 
@@ -346,6 +358,9 @@ export function useConversationList({
         searchParams: { offset, limit: pageSize },
       })
       .then((data) => {
+        // 与并发刷新竞态:刷新已重置游标,本响应作废。在途标记随 finally 释放,
+        // 下一次滚动检测按刷新后的游标重试(bug2 根修:旧无限滚动库在"next() 被调
+        // 但列表长度没变"后永久锁死,这里的每一条丢弃/失败路径都必须可重试)。
         if (requestEpoch !== listRequestEpochRef.current) return;
 
         const pagination = { hasMore: data.hasMore, nextOffset: data.nextOffset ?? null };
@@ -358,8 +373,11 @@ export function useConversationList({
         setHasMore(data.hasMore);
       })
       .catch(() => {
-        if (requestEpoch !== listRequestEpochRef.current) return;
-        setHasMore(false);
+        // bug2 根修:瞬时失败不再 setHasMore(false)——那会把更早的历史会话整段藏起来
+        // (症状即"某日期之前的会话消失")。游标与 hasMore 原样保留,下次滚动自然重试。
+      })
+      .finally(() => {
+        loadMoreInFlightRef.current = false;
       });
   }, [mergeConversations, pageSize]);
 
