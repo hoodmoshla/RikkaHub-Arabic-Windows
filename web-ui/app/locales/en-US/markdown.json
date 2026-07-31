@@ -2,18 +2,14 @@
   "code_block": {
     "clipboard_not_available": "Clipboard is not available",
     "copy_code": "Copy code",
-    "copied": "Copied",
-    "copy": "Copy",
-    "preview_code": "Preview code",
+    "collapse_code": "Collapse code block",
+    "expand_code": "Expand code block",
     "preview": "Preview",
     "source": "Source",
-    "window_not_available": "Window is not available",
+    "preview_loading": "Loading preview…",
+    "open_in_browser": "Open in browser",
+    "open_failed": "Failed to open",
     "download_code": "Download code",
-    "download": "Download",
-    "downloaded": "Downloaded",
     "downloaded_toast": "Downloaded to Downloads folder: {{name}}"
-  },
-  "markdown": {
-    "code_preview_title": "{{language}} preview"
   }
 }

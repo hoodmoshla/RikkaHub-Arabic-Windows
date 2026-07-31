@@ -1,9 +1,9 @@
 // api/handlers/system.ts — 系统杂项路由（health/ai-icon/fonts、context-limit/prompt-optimize、logs/stats/sponsors）
 // 纪律：纯搬迁自 server.ts routeApi()；辅助函数（字体/图标/统计等）暂经 ../../server 导入，待后续收敛。
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { customFontsDir } from "../../foundation/paths";
+import { customFontsDir, dataDir } from "../../foundation/paths";
 import { saveState, state } from "../../persistence/json-store";
 import { APP_VERSION } from "../../updates/index";
 import { loadModelsDev, lookupContextLimit, modelsDevCache } from "../../inference-engine/providers";
@@ -45,6 +45,38 @@ export async function handleSystemRoutes(request: Request, url: URL, path: strin
         return () => appClients.delete(controller);
       },
     );
+  }
+  // 代码块"在浏览器中打开"(桌面壳专用):WebView2 吞掉 window.open(blob:),blob URL
+  // 也只在页面内有效。落盘为临时文件后交给系统默认程序(.html → 默认浏览器)。
+  // 文件放 dataDir/tmp 下,file:// 页面与应用源完全隔离,不触及应用的 localStorage。
+  if (path === "code-preview/open" && request.method === "POST") {
+    const body = await readJson<{ content?: string; language?: string }>(request);
+    const content = typeof body?.content === "string" ? body.content : "";
+    if (!content) return error("Missing content", 400);
+    const normalized = String(body?.language ?? "").trim().toLowerCase();
+    const ext = normalized === "html" || normalized === "htm" ? "html" : normalized === "svg" ? "svg" : "txt";
+    const previewDir = join(dataDir, "tmp", "code-preview");
+    mkdirSync(previewDir, { recursive: true });
+    // 顺手清理 1 小时前的旧预览文件,目录不随使用无限膨胀。
+    const expireBefore = Date.now() - 60 * 60 * 1000;
+    for (const name of readdirSync(previewDir)) {
+      const stale = join(previewDir, name);
+      try {
+        if (statSync(stale).mtimeMs < expireBefore) rmSync(stale, { force: true });
+      } catch {
+        // 竞态删除失败无关紧要,下次再清
+      }
+    }
+    const file = join(previewDir, `code-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.${ext}`);
+    await Bun.write(file, content);
+    const opener =
+      process.platform === "win32"
+        ? ["cmd", "/c", "start", "", file]
+        : process.platform === "darwin"
+          ? ["open", file]
+          : ["xdg-open", file];
+    Bun.spawn(opener, { stdout: "ignore", stderr: "ignore" });
+    return json({ ok: true });
   }
   if (path === "ai-icon" && request.method === "GET") {
     const name = url.searchParams.get("name")?.trim();

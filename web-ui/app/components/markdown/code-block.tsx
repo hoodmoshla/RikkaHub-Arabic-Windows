@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { ComponentProps, CSSProperties, HTMLAttributes } from "react";
 
-import { Check, Code2, Copy, Download, Eye } from "lucide-react";
+import { Check, ChevronDown, Copy, Download, ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -20,17 +20,16 @@ import {
   type TokenizedCode,
 } from "./incremental-shiki";
 import { Button } from "~/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
 import { copyTextToClipboard } from "~/lib/clipboard";
+import { isDesktopShell } from "~/lib/external-link";
+import { openCodePreviewFile } from "~/services/api";
 import { cn } from "~/lib/utils";
 
-const MAX_SHIKI_CODE_LENGTH = 12000;
+// 高亮的绝对上限只作为病态输入的保险丝。常规长代码不再"一刀切放弃高亮":静态块走
+// 空闲分片渐进高亮(每片 ~8KB,主线程无长任务),流式块走行级增量分词(每帧只重算
+// 尾行)——两条路径成本都与总长解耦,任意正常长度都能最终全彩。
+const MAX_SHIKI_CODE_LENGTH = 200_000;
+const HIGHLIGHT_CHUNK_CHARS = 8_000;
 const SHIKI_CACHE_LIMIT = 200;
 const SHIKI_THEME_LIGHT = "catppuccin-latte";
 const SHIKI_THEME_DARK = "catppuccin-mocha";
@@ -38,7 +37,7 @@ const SHIKI_THEME_DARK = "catppuccin-mocha";
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
   language: string;
-  onPreview?: () => void;
+  isAnimating?: boolean;
   showLineNumbers?: boolean;
   wrapLines?: boolean;
 };
@@ -123,7 +122,7 @@ function resolveShikiLanguage(language: string): BundledLanguage | null {
   return normalized as BundledLanguage;
 }
 
-// NUL 分隔符(语言名/代码文本中都不可能出现)。用 fromCharCode 构造而非 \u0000
+// NUL 分隔符(语言名/代码文本中都不可能出现)。用 fromCharCode 构造而非 U+0000
 // 字面量:后者在部分编辑工具链下会被还原成真实 NUL 字节,把本源文件变成二进制。
 const TOKENS_CACHE_KEY_SEPARATOR = String.fromCharCode(0);
 
@@ -432,7 +431,7 @@ const CodeBlockBody = React.memo(
 
 CodeBlockBody.displayName = "CodeBlockBody";
 
-export function CodeBlockContainer({
+function CodeBlockContainer({
   className,
   language,
   style,
@@ -440,10 +439,7 @@ export function CodeBlockContainer({
 }: HTMLAttributes<HTMLDivElement> & { language: string }) {
   return (
     <div
-      className={cn(
-        "code-block group relative w-full overflow-hidden rounded-lg border border-border",
-        className,
-      )}
+      className={cn("code-block group relative w-full overflow-hidden", className)}
       data-language={language}
       style={style}
       {...props}
@@ -451,23 +447,7 @@ export function CodeBlockContainer({
   );
 }
 
-export function CodeBlockHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("code-block-header", className)} {...props} />;
-}
-
-export function CodeBlockTitle({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("flex items-center gap-2", className)} {...props} />;
-}
-
-export function CodeBlockLanguage({ className, ...props }: HTMLAttributes<HTMLSpanElement>) {
-  return <span className={cn("code-block-language", className)} {...props} />;
-}
-
-export function CodeBlockActions({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("code-block-actions", className)} {...props} />;
-}
-
-export function CodeBlockContent({
+function CodeBlockContent({
   code,
   language,
   showLineNumbers = false,
@@ -478,7 +458,7 @@ export function CodeBlockContent({
   showLineNumbers?: boolean;
   wrapLines?: boolean;
 }) {
-  // bug3 根修之二:原文渲染路径(超过 MAX_SHIKI_CODE_LENGTH 的超长代码、高亮器装载期)
+  // bug3 根修之二:原文渲染路径(超长代码保险丝、高亮器装载期、渐进高亮的未上色尾部)
   // 的行数组按内容复用上一帧引用。旧实现每帧对全文重建所有行 → CodeLine 的引用 memo
   // 全部失效,超长代码块流式时仍是逐帧全量协调。复用后未变化的行引用稳定,与高亮
   // 路径享受同一条"每帧只协调尾行"的通道。(ref 在 useMemo 内更新:幂等,双调无害。)
@@ -578,8 +558,10 @@ export function CodeBlockContent({
       }
     }
 
-    // cache miss:分词推迟到空闲期。高亮器已装载则空闲片内同步分词;尚未装载
-    // 沿用订阅机制(装载完成回调 setState)。期间按原文渲染,高度不变。
+    // cache miss:分词推迟到空闲期,且大代码分片渐进——每个空闲片只喂一段前缀
+    // (行边界对齐,~8KB)给增量分词器,已上色行立即可见、未处理尾部保持原文行。
+    // 主线程不再出现整块分词长任务,任意长度代码都能最终全彩(取代旧的 12K 一刀
+    // 切放弃高亮,也消灭了流式中途"彩色突然消失"的降级闪烁)。
     let cancelled = false;
     const tokensCacheKey = getTokensCacheKey(code, language);
     const onHighlighted = (result: TokenizedCode) => {
@@ -588,19 +570,40 @@ export function CodeBlockContent({
       }
     };
 
-    scheduleIdleHighlight(() => {
-      if (cancelled) return;
-      const sync = highlightSync(code, language);
-      if (sync) {
-        setTokenized(sync);
-        return;
-      }
-      const nextTokenized = highlightCode(code, language, onHighlighted);
-      if (nextTokenized) {
-        setTokenized(nextTokenized);
-      }
-      // null = 高亮器装载中,订阅回调兜底。
-    });
+    const feedChunk = (from: number) => {
+      scheduleIdleHighlight(() => {
+        if (cancelled) return;
+        if (!resolvedHighlighters.get(language)) {
+          // 高亮器未装载:走装载+订阅路径(装载完成后的分词依旧在空闲片里执行)。
+          const nextTokenized = highlightCode(code, language, onHighlighted);
+          if (nextTokenized) {
+            setTokenized(nextTokenized);
+          }
+          return;
+        }
+        let end = code.length;
+        if (from + HIGHLIGHT_CHUNK_CHARS < code.length) {
+          const newline = code.indexOf("\n", from + HIGHLIGHT_CHUNK_CHARS);
+          end = newline === -1 ? code.length : newline + 1;
+        }
+        const sync = highlightSync(code.slice(0, end), language);
+        if (!sync) return;
+        if (end >= code.length) {
+          setTokenized(sync);
+          return;
+        }
+        // 前缀以 \n 结尾:sync.tokens 的最后一项是空的"未完成行",丢弃它,
+        // 用原文行补齐尾部,得到"上半彩色、下半原文"的渐进帧。
+        const doneLines = sync.tokens.length - 1;
+        setTokenized({
+          bg: sync.bg,
+          fg: sync.fg,
+          tokens: [...sync.tokens.slice(0, doneLines), ...rawTokens.tokens.slice(doneLines)],
+        });
+        feedChunk(end);
+      });
+    };
+    feedChunk(0);
 
     return () => {
       cancelled = true;
@@ -640,20 +643,11 @@ export function CodeBlockContent({
   );
 }
 
-export type CodeBlockCopyButtonProps = ComponentProps<typeof Button> & {
-  onCopy?: () => void;
-  onError?: (error: Error) => void;
-  timeout?: number;
-};
+// —— 头部动作按钮:纯图标、无文字(产品稿),悬停出 tooltip(title),操作成功短暂变对勾。——
 
-export function CodeBlockCopyButton({
-  children,
-  className,
-  onCopy,
-  onError,
-  timeout = 2000,
-  ...props
-}: CodeBlockCopyButtonProps) {
+type CodeBlockActionButtonProps = ComponentProps<typeof Button>;
+
+function CodeBlockCopyButton({ className, ...props }: CodeBlockActionButtonProps) {
   const { t } = useTranslation("markdown");
   const [isCopied, setIsCopied] = React.useState(false);
   const timeoutRef = React.useRef<number>(0);
@@ -667,14 +661,13 @@ export function CodeBlockCopyButton({
     try {
       await copyTextToClipboard(code);
       setIsCopied(true);
-      onCopy?.();
       timeoutRef.current = window.setTimeout(() => {
         setIsCopied(false);
-      }, timeout);
-    } catch (error) {
-      onError?.(error as Error);
+      }, 2000);
+    } catch {
+      toast.error(t("code_block.clipboard_not_available"));
     }
-  }, [code, isCopied, onCopy, onError, timeout]);
+  }, [code, isCopied, t]);
 
   React.useEffect(
     () => () => {
@@ -686,75 +679,83 @@ export function CodeBlockCopyButton({
   return (
     <Button
       aria-label={t("code_block.copy_code")}
-      className={cn("code-block-copy h-6 px-1.5", className)}
+      title={t("code_block.copy_code")}
+      className={cn("code-block-icon-button", className)}
       onClick={copyToClipboard}
-      size="xs"
+      size="icon-xs"
       type="button"
       variant="ghost"
       {...props}
     >
-      {children ??
-        (isCopied ? (
-          <>
-            <Check className="size-3" />
-            <span>{t("code_block.copied")}</span>
-          </>
-        ) : (
-          <>
-            <Copy className="size-3" />
-            <span>{t("code_block.copy")}</span>
-          </>
-        ))}
+      {isCopied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
     </Button>
   );
 }
 
-export type CodeBlockPreviewButtonProps = Omit<ComponentProps<typeof Button>, "onClick"> & {
-  onPreview: () => void;
-  active?: boolean;
-};
-
-export function CodeBlockPreviewButton({
-  active,
-  children,
-  className,
-  onPreview,
-  ...props
-}: CodeBlockPreviewButtonProps) {
+function CodeBlockOpenButton({ className, ...props }: CodeBlockActionButtonProps) {
   const { t } = useTranslation("markdown");
+  const { code, language } = React.useContext(CodeBlockContext);
+  const [isOpened, setIsOpened] = React.useState(false);
+  const timeoutRef = React.useRef<number>(0);
+
+  const handleOpen = React.useCallback(async () => {
+    if (isOpened) return;
+
+    try {
+      if (isDesktopShell()) {
+        // 桌面壳:WebView2 吞掉 window.open(blob:),blob URL 也只在页面内有效。
+        // 由后端把代码落盘为临时文件并用系统默认程序打开(.html → 默认浏览器)。
+        await openCodePreviewFile(code, language);
+      } else {
+        const normalized = language.trim().toLowerCase();
+        const mime =
+          normalized === "html"
+            ? "text/html;charset=utf-8"
+            : normalized === "svg"
+              ? "image/svg+xml;charset=utf-8"
+              : "text/plain;charset=utf-8";
+        const blob = new Blob([code], { type: mime });
+        const url = window.URL.createObjectURL(blob);
+        window.open(url, "_blank", "noopener,noreferrer");
+        window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
+      }
+      setIsOpened(true);
+      timeoutRef.current = window.setTimeout(() => {
+        setIsOpened(false);
+      }, 2000);
+    } catch {
+      toast.error(t("code_block.open_failed"));
+    }
+  }, [code, isOpened, language, t]);
+
+  React.useEffect(
+    () => () => {
+      window.clearTimeout(timeoutRef.current);
+    },
+    [],
+  );
+
   return (
     <Button
-      aria-label={t("code_block.preview_code")}
-      className={cn("code-block-copy h-6 px-1.5", className)}
-      onClick={onPreview}
-      size="xs"
+      aria-label={t("code_block.open_in_browser")}
+      title={t("code_block.open_in_browser")}
+      className={cn("code-block-icon-button", className)}
+      onClick={handleOpen}
+      size="icon-xs"
       type="button"
       variant="ghost"
       {...props}
     >
-      {children ?? (
-        <>
-          {active ? <Code2 className="size-3" /> : <Eye className="size-3" />}
-          <span>{active ? t("code_block.source") : t("code_block.preview")}</span>
-        </>
+      {isOpened ? (
+        <Check className="size-3.5 text-emerald-500" />
+      ) : (
+        <ExternalLink className="size-3.5" />
       )}
     </Button>
   );
 }
 
-export type CodeBlockDownloadButtonProps = ComponentProps<typeof Button> & {
-  onDownload?: () => void;
-  onError?: (error: Error) => void;
-};
-
-export function CodeBlockDownloadButton({
-  children,
-  className,
-  onDownload,
-  onError,
-  timeout = 2000,
-  ...props
-}: CodeBlockDownloadButtonProps & { timeout?: number }) {
+function CodeBlockDownloadButton({ className, ...props }: CodeBlockActionButtonProps) {
   const { t } = useTranslation("markdown");
   const { code, language } = React.useContext(CodeBlockContext);
   const [isDownloaded, setIsDownloaded] = React.useState(false);
@@ -763,34 +764,24 @@ export function CodeBlockDownloadButton({
   const handleDownload = React.useCallback(() => {
     if (isDownloaded) return;
 
-    if (typeof window === "undefined") {
-      onError?.(new Error(t("code_block.window_not_available")));
-      return;
-    }
-
-    try {
-      const fileName = toDownloadFileName(language);
-      const blob = new Blob([code], { type: "text/plain;charset=utf-8" });
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = fileName;
-      document.body.append(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-      setIsDownloaded(true);
-      onDownload?.();
-      timeoutRef.current = window.setTimeout(() => {
-        setIsDownloaded(false);
-      }, timeout);
-      toast.success(t("code_block.downloaded_toast", { name: fileName }), {
-        duration: 5000,
-      });
-    } catch (error) {
-      onError?.(error as Error);
-    }
-  }, [code, isDownloaded, language, onDownload, onError, t, timeout]);
+    const fileName = toDownloadFileName(language);
+    const blob = new Blob([code], { type: "text/plain;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+    setIsDownloaded(true);
+    timeoutRef.current = window.setTimeout(() => {
+      setIsDownloaded(false);
+    }, 2000);
+    toast.success(t("code_block.downloaded_toast", { name: fileName }), {
+      duration: 5000,
+    });
+  }, [code, isDownloaded, language, t]);
 
   React.useEffect(
     () => () => {
@@ -802,130 +793,260 @@ export function CodeBlockDownloadButton({
   return (
     <Button
       aria-label={t("code_block.download_code")}
-      className={cn("code-block-copy h-6 px-1.5", className)}
+      title={t("code_block.download_code")}
+      className={cn("code-block-icon-button", className)}
       onClick={handleDownload}
-      size="xs"
+      size="icon-xs"
       type="button"
       variant="ghost"
       {...props}
     >
-      {children ??
-        (isDownloaded ? (
-          <>
-            <Check className="size-3" />
-            <span>{t("code_block.downloaded")}</span>
-          </>
-        ) : (
-          <>
-            <Download className="size-3" />
-            <span>{t("code_block.download")}</span>
-          </>
-        ))}
+      {isDownloaded ? (
+        <Check className="size-3.5 text-emerald-500" />
+      ) : (
+        <Download className="size-3.5" />
+      )}
     </Button>
   );
 }
 
-export type CodeBlockLanguageSelectorProps = ComponentProps<typeof Select>;
-
-export function CodeBlockLanguageSelector(props: CodeBlockLanguageSelectorProps) {
-  return <Select {...props} />;
-}
-
-export type CodeBlockLanguageSelectorTriggerProps = ComponentProps<typeof SelectTrigger>;
-
-export function CodeBlockLanguageSelectorTrigger({
-  className,
-  ...props
-}: CodeBlockLanguageSelectorTriggerProps) {
+// 预览/源码分段开关(产品稿右上角的胶囊切换)。生成中禁用:流式内容逐字增长,
+// iframe 预览会疯狂重载。
+function CodeBlockModeSwitch({
+  mode,
+  disabled,
+  onModeChange,
+}: {
+  mode: "source" | "preview";
+  disabled?: boolean;
+  onModeChange: (mode: "source" | "preview") => void;
+}) {
+  const { t } = useTranslation("markdown");
+  const options = [
+    { value: "preview" as const, label: t("code_block.preview") },
+    { value: "source" as const, label: t("code_block.source") },
+  ];
   return (
-    <SelectTrigger
-      className={cn("h-7 border-none bg-transparent px-2 text-xs shadow-none", className)}
-      size="sm"
-      {...props}
-    />
+    <div
+      className={cn(
+        "ml-1 flex shrink-0 items-center rounded-full bg-muted p-0.5",
+        disabled && "pointer-events-none opacity-50",
+      )}
+    >
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          disabled={disabled}
+          aria-pressed={mode === option.value}
+          onClick={() => onModeChange(option.value)}
+          className={cn(
+            "rounded-full px-2 py-0.5 text-xs transition-colors",
+            mode === option.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
-export type CodeBlockLanguageSelectorValueProps = ComponentProps<typeof SelectValue>;
+// Markdown 预览懒加载。必须是模块级单例:若在组件内 React.lazy,每个实例/每次
+// 重挂载都是新的组件类型,Suspense 会重复走 fallback(预览闪加载态)。
+const LazyMarkdown = React.lazy(() => import("./markdown"));
 
-export function CodeBlockLanguageSelectorValue(props: CodeBlockLanguageSelectorValueProps) {
-  return <SelectValue {...props} />;
-}
-
-export type CodeBlockLanguageSelectorContentProps = ComponentProps<typeof SelectContent>;
-
-export function CodeBlockLanguageSelectorContent({
-  align = "end",
-  ...props
-}: CodeBlockLanguageSelectorContentProps) {
-  return <SelectContent align={align} {...props} />;
-}
-
-export type CodeBlockLanguageSelectorItemProps = ComponentProps<typeof SelectItem>;
-
-export function CodeBlockLanguageSelectorItem(props: CodeBlockLanguageSelectorItemProps) {
-  return <SelectItem {...props} />;
-}
+// 源码/预览共享同一固定块高(产品稿:无论内容多长,块最多这么大,内部滚动)。
+// 两个字面量必须保持一致:body 是上限,iframe 撑满它。
+const CODE_BLOCK_BODY_MAX_HEIGHT_CLASS = "max-h-[420px]";
+const CODE_BLOCK_PREVIEW_IFRAME_HEIGHT_CLASS = "h-[420px]";
 
 export function CodeBlock({
   className,
   code,
   language,
-  onPreview,
+  isAnimating = false,
   showLineNumbers = false,
   wrapLines = false,
   ...props
 }: CodeBlockProps) {
+  const { t } = useTranslation("markdown");
   const displayLanguage = language || "text";
   const previewLanguage = React.useMemo(() => getCodePreviewLanguage(language), [language]);
-  const canPreview = Boolean(onPreview && previewLanguage);
-  const canInlinePreview = previewLanguage === "html" || previewLanguage === "svg";
-  // 默认显示源码,不自动渲染 HTML/SVG 预览:流式输出时 iframe 的 srcDoc 会随每个 delta
-  // 变化导致疯狂重载闪动(尚未完成的 HTML 一直在高频重绘,视觉灾难);且多数场景用户只
-  // 想读代码。需要看渲染效果时点头部"预览"按钮手动切换到 iframe 渲染层。
-  const [inlinePreview, setInlinePreview] = React.useState(false);
+  const canPreview = Boolean(previewLanguage);
   const shikiLanguage = React.useMemo(() => resolveShikiLanguage(language), [language]);
   const contextValue = React.useMemo(
     () => ({ code, language: displayLanguage }),
     [code, displayLanguage],
   );
 
+  // 生成中必须看源码(流式输出逐字增长,iframe/Markdown 预览会疯狂抖动/重载);
+  // 可预览的块在非生成态默认直接呈现效果(产品语义:预览是完成态的常态)。初始值
+  // 派生而非仅靠转换监听:citation/annotations 变化会让上游 components 换引用、
+  // 本组件在生成结束瞬间被重挂载,新实例观察不到 isAnimating 的 true→false。
+  const [mode, setMode] = React.useState<"source" | "preview">(() =>
+    !isAnimating && canPreview ? "preview" : "source",
+  );
+  const prevAnimatingRef = React.useRef(isAnimating);
+  React.useEffect(() => {
+    if (isAnimating) {
+      setMode("source");
+    } else if (prevAnimatingRef.current && canPreview) {
+      setMode("preview");
+    }
+    prevAnimatingRef.current = isAnimating;
+  }, [isAnimating, canPreview]);
+
+  const [collapsed, setCollapsed] = React.useState(false);
+
+  // 流式贴底:和主对话一样,生成中的代码块内部滚动跟住最新输出。用户向上滚动即
+  // 暂停跟随,滚回底部自动恢复(程序性 setScrollTop 触发的 scroll 事件会把 pinned
+  // 重新算回 true,语义自洽)。
+  const bodyRef = React.useRef<HTMLDivElement>(null);
+  const pinnedRef = React.useRef(true);
+  const handleBodyScroll = React.useCallback(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    pinnedRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 48;
+  }, []);
+  const showPreview = mode === "preview" && canPreview;
+  React.useEffect(() => {
+    if (!isAnimating || showPreview) return;
+    const el = bodyRef.current;
+    if (!el) return;
+    const pin = () => {
+      if (pinnedRef.current) el.scrollTop = el.scrollHeight;
+    };
+    pin();
+    // 贴底时机必须跟着"内容实际长高"走:token 上色/新行插入发生在子组件自己的
+    // effect 里,晚于本组件对 code 变化的感知一帧。ResizeObserver 在布局完成后
+    // 回调,scrollHeight 已是最终值,不会永远差一截。
+    const observer = new ResizeObserver(pin);
+    for (const child of el.children) observer.observe(child);
+    return () => observer.disconnect();
+  }, [isAnimating, showPreview]);
+
+  const iframeDoc = React.useMemo(() => {
+    if (!previewLanguage) return "";
+    if (previewLanguage === "html" || previewLanguage === "svg") {
+      return buildInlinePreviewDocument(code, previewLanguage);
+    }
+    if (previewLanguage === "mermaid") {
+      const encodedCode = encodeURIComponent(code);
+      return `<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      html, body { margin: 0; padding: 0; background: #ffffff; color: #1f2937; font-family: ui-sans-serif, system-ui, sans-serif; }
+      #container { min-height: 100vh; box-sizing: border-box; padding: 16px; display: flex; justify-content: center; }
+      #diagram { width: 100%; }
+      #error { display: none; width: 100%; white-space: pre-wrap; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div id="container">
+      <div id="diagram"></div>
+      <pre id="error"></pre>
+    </div>
+    <script type="module">
+      import mermaid from "https://esm.sh/mermaid@11";
+
+      const source = decodeURIComponent("${encodedCode}");
+      const diagram = document.getElementById("diagram");
+      const errorEl = document.getElementById("error");
+
+      mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+      try {
+        const id = "mermaid-" + Math.random().toString(36).slice(2);
+        const result = await mermaid.render(id, source.trim());
+        if (diagram) diagram.innerHTML = result.svg;
+      } catch (error) {
+        if (errorEl) {
+          errorEl.style.display = "block";
+          errorEl.textContent = error instanceof Error ? error.message : String(error);
+        }
+      }
+    </script>
+  </body>
+</html>`;
+    }
+    return "";
+  }, [code, previewLanguage]);
+
   return (
     <CodeBlockContext.Provider value={contextValue}>
       <CodeBlockContainer className={className} language={displayLanguage} {...props}>
-        <CodeBlockHeader>
-          <CodeBlockTitle>
-            <CodeBlockLanguage>{displayLanguage}</CodeBlockLanguage>
-          </CodeBlockTitle>
-          <CodeBlockActions>
-            {canInlinePreview ? (
-              <CodeBlockPreviewButton
-                active={inlinePreview}
-                onPreview={() => setInlinePreview((current) => !current)}
-              />
-            ) : null}
-            {canPreview && onPreview && <CodeBlockPreviewButton onPreview={onPreview} />}
-            <CodeBlockDownloadButton />
-            <CodeBlockCopyButton />
-          </CodeBlockActions>
-        </CodeBlockHeader>
-        {inlinePreview && canInlinePreview ? (
-          <div className="border-t bg-white">
-            <iframe
-              title={`${displayLanguage} preview`}
-              sandbox="allow-scripts"
-              srcDoc={buildInlinePreviewDocument(code, previewLanguage)}
-              className="h-[220px] w-full border-0"
+        <div className="code-block-header">
+          <button
+            type="button"
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? t("code_block.expand_code") : t("code_block.collapse_code")}
+            title={collapsed ? t("code_block.expand_code") : t("code_block.collapse_code")}
+            onClick={() => setCollapsed((current) => !current)}
+            className="flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <ChevronDown
+              data-export-ignore="true"
+              className={cn("size-3.5 shrink-0 transition-transform duration-200", collapsed && "-rotate-90")}
             />
+            <span className="code-block-language truncate">{displayLanguage}</span>
+          </button>
+          {/* code-block-actions:导出截图过滤器(share-export-dialog)按此类名排除交互按钮 */}
+          <div className="code-block-actions flex shrink-0 items-center gap-0.5">
+            <CodeBlockCopyButton />
+            <CodeBlockOpenButton />
+            <CodeBlockDownloadButton />
+            {canPreview ? (
+              <CodeBlockModeSwitch mode={mode} disabled={isAnimating} onModeChange={setMode} />
+            ) : null}
           </div>
-        ) : (
-          <CodeBlockContent
-            code={code}
-            language={shikiLanguage}
-            showLineNumbers={showLineNumbers}
-            wrapLines={wrapLines}
-          />
-        )}
+        </div>
+        <div
+          ref={bodyRef}
+          onScroll={handleBodyScroll}
+          className={cn(
+            "code-block-body overflow-auto",
+            CODE_BLOCK_BODY_MAX_HEIGHT_CLASS,
+            collapsed && "hidden",
+          )}
+        >
+          {showPreview ? (
+            previewLanguage === "markdown" ? (
+              <React.Suspense
+                fallback={
+                  <div className="flex h-[180px] items-center justify-center text-sm text-muted-foreground">
+                    {t("code_block.preview_loading")}
+                  </div>
+                }
+              >
+                <div className="p-4">
+                  <LazyMarkdown content={code} />
+                </div>
+              </React.Suspense>
+            ) : (
+              <iframe
+                title={`${displayLanguage} preview`}
+                sandbox="allow-scripts"
+                srcDoc={iframeDoc}
+                className={cn(
+                  "block w-full border-0",
+                  CODE_BLOCK_PREVIEW_IFRAME_HEIGHT_CLASS,
+                )}
+              />
+            )
+          ) : (
+            <CodeBlockContent
+              code={code}
+              language={shikiLanguage}
+              showLineNumbers={showLineNumbers}
+              wrapLines={wrapLines}
+            />
+          )}
+        </div>
       </CodeBlockContainer>
     </CodeBlockContext.Provider>
   );

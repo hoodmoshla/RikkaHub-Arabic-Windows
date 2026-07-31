@@ -21,8 +21,14 @@ import { TitleBar } from "./components/title-bar";
 import { UpdateDialog, type UpdateInfo } from "./components/update-dialog";
 import { WebAuthGate } from "./components/web-auth-gate";
 import { StartupGate } from "./components/startup-gate";
+import Logo from "./components/logo";
 import { FontFaceInjector } from "./components/font-face-injector";
 import { openExternal } from "./lib/external-link";
+import {
+  CHAT_CJK_OVERRIDE_FAMILY,
+  composeFontChain,
+  UI_CJK_OVERRIDE_FAMILY,
+} from "./lib/font-chain";
 import { toast } from "sonner";
 import { GlobalConfirmDialog } from "./components/global-confirm-dialog";
 import { useAppErrorsStore } from "./stores/app-errors-store";
@@ -67,6 +73,42 @@ export function Layout({ children }: { children: React.ReactNode }) {
               'try{var p=JSON.parse(localStorage.getItem("rikkahub.prepaint.v1"));if(p){var d=document.documentElement;if(typeof p.scale==="number"&&isFinite(p.scale)&&p.scale>0)d.style.setProperty("--rikkahub-ui-scale",String(p.scale));if(p.uiFont)d.style.setProperty("--rikkahub-ui-font",p.uiFont);if(p.chatFont)d.style.setProperty("--rikkahub-chat-font",p.chatFont)}}catch(e){}',
           }}
         />
+        {/* 【预绘制·读侧】明暗模式:重放 ThemeProvider applyMode(写侧,搜同键名)上次
+            算出的最终明暗值,首帧前把 .dark 挂上 <html> —— 根治暗色用户冷启动的白闪。
+            缺键(首次运行)不动,默认即 light,与 <ThemeProvider defaultTheme="light"> 一致。 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              'try{if(localStorage.getItem("rikkahub.prepaint.theme.v1")==="dark")document.documentElement.classList.add("dark")}catch(e){}',
+          }}
+        />
+        {/* 启动加载屏关键 CSS:HydrateFallback(本文件末尾)被 SPA 预渲染进 index.html,
+            在 JS 下载/解析完成前就已在 DOM 里,但它此前依赖 app.css 的 Tailwind 类 ——
+            CSS 未就绪时就是白屏。这里内联自包含样式(色值取自 app.css 默认主题的
+            --background/--foreground/--muted-foreground),让加载屏零依赖、随 HTML 解析
+            即刻可见;水合完成后 React Router 自动以真实应用替换,无需手动移除逻辑。
+            版式:品牌行(Logo + 应用名)居中,加载圆点缀于下方;translateY(-6%) 做光学
+            居中——品牌组整体略高于几何中心,与成熟桌面应用启动屏的视觉重心一致。
+            对齐(数据驱动,非目测):Logo 原 viewBox 四周各留 ~89 单位空白,HydrateFallback
+            处以墨迹边界(getBBox + 描边余量)裁剪 viewBox,SVG 盒即兔子可见边界;实测
+            system-ui(Segoe UI) 650 字重下 "RikkaHub" 墨迹高 ≈ 0.82em,故字号 = 兔高/0.82,
+            让文字上边线对齐兔耳、下边线对齐兔底。尺寸全用 px:此刻 app.css 未加载,
+            rem 会在样式表就绪、根字号缩放生效的瞬间跳档。字体用系统栈,零加载零闪动。 */}
+        <style
+          dangerouslySetInnerHTML={{
+            __html: [
+              "#rikkahub-splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:44px;background:oklch(.992 .002 240);color:oklch(.18 .005 240)}",
+              ".dark #rikkahub-splash{background:oklch(.12 .006 240);color:oklch(.93 .006 240)}",
+              "#rikkahub-splash .sp-brand{display:flex;align-items:center;gap:16px;transform:translateY(-6%)}",
+              "#rikkahub-splash .sp-brand svg{width:38px;height:54px}",
+              '#rikkahub-splash .sp-brand span{font:650 48px/1 system-ui,"Segoe UI",-apple-system,sans-serif;letter-spacing:-.02em}',
+              "#rikkahub-splash .sp-dots{display:flex;gap:7px}",
+              "#rikkahub-splash .sp-dots i{width:9px;height:9px;border-radius:9999px;background:oklch(.55 .01 240);animation:rikkahub-splash-bounce 1s infinite}",
+              ".dark #rikkahub-splash .sp-dots i{background:oklch(.65 .01 240)}",
+              "@keyframes rikkahub-splash-bounce{0%,100%{transform:translateY(-30%);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:none;animation-timing-function:cubic-bezier(0,0,.2,1)}}",
+            ].join("\n"),
+          }}
+        />
         <Meta />
         <Links />
       </head>
@@ -101,21 +143,6 @@ function SilentUpdateChecker() {
 
   if (!update) return null;
   return <UpdateDialog info={update} open={true} onClose={() => setUpdate(null)} />;
-}
-
-// 把中文字体插入英文字体 family 链:插在主字体之后、其余 fallback 之前。
-// '"HarmonyOS Sans", system-ui, sans-serif' + '"思源宋体", serif'
-//   → '"HarmonyOS Sans", "思源宋体", serif, system-ui, sans-serif'
-// 思路:英文字体通常只有一个主字体(在链首),其余是 generic 兜底。把中文字体族插在
-// 链首之后,既保证英文字形优先用英文字体,又让中文字形在落到 generic 兜底前先尝试中文字体。
-// 中文字体族自带的 fallback(如 "思源宋体", serif)原样保留在中间。
-// 没设中文字体(cjk 空)→ 返回原始 family,行为同前。
-function mergeCjkIntoFamily(enFamily: string, cjkFamily: string): string {
-  if (!cjkFamily.trim()) return enFamily.trim();
-  const en = enFamily.trim();
-  if (!en) return cjkFamily.trim();
-  const idx = en.indexOf(",");
-  return idx < 0 ? `${en}, ${cjkFamily}` : `${en.slice(0, idx)}, ${cjkFamily}${en.slice(idx)}`;
 }
 
 // 专题8:语言上报——乐观写 store(settings 镜像随之落盘)+ POST 后端;等值跳过,
@@ -195,9 +222,9 @@ function AppContent() {
   }, []);
   React.useEffect(() => {
     if (typeof document === "undefined") return;
-    // 中英文分别设置(Word 式):把中文字体插到英文字体 family 链的"主字体之后、兜底之前"。
-    // 效果:英文字形用英文字体,中文字形英文字体没有 → 落到中文字体,再落到兜底。
-    // 没设中文字体时 cjkInsert 为空,拼接退化为纯英文链,行为同前(向后兼容)。
+    // 中英文分别设置(Word 式):中文字体经 unicode-range 覆盖族生效(原理见 lib/font-chain.ts,
+    // @font-face 注入见 FontFaceInjector):覆盖族置于链首,中文字形命中它、拉丁字形穿透到
+    // 英文字体。没设中文字体 → 纯英文链,行为同前(向后兼容)。
     const uiEn = String(
       displaySetting?.uiFontFamilyCss ?? displaySetting?.uiFontFamily ?? "",
     ).trim();
@@ -206,9 +233,15 @@ function AppContent() {
     ).trim();
     const uiCjk = String(displaySetting?.uiFontFamilyCjkCss ?? "").trim();
     const chatCjk = String(displaySetting?.chatFontFamilyCjkCss ?? "").trim();
-    const uiFont =
-      mergeCjkIntoFamily(uiEn, uiCjk) || '"Noto Sans SC", "Microsoft YaHei", var(--font-sans)';
-    const chatFont = mergeCjkIntoFamily(chatEn, chatCjk) || "inherit";
+    const uiFont = composeFontChain(
+      uiEn || '"Noto Sans SC", "Microsoft YaHei", var(--font-sans)',
+      UI_CJK_OVERRIDE_FAMILY,
+      Boolean(uiCjk),
+    );
+    // 对话字体:英文未设时基链取界面链(继承观感);都未设且无中文 → inherit(纯继承,零成本)。
+    const chatFont = chatCjk
+      ? composeFontChain(chatEn || uiFont, CHAT_CJK_OVERRIDE_FAMILY, true)
+      : chatEn || "inherit";
     document.body.style.setProperty("--rikkahub-ui-font", uiFont);
     document.body.style.setProperty("--rikkahub-chat-font", chatFont);
     // 界面字号缩放:写到 <html>(documentElement)上,app.css 的 :root 规则会用它计算根字号。
@@ -326,16 +359,21 @@ export default function App() {
   );
 }
 
+// 启动加载屏:样式完全来自 Layout <head> 的内联关键 CSS(不依赖 app.css),
+// 因此从 index.html 解析那一刻起就能正确显示,覆盖"CSS/JS 尚未就绪"的空窗期。
+// Logo 组件 fill/stroke 均为 currentColor,预渲染成静态 SVG 后随容器 color 明暗自适应。
 export function HydrateFallback() {
   return (
-    <div className="flex items-center justify-center h-screen w-screen bg-background">
-      <div className="flex items-center gap-1.5">
+    <div id="rikkahub-splash">
+      <div className="sp-brand">
+        {/* viewBox 裁到墨迹边界(getBBox x237 y89 w660 h956,外扩 10 单位描边余量),
+            SVG 盒 = 兔子可见边界,flex 垂直居中即墨迹居中,文字对齐才有可靠基准 */}
+        <Logo aria-hidden viewBox="227 79 680 976" />
+        <span>RikkaHub</span>
+      </div>
+      <div className="sp-dots">
         {[0, 1, 2].map((i) => (
-          <div
-            key={i}
-            className="h-2.5 w-2.5 rounded-full bg-primary animate-bounce"
-            style={{ animationDelay: `${i * 0.15}s` }}
-          />
+          <i key={i} style={{ animationDelay: `${i * 0.15}s` }} />
         ))}
       </div>
     </div>

@@ -107,6 +107,8 @@
     "result": "Result",
     "copy": "Copy",
     "not_executed": "Tool has not run yet",
+    "use_skill": "Load skill",
+    "use_skill_with_name": "Load skill: {{skillName}}",
     "ask_user_title": "Ask User",
     "ask_user_questions_count": "Ask {{count}} questions",
     "ask_user_submit": "Submit",

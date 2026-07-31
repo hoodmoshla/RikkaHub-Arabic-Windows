@@ -157,7 +157,7 @@ function CodePreviewPanel({ panel }: { panel: WorkbenchPanel }) {
         {mode === "preview" && canRenderPreview ? (
           normalizedLanguage === "markdown" ? (
             <div className="h-full overflow-auto p-4">
-              <Markdown content={code} allowCodePreview={false} />
+              <Markdown content={code} />
             </div>
           ) : (
             <iframe

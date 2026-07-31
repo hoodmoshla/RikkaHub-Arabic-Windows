@@ -107,6 +107,8 @@
     "result": "结果",
     "copy": "复制",
     "not_executed": "工具尚未执行",
+    "use_skill": "加载技能",
+    "use_skill_with_name": "加载技能：{{skillName}}",
     "ask_user_title": "询问用户",
     "ask_user_questions_count": "询问 {{count}} 个问题",
     "ask_user_submit": "提交",

@@ -1,12 +1,9 @@
 import * as React from "react";
-import { useTranslation } from "react-i18next";
 import { Streamdown, type PluginConfig } from "streamdown";
 import { cjk } from "@streamdown/cjk";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { cn } from "~/lib/utils";
-import { getCodePreviewLanguage } from "~/components/workbench/code-preview-language";
-import { useOptionalWorkbench } from "~/components/workbench/workbench-context";
 import { useSettingsStore } from "~/stores";
 import { CodeBlock } from "./code-block";
 import "katex/dist/katex.min.css";
@@ -102,7 +99,6 @@ type MarkdownProps = {
    * the message renderer from the message's annotations + search tool outputs.
    */
   citationOrdinalMap?: Map<string, number>;
-  allowCodePreview?: boolean;
   isAnimating?: boolean;
 };
 
@@ -121,37 +117,14 @@ export default function Markdown({
   className,
   onClickCitation,
   citationOrdinalMap,
-  allowCodePreview = true,
   isAnimating = false,
 }: MarkdownProps) {
-  const { t } = useTranslation("markdown");
-  const workbench = useOptionalWorkbench();
   const displaySetting = useSettingsStore((state) => state.settings?.displaySetting);
   const processedContent = React.useMemo(() => preProcess(content), [content]);
-  const handlePreviewCode = React.useCallback(
-    (language: string, code: string) => {
-      if (!allowCodePreview || !workbench) return;
-
-      const previewLanguage = getCodePreviewLanguage(language);
-      if (!previewLanguage) return;
-
-      workbench.openPanel({
-        type: "code-preview",
-        title: t("markdown.code_preview_title", {
-          language: previewLanguage.toUpperCase(),
-        }),
-        payload: {
-          language: previewLanguage,
-          code,
-        },
-      });
-    },
-    [allowCodePreview, t, workbench],
-  );
 
   // Streamdown 的 custom components 提到 useMemo:流式输出时 Markdown 每个 token delta 都会
   // re-render,内联的 components 对象每次都是新引用,Streamdown 内部 memo 失效、重建自定义
-  // 组件实例。稳定引用后只在实际依赖(displaySetting/workbench/citation 等)变化时才重建。
+  // 组件实例。稳定引用后只在实际依赖(displaySetting/isAnimating/citation 等)变化时才重建。
   // 返回类型从 Streamdown 自身推断,避免函数参数失去上下文变成隐式 any。
   const components = React.useMemo<
     NonNullable<Parameters<typeof Streamdown>[0]["components"]>
@@ -169,15 +142,9 @@ export default function Markdown({
             <CodeBlock
               language={language}
               code={code}
+              isAnimating={isAnimating}
               showLineNumbers={displaySetting?.showLineNumbers ?? false}
               wrapLines={displaySetting?.codeBlockAutoWrap ?? false}
-              onPreview={
-                allowCodePreview && workbench
-                  ? () => {
-                      handlePreviewCode(language, code);
-                    }
-                  : undefined
-              }
             />
           );
         }
@@ -244,9 +211,7 @@ export default function Markdown({
     }),
     [
       displaySetting,
-      workbench,
-      allowCodePreview,
-      handlePreviewCode,
+      isAnimating,
       citationOrdinalMap,
       onClickCitation,
     ],

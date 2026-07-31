@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { useFontCatalog, useInvalidateFontCatalog } from "~/hooks/use-font-catalog";
 import { extractErrorMessage } from "~/lib/error";
+import { composeFontChain, entryMatches } from "~/lib/font-chain";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
 import type { FontEntry } from "~/types/font";
@@ -60,29 +61,6 @@ const GENERIC_FONTS: GenericFontOption[] = [
 ];
 
 const FONT_ACCEPT = ".ttf,.otf,.woff,.woff2,.ttc";
-
-// 把中文字体插入英文字体 family 链(插在主字体之后)。与 root.tsx 的 mergeCjkIntoFamily 保持一致。
-function mergeCjkIntoFamily(enFamily: string, cjkFamily: string): string {
-  if (!cjkFamily.trim()) return enFamily.trim();
-  const en = enFamily.trim();
-  if (!en) return cjkFamily.trim();
-  const idx = en.indexOf(",");
-  return idx < 0 ? `${en}, ${cjkFamily}` : `${en.slice(0, idx)}, ${cjkFamily}${en.slice(idx)}`;
-}
-
-// 宽松匹配:容忍老版本存下来的 value(可能是 family 名、cssName、旧 id 或抽 i18n key 前的中文 label)。
-function entryMatches(
-  entry: { id: string; label?: string; legacyLabel?: string; cssName?: string },
-  value: string,
-): boolean {
-  if (!value) return false;
-  return (
-    entry.id === value ||
-    (entry.label != null && entry.label === value) ||
-    (entry.legacyLabel != null && entry.legacyLabel === value) ||
-    (entry.cssName != null && entry.cssName === value)
-  );
-}
 
 // 由当前选中的 value(可能是 id / cssName / 旧 family 名)解析出实际 CSS family 链。
 // 未命中任何字体 → 返回 fallback。供 FontPickerPair 的预览复用。
@@ -446,12 +424,15 @@ export function FontManagerDialog({ open, onClose, onChanged }: FontManagerDialo
 }
 
 // 中英文分别设置(Word 式):英文字体 + 中文字体双栏,中文可选;下方分项预览。
-// 预览三行:纯英文(用英文字体)、纯中文(用合并链,没设中文时回退)、中英混排(真实场景)。
+// 预览三行:纯英文(用英文字体)、纯中文(用组合链)、中英混排(真实场景)。
 interface FontPickerPairProps {
   label: string;
   enValue: string;
   cjkValue: string;
   fallbackFamily: string;
+  /** 中文覆盖合成族名(UI_CJK_OVERRIDE_FAMILY / CHAT_CJK_OVERRIDE_FAMILY),
+   *  与 root.tsx 实际渲染共用同一 @font-face(FontFaceInjector 注入),预览即所得。 */
+  cjkOverrideFamily: string;
   onChangeEn: (value: string, family: string) => void;
   onChangeCjk: (value: string, family: string) => void;
 }
@@ -461,6 +442,7 @@ export function FontPickerPair({
   enValue,
   cjkValue,
   fallbackFamily,
+  cjkOverrideFamily,
   onChangeEn,
   onChangeCjk,
 }: FontPickerPairProps) {
@@ -468,10 +450,10 @@ export function FontPickerPair({
   const { data } = useFontCatalog();
   const enFamily = resolveFamilyForValue(enValue, data, fallbackFamily);
   const cjkFamily = resolveFamilyForValue(cjkValue, data, "");
-  // 合并链(供混排行和中文行):英文主字体 + 中文字体 + 兜底。与 root.tsx 的合并逻辑一致。
-  const merged = mergeCjkIntoFamily(enFamily, cjkFamily);
-  // 中文行:有中文字体时用合并链(英文部分会回退,但中文行内容是纯中文,实际渲染中文字体);
-  // 没设中文字体时,中文行用合并链=纯英文链,中文字形落到兜底——真实反映"不分开"的效果。
+  // 组合链(供混排行和中文行):中文覆盖族在链首拦截 CJK 字形,拉丁字形穿透到英文字体。
+  // 与 root.tsx 的组合逻辑一致(lib/font-chain.ts 单一事实源)。
+  const merged = composeFontChain(enFamily, cjkOverrideFamily, Boolean(cjkFamily));
+  // 没设中文字体时,组合链=纯英文链,中文字形落到英文链兜底——真实反映"不分开"的效果。
   const previewRows = [
     { tag: t("font_picker.tag_en"), text: t("font_picker.preview_en_text"), family: enFamily },
     { tag: t("font_picker.tag_cjk"), text: t("font_picker.preview_cjk_text"), family: merged },
