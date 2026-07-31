@@ -108,29 +108,28 @@
   @apply relative rounded border border-border/60 bg-muted/70 px-[0.32rem] py-[0.12rem] font-mono text-[0.92em];
 }
 
-/* Code Block with Header */
+/* Code Block with Header(产品稿:圆角卡片 + 柔和抬升阴影 + 淡边框) */
 .markdown .code-block {
-  @apply my-3 rounded-lg border border-border overflow-hidden bg-card;
+  @apply my-3 rounded-xl border border-border/60 overflow-hidden bg-card;
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.04),
+    0 4px 16px rgb(0 0 0 / 0.06);
+}
+
+.dark .markdown .code-block {
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.35);
 }
 
 .code-block-header {
-  @apply flex items-center justify-between px-3 py-0.5 bg-muted/50 border-b border-border;
+  @apply flex items-center justify-between gap-2 px-2 py-1 bg-muted/40 border-b border-border/60;
 }
 
 .code-block-language {
   @apply text-xs text-muted-foreground;
 }
 
-.code-block-copy {
-  @apply flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors px-1.5 py-0.5 rounded hover:bg-muted;
-}
-
-.code-block-actions {
-  @apply flex items-center gap-1;
-}
-
-.code-block-copy:active {
-  @apply scale-95;
+.code-block-icon-button {
+  @apply text-muted-foreground hover:text-foreground;
 }
 
 /* Code Block body */
