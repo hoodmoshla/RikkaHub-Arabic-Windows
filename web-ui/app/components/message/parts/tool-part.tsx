@@ -14,6 +14,7 @@ import {
   MessageCircleQuestion,
   Search,
   Send,
+  Sparkles,
   Video,
   Wrench,
   X,
@@ -60,6 +61,7 @@ const TOOL_NAMES = {
   GET_TIME_INFO: "get_time_info",
   CLIPBOARD: "clipboard_tool",
   ASK_USER: "ask_user",
+  USE_SKILL: "use_skill",
 } as const;
 
 const MEMORY_ACTIONS = {
@@ -258,6 +260,7 @@ function getToolIcon(toolName: string, action?: string) {
   }
 
   if (toolName === TOOL_NAMES.ASK_USER) return MessageCircleQuestion;
+  if (toolName === TOOL_NAMES.USE_SKILL) return Sparkles;
 
   return Wrench;
 }
@@ -285,6 +288,17 @@ function getToolTitle(toolName: string, args: unknown, t: TFunction): string {
   }
 
   if (toolName === TOOL_NAMES.ASK_USER) return t("tool_part.ask_user_title");
+
+  if (toolName === TOOL_NAMES.USE_SKILL) {
+    const skillName = getStringField(args, "name");
+    const skillPath = getStringField(args, "path");
+    if (skillName && skillPath) {
+      return t("tool_part.use_skill_with_name", { skillName: `${skillName}/${skillPath}` });
+    }
+    return skillName
+      ? t("tool_part.use_skill_with_name", { skillName })
+      : t("tool_part.use_skill");
+  }
 
   return t("tool_part.tool_call_with_name", { toolName });
 }
@@ -396,6 +410,41 @@ function SearchWebPreview({ args, content }: { args: unknown; content: unknown }
         </div>
       ) : (
         <JsonBlock value={content} />
+      )}
+    </div>
+  );
+}
+
+// use_skill(PR#30 想法7):技能正文本质是 SKILL.md 的 Markdown——按富文本渲染;
+// 经 path 加载的附属文件可能是脚本/数据,仅 .md 走 Markdown,其余保持等宽原文。
+function UseSkillPreview({ args, content, rawText }: { args: unknown; content: unknown; rawText: string }) {
+  const { t } = useTranslation("message");
+  const skillPath = getStringField(args, "path");
+  const body = getStringField(content, "content") ?? rawText;
+  const renderAsMarkdown = !skillPath || skillPath.toLowerCase().endsWith(".md");
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="mb-1 flex items-center justify-between text-muted-foreground text-xs">
+          <span>{t("tool_part.parameters")}</span>
+          <SectionCopyButton text={toJsonString(args)} label={t("tool_part.copy")} />
+        </div>
+        <JsonBlock value={args} maxHeightClass="max-h-none" />
+      </div>
+      {body && (
+        <div>
+          <div className="mb-1 flex items-center justify-between text-muted-foreground text-xs">
+            <span>{t("tool_part.result")}</span>
+            <SectionCopyButton text={body} label={t("tool_part.copy")} />
+          </div>
+          {renderAsMarkdown ? (
+            <div className="rounded-md border bg-muted/20 p-3">
+              <Markdown content={body} className="text-sm" />
+            </div>
+          ) : (
+            <JsonBlock value={body} maxHeightClass="max-h-none" />
+          )}
+        </div>
       )}
     </div>
   );
@@ -674,6 +723,8 @@ export function ToolPart({
       (Boolean(getStringField(outputContent, "answer")) ||
         getArrayField(outputContent, "items").length > 0)) ||
     (tool.toolName === TOOL_NAMES.SCRAPE_WEB && Boolean(getStringField(args, "url"))) ||
+    (tool.toolName === TOOL_NAMES.USE_SKILL &&
+      (Boolean(getStringField(args, "path")) || Boolean(getStringField(outputContent, "content")))) ||
     isDenied ||
     hasMediaOutput;
 
@@ -760,6 +811,18 @@ export function ToolPart({
               </div>
             )}
 
+            {/* use_skill(PR#30 想法7):卡片内联预览——加载的文件路径 + 技能正文前几行 */}
+            {tool.toolName === TOOL_NAMES.USE_SKILL && getStringField(args, "path") && (
+              <div className="truncate text-muted-foreground text-xs">
+                {getStringField(args, "path")}
+              </div>
+            )}
+            {tool.toolName === TOOL_NAMES.USE_SKILL && getStringField(outputContent, "content") && (
+              <div className="line-clamp-3 whitespace-pre-wrap text-muted-foreground text-xs">
+                {getStringField(outputContent, "content")}
+              </div>
+            )}
+
             {isDenied && (
               <div className="text-destructive text-xs">
                 {deniedReason
@@ -835,6 +898,8 @@ export function ToolPart({
               <SearchWebPreview args={args} content={outputContent} />
             ) : tool.toolName === TOOL_NAMES.SCRAPE_WEB && isExecuted ? (
               <ScrapeWebPreview content={outputContent} />
+            ) : tool.toolName === TOOL_NAMES.USE_SKILL && isExecuted ? (
+              <UseSkillPreview args={args} content={outputContent} rawText={outputText} />
             ) : (
               <div className="space-y-3">
                 <div>
