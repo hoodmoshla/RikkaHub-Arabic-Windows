@@ -161,10 +161,10 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
       <div className="mt-6 rounded-lg border bg-card p-4">
         <div className="mb-3 text-sm font-medium">{t("settings:stats.heatmap")}</div>
         <div className="pb-1">
-          <div className="grid w-full grid-cols-[24px_minmax(0,1fr)] gap-x-2 overflow-hidden">
+          <div className="grid w-full grid-cols-[24px_minmax(0,1fr)] gap-x-2 overflow-hidden pr-px">
             <div />
             <div
-              className="grid justify-between gap-[2px]"
+              className="grid justify-between gap-[3px]"
               style={{ gridTemplateColumns: "repeat(53, minmax(10px, 14px))" }}
             >
               {monthLabels.map((label, index) => (
@@ -177,8 +177,8 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
               ))}
             </div>
             <div
-              className="grid gap-[2px] pt-[2px]"
-              style={{ gridTemplateRows: "repeat(7, 12px)" }}
+              className="grid gap-[3px] pt-[2px]"
+              style={{ gridTemplateRows: "repeat(7, auto)" }}
             >
               {[
                 "",
@@ -191,27 +191,27 @@ export function StatsSection({ stats }: { stats: StatsPayload | null }) {
               ].map((label, index) => (
                 <div
                   key={`${label}-${index}`}
-                  className="flex h-3 items-center justify-end text-[0.6875rem] text-muted-foreground"
+                  className="flex h-3.5 items-center justify-end text-[0.6875rem] text-muted-foreground sm:h-4"
                 >
                   {label}
                 </div>
               ))}
             </div>
             <div
-              className="grid justify-between gap-[2px] pt-[2px]"
+              className="grid justify-between gap-[3px] pt-[2px]"
               style={{ gridTemplateColumns: "repeat(53, minmax(10px, 14px))" }}
             >
               {heatmapWeeks.map((week, weekIndex) => (
                 <div
                   key={weekIndex}
-                  className="grid gap-[2px]"
-                  style={{ gridTemplateRows: "repeat(7, 12px)" }}
+                  className="grid gap-[3px]"
+                  style={{ gridTemplateRows: "repeat(7, auto)" }}
                 >
                   {week.map((day) => (
                     <div
                       key={day.key}
                       title={t("settings:stats.day_count", { date: day.key, count: day.count })}
-                      className={`size-3 rounded-[3px] sm:size-3.5 ${heatmapClass(day.level)}`}
+                      className={`size-3.5 rounded-[3px] sm:size-4 ${heatmapClass(day.level)}`}
                     />
                   ))}
                 </div>
