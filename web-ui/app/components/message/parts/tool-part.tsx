@@ -824,7 +824,13 @@ export function ToolPart({
             </DrawerDescription>
           </DrawerHeader>
 
-          <div className="flex-1 min-h-0 space-y-4 overflow-y-auto px-4 pb-6">
+          {/* PR#30 想法6:vaul 把 Content 上的 pointerdown 当作拖拽起点,正文文本因此
+              无法选中复制。在滚动区截断冒泡 + select-text:正文可自由选择,而从头部/
+              把手拖拽关闭不受影响(比 PR 原稿 handleOnly 更精准,不牺牲移动端手势)。 */}
+          <div
+            className="flex-1 min-h-0 select-text space-y-4 overflow-y-auto px-4 pb-6"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
             {tool.toolName === TOOL_NAMES.SEARCH_WEB && isExecuted ? (
               <SearchWebPreview args={args} content={outputContent} />
             ) : tool.toolName === TOOL_NAMES.SCRAPE_WEB && isExecuted ? (
