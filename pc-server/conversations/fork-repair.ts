@@ -37,6 +37,12 @@ interface RepairOutcome {
   skipped: number;
 }
 
+interface PassOutcome extends RepairOutcome {
+  /** 本轮跳过原因。链式 fork 下中间轮的"找不到配对"可能下一轮就修好,
+   *  所以只有终轮(repaired=0)的跳过才是真正无法修复的,由外层统一输出。 */
+  skipLogs: string[];
+}
+
 function forkTitleOf(title: string): string {
   return title ? `${title} Fork` : "Fork";
 }
@@ -68,7 +74,7 @@ function copyPrefixNodes(db: Database, donorId: string, victimId: string, prefix
 
 /** 单轮扫描修复。链式 fork(分支再分支)的中间层既是受害者又是供体,一轮内供体可能
  *  还是空的,需要外层 repairForkNodeTheft 迭代到定点。 */
-function repairForkNodeTheftOnce(db: Database): RepairOutcome {
+function repairForkNodeTheftOnce(db: Database): PassOutcome {
   const metas = db
     .prepare(
       `SELECT c.id, c.title, c.create_at, c.update_at,
@@ -86,10 +92,11 @@ function repairForkNodeTheftOnce(db: Database): RepairOutcome {
     minIndex: m.min_index,
   }));
   const victims = all.filter((c) => c.nodeCount === 0 || (c.minIndex ?? 0) > 0);
-  if (victims.length === 0) return { repaired: 0, skipped: 0 };
+  if (victims.length === 0) return { repaired: 0, skipped: 0, skipLogs: [] };
 
   let repaired = 0;
   let skipped = 0;
+  const skipLogs: string[] = [];
   for (const victim of victims) {
     // 正向:供体 = 受害会话的分支(持有被抢前缀 0..gap-1)。空受害者缺口=供体全部节点。
     const gap = victim.nodeCount === 0 ? null : (victim.minIndex ?? 0);
@@ -115,7 +122,7 @@ function repairForkNodeTheftOnce(db: Database): RepairOutcome {
     const pool = forward.length > 0 ? forward : backward;
     if (pool.length === 0) {
       skipped += 1;
-      console.warn(`[fork-repair] 会话 ${victim.id} 缺失前缀(gap=${gap ?? "全部"})但找不到可配对的分支/源会话,跳过`);
+      skipLogs.push(`[fork-repair] 会话 ${victim.id} 缺失前缀(gap=${gap ?? "全部"})但找不到可配对的分支/源会话,跳过`);
       continue;
     }
     // 多候选时内容等价(同一源的前缀拷贝),取最新创建者(空受害者的抢夺者必是最后一次 fork)。
@@ -127,21 +134,23 @@ function repairForkNodeTheftOnce(db: Database): RepairOutcome {
       console.log(`[fork-repair] 会话 ${victim.id} 已从 ${donor.id} 还原前缀 ${copied} 个节点`);
     } else {
       skipped += 1;
-      console.warn(`[fork-repair] 会话 ${victim.id} 供体 ${donor.id} 前缀不完整(期望 ${prefixLength},实得 ${copied}),跳过`);
+      skipLogs.push(`[fork-repair] 会话 ${victim.id} 供体 ${donor.id} 前缀不完整(期望 ${prefixLength},实得 ${copied}),跳过`);
     }
   }
-  return { repaired, skipped };
+  return { repaired, skipped, skipLogs };
 }
 
 export function repairForkNodeTheft(db: Database): RepairOutcome {
   let repaired = 0;
-  let skipped = 0;
   // 迭代到定点:每轮至少修复 1 个才继续,轮数上限即受害者上限,天然有界。
   for (let pass = 0; pass < 32; pass += 1) {
     const outcome = repairForkNodeTheftOnce(db);
     repaired += outcome.repaired;
-    skipped = outcome.skipped;
-    if (outcome.repaired === 0) break;
+    if (outcome.repaired === 0) {
+      // 终轮:此时的跳过才是真正无法修复的
+      for (const line of outcome.skipLogs) console.warn(line);
+      return { repaired, skipped: outcome.skipped };
+    }
   }
-  return { repaired, skipped };
+  return { repaired, skipped: 0 };
 }
