@@ -67,6 +67,31 @@ export function Layout({ children }: { children: React.ReactNode }) {
               'try{var p=JSON.parse(localStorage.getItem("rikkahub.prepaint.v1"));if(p){var d=document.documentElement;if(typeof p.scale==="number"&&isFinite(p.scale)&&p.scale>0)d.style.setProperty("--rikkahub-ui-scale",String(p.scale));if(p.uiFont)d.style.setProperty("--rikkahub-ui-font",p.uiFont);if(p.chatFont)d.style.setProperty("--rikkahub-chat-font",p.chatFont)}}catch(e){}',
           }}
         />
+        {/* 【预绘制·读侧】明暗模式:重放 ThemeProvider applyMode(写侧,搜同键名)上次
+            算出的最终明暗值,首帧前把 .dark 挂上 <html> —— 根治暗色用户冷启动的白闪。
+            缺键(首次运行)不动,默认即 light,与 <ThemeProvider defaultTheme="light"> 一致。 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              'try{if(localStorage.getItem("rikkahub.prepaint.theme.v1")==="dark")document.documentElement.classList.add("dark")}catch(e){}',
+          }}
+        />
+        {/* 启动加载屏关键 CSS:HydrateFallback(本文件末尾)被 SPA 预渲染进 index.html,
+            在 JS 下载/解析完成前就已在 DOM 里,但它此前依赖 app.css 的 Tailwind 类 ——
+            CSS 未就绪时就是白屏。这里内联自包含样式(色值取自 app.css 默认主题的
+            --background/--primary),让加载屏零依赖、随 HTML 解析即刻可见;水合完成后
+            React Router 自动以真实应用替换 HydrateFallback,无需任何手动移除逻辑。 */}
+        <style
+          dangerouslySetInnerHTML={{
+            __html: [
+              "#rikkahub-splash{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;gap:.375rem;background:oklch(.992 .002 240)}",
+              ".dark #rikkahub-splash{background:oklch(.12 .006 240)}",
+              "#rikkahub-splash>div{width:.625rem;height:.625rem;border-radius:9999px;background:oklch(.24 .01 240);animation:rikkahub-splash-bounce 1s infinite}",
+              ".dark #rikkahub-splash>div{background:oklch(.96 .004 240)}",
+              "@keyframes rikkahub-splash-bounce{0%,100%{transform:translateY(-25%);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:none;animation-timing-function:cubic-bezier(0,0,.2,1)}}",
+            ].join("\n"),
+          }}
+        />
         <Meta />
         <Links />
       </head>
@@ -326,18 +351,14 @@ export default function App() {
   );
 }
 
+// 启动加载屏:样式完全来自 Layout <head> 的内联关键 CSS(不依赖 app.css),
+// 因此从 index.html 解析那一刻起就能正确显示,覆盖"CSS/JS 尚未就绪"的空窗期。
 export function HydrateFallback() {
   return (
-    <div className="flex items-center justify-center h-screen w-screen bg-background">
-      <div className="flex items-center gap-1.5">
-        {[0, 1, 2].map((i) => (
-          <div
-            key={i}
-            className="h-2.5 w-2.5 rounded-full bg-primary animate-bounce"
-            style={{ animationDelay: `${i * 0.15}s` }}
-          />
-        ))}
-      </div>
+    <div id="rikkahub-splash">
+      {[0, 1, 2].map((i) => (
+        <div key={i} style={{ animationDelay: `${i * 0.15}s` }} />
+      ))}
     </div>
   );
 }

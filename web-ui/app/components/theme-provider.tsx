@@ -333,13 +333,15 @@ export function ThemeProvider({
 
     const applyMode = (mode: ThemeMode) => {
       root.classList.remove("light", "dark");
-
-      if (mode === "system") {
-        root.classList.add(mediaQuery.matches ? "dark" : "light");
-        return;
+      const resolved = mode === "system" ? (mediaQuery.matches ? "dark" : "light") : mode;
+      root.classList.add(resolved);
+      // 【预绘制·写侧】把解析后的明暗值持久化,供 root.tsx <head> 内联脚本
+      // (读侧,搜同键名)在下次启动首帧前重放,消除暗色用户冷启动白闪。
+      try {
+        localStorage.setItem("rikkahub.prepaint.theme.v1", resolved);
+      } catch {
+        /* 配额/隐私模式:缺失仅退化为旧行为(首帧 light) */
       }
-
-      root.classList.add(mode);
     };
 
     applyMode(theme);
