@@ -21,6 +21,7 @@ import { TitleBar } from "./components/title-bar";
 import { UpdateDialog, type UpdateInfo } from "./components/update-dialog";
 import { WebAuthGate } from "./components/web-auth-gate";
 import { StartupGate } from "./components/startup-gate";
+import Logo from "./components/logo";
 import { FontFaceInjector } from "./components/font-face-injector";
 import { openExternal } from "./lib/external-link";
 import { toast } from "sonner";
@@ -79,16 +80,23 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {/* 启动加载屏关键 CSS:HydrateFallback(本文件末尾)被 SPA 预渲染进 index.html,
             在 JS 下载/解析完成前就已在 DOM 里,但它此前依赖 app.css 的 Tailwind 类 ——
             CSS 未就绪时就是白屏。这里内联自包含样式(色值取自 app.css 默认主题的
-            --background/--primary),让加载屏零依赖、随 HTML 解析即刻可见;水合完成后
-            React Router 自动以真实应用替换 HydrateFallback,无需任何手动移除逻辑。 */}
+            --background/--foreground/--muted-foreground),让加载屏零依赖、随 HTML 解析
+            即刻可见;水合完成后 React Router 自动以真实应用替换,无需手动移除逻辑。
+            版式:品牌行(Logo + 应用名)居中,加载圆点缀于下方;translateY(-6%) 做光学
+            居中——品牌组整体略高于几何中心,与成熟桌面应用启动屏的视觉重心一致。
+            字体用 system-ui 栈:应用字体此刻尚未加载,系统栈零闪动且各平台观感稳定。 */}
         <style
           dangerouslySetInnerHTML={{
             __html: [
-              "#rikkahub-splash{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;gap:.375rem;background:oklch(.992 .002 240)}",
-              ".dark #rikkahub-splash{background:oklch(.12 .006 240)}",
-              "#rikkahub-splash>div{width:.625rem;height:.625rem;border-radius:9999px;background:oklch(.24 .01 240);animation:rikkahub-splash-bounce 1s infinite}",
-              ".dark #rikkahub-splash>div{background:oklch(.96 .004 240)}",
-              "@keyframes rikkahub-splash-bounce{0%,100%{transform:translateY(-25%);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:none;animation-timing-function:cubic-bezier(0,0,.2,1)}}",
+              "#rikkahub-splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3rem;background:oklch(.992 .002 240);color:oklch(.18 .005 240)}",
+              ".dark #rikkahub-splash{background:oklch(.12 .006 240);color:oklch(.93 .006 240)}",
+              "#rikkahub-splash .sp-brand{display:flex;align-items:center;gap:.8125rem;transform:translateY(-6%)}",
+              "#rikkahub-splash .sp-brand svg{width:2.625rem;height:2.625rem}",
+              '#rikkahub-splash .sp-brand span{font:650 1.875rem/1 system-ui,"Segoe UI",-apple-system,sans-serif;letter-spacing:-.02em}',
+              "#rikkahub-splash .sp-dots{display:flex;gap:.4375rem}",
+              "#rikkahub-splash .sp-dots i{width:.4375rem;height:.4375rem;border-radius:9999px;background:oklch(.55 .01 240);animation:rikkahub-splash-bounce 1s infinite}",
+              ".dark #rikkahub-splash .sp-dots i{background:oklch(.65 .01 240)}",
+              "@keyframes rikkahub-splash-bounce{0%,100%{transform:translateY(-30%);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:none;animation-timing-function:cubic-bezier(0,0,.2,1)}}",
             ].join("\n"),
           }}
         />
@@ -353,12 +361,19 @@ export default function App() {
 
 // 启动加载屏:样式完全来自 Layout <head> 的内联关键 CSS(不依赖 app.css),
 // 因此从 index.html 解析那一刻起就能正确显示,覆盖"CSS/JS 尚未就绪"的空窗期。
+// Logo 组件 fill/stroke 均为 currentColor,预渲染成静态 SVG 后随容器 color 明暗自适应。
 export function HydrateFallback() {
   return (
     <div id="rikkahub-splash">
-      {[0, 1, 2].map((i) => (
-        <div key={i} style={{ animationDelay: `${i * 0.15}s` }} />
-      ))}
+      <div className="sp-brand">
+        <Logo aria-hidden />
+        <span>RikkaHub</span>
+      </div>
+      <div className="sp-dots">
+        {[0, 1, 2].map((i) => (
+          <i key={i} style={{ animationDelay: `${i * 0.15}s` }} />
+        ))}
+      </div>
     </div>
   );
 }
