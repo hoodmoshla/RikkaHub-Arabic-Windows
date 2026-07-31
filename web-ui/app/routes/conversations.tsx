@@ -1092,12 +1092,7 @@ const ConversationTimeline = React.memo(
             scrollerRef={(el) => {
               scrollerElRef.current = el;
             }}
-            // scrollbar-gutter:滚动条(全局样式为经典 6px,占布局宽)出现/消失会改变
-            // 滚动器内容宽 → 消息列中心平移,而镜像它居中的快速跳转覆盖层在滚动器外
-            // 不动 → 表现为跳转条/消息列相对错位晃动。stable both-edges 让两侧恒预留
-            // 滚动条位:内容宽恒定、居中对称,从源头消除跳变(PR#30 想法5 的根治版,
-            // 免去 fixed 定位 + ResizeObserver 全套测量)。
-            className="h-full [scrollbar-gutter:stable_both-edges]"
+            className="h-full"
             data={selectedNodeMessages}
             // I-2:顶部插入的滚动锚定。prepend 时 store 原子地同步减小 offset 与增长
             // messages,Virtuoso 保持视口稳定;offset=0(绝大多数会话)时行为与旧版一致。
