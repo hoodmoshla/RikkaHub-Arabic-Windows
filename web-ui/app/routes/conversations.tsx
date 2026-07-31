@@ -443,55 +443,32 @@ function useDraftInputController({
     const parts = getSubmitParts(draftKey);
     if (parts.length === 0) return;
 
-    // PR#30 想法8(数据安全版):乐观清空——点发送输入框立即腾空,不等网络往返。
-    // 快照原草稿,发送失败且目标输入框仍为空时静默恢复,零数据丢失;异常照常
-    // 上抛,ChatInput 的错误横幅不受影响。恢复目标用"当下生效的 key":主页路径
-    // 发送前会轮换 homeDraftId,恢复必须落到新 key 上,输入框才看得见。
-    const snapshot = useChatInputStore.getState().drafts[draftKey];
-    const restoreDraftTo = (key: string) => {
-      if (!snapshot || !useChatInputStore.getState().isEmpty(key)) return;
-      setDraftText(key, snapshot.text);
-      addDraftParts(key, snapshot.parts);
-    };
-    clearDraft(draftKey);
-
     if (activeId) {
-      try {
-        await api.post<{ status: string }>(`conversations/${activeId}/messages`, { parts });
-      } catch (error) {
-        restoreDraftTo(draftKey);
-        throw error;
-      }
+      await api.post<{ status: string }>(`conversations/${activeId}/messages`, { parts });
+      clearDraft(draftKey);
       return;
     }
 
     const conversationId = uuidv4();
-    const nextHomeDraftId = createHomeDraftId();
-    setHomeDraftId(nextHomeDraftId);
+    setHomeDraftId(createHomeDraftId());
 
     // Send the message BEFORE setting activeId so the detail fetcher doesn't race
     // (`POST /messages` calls ensureConversation on the server; only then does the
     // subsequent `GET /api/conversations/{id}` succeed).
-    try {
-      await api.post<{ status: string }>(`conversations/${conversationId}/messages`, { parts });
-    } catch (error) {
-      restoreDraftTo(nextHomeDraftId);
-      throw error;
-    }
+    await api.post<{ status: string }>(`conversations/${conversationId}/messages`, { parts });
+    clearDraft(draftKey);
 
     setActiveId(conversationId);
     navigate(`/c/${conversationId}`);
     refreshList();
   }, [
     activeId,
-    addDraftParts,
     clearDraft,
     draftKey,
     getSubmitParts,
     navigate,
     refreshList,
     setActiveId,
-    setDraftText,
     setHomeDraftId,
   ]);
 
