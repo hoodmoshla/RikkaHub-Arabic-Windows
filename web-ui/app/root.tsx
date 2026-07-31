@@ -84,17 +84,21 @@ export function Layout({ children }: { children: React.ReactNode }) {
             即刻可见;水合完成后 React Router 自动以真实应用替换,无需手动移除逻辑。
             版式:品牌行(Logo + 应用名)居中,加载圆点缀于下方;translateY(-6%) 做光学
             居中——品牌组整体略高于几何中心,与成熟桌面应用启动屏的视觉重心一致。
-            字体用 system-ui 栈:应用字体此刻尚未加载,系统栈零闪动且各平台观感稳定。 */}
+            对齐(数据驱动,非目测):Logo 原 viewBox 四周各留 ~89 单位空白,HydrateFallback
+            处以墨迹边界(getBBox + 描边余量)裁剪 viewBox,SVG 盒即兔子可见边界;实测
+            system-ui(Segoe UI) 650 字重下 "RikkaHub" 墨迹高 ≈ 0.82em,故字号 = 兔高/0.82,
+            让文字上边线对齐兔耳、下边线对齐兔底。尺寸全用 px:此刻 app.css 未加载,
+            rem 会在样式表就绪、根字号缩放生效的瞬间跳档。字体用系统栈,零加载零闪动。 */}
         <style
           dangerouslySetInnerHTML={{
             __html: [
-              "#rikkahub-splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3rem;background:oklch(.992 .002 240);color:oklch(.18 .005 240)}",
+              "#rikkahub-splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:52px;background:oklch(.992 .002 240);color:oklch(.18 .005 240)}",
               ".dark #rikkahub-splash{background:oklch(.12 .006 240);color:oklch(.93 .006 240)}",
-              "#rikkahub-splash .sp-brand{display:flex;align-items:center;gap:.8125rem;transform:translateY(-6%)}",
-              "#rikkahub-splash .sp-brand svg{width:2.625rem;height:2.625rem}",
-              '#rikkahub-splash .sp-brand span{font:650 1.875rem/1 system-ui,"Segoe UI",-apple-system,sans-serif;letter-spacing:-.02em}',
-              "#rikkahub-splash .sp-dots{display:flex;gap:.4375rem}",
-              "#rikkahub-splash .sp-dots i{width:.4375rem;height:.4375rem;border-radius:9999px;background:oklch(.55 .01 240);animation:rikkahub-splash-bounce 1s infinite}",
+              "#rikkahub-splash .sp-brand{display:flex;align-items:center;gap:14px;transform:translateY(-6%)}",
+              "#rikkahub-splash .sp-brand svg{width:31px;height:44px}",
+              '#rikkahub-splash .sp-brand span{font:650 54px/1 system-ui,"Segoe UI",-apple-system,sans-serif;letter-spacing:-.02em;transform:translateY(1.5px)}',
+              "#rikkahub-splash .sp-dots{display:flex;gap:8px}",
+              "#rikkahub-splash .sp-dots i{width:8px;height:8px;border-radius:9999px;background:oklch(.55 .01 240);animation:rikkahub-splash-bounce 1s infinite}",
               ".dark #rikkahub-splash .sp-dots i{background:oklch(.65 .01 240)}",
               "@keyframes rikkahub-splash-bounce{0%,100%{transform:translateY(-30%);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:none;animation-timing-function:cubic-bezier(0,0,.2,1)}}",
             ].join("\n"),
@@ -366,7 +370,9 @@ export function HydrateFallback() {
   return (
     <div id="rikkahub-splash">
       <div className="sp-brand">
-        <Logo aria-hidden />
+        {/* viewBox 裁到墨迹边界(getBBox x237 y89 w660 h956,外扩 10 单位描边余量),
+            SVG 盒 = 兔子可见边界,flex 垂直居中即墨迹居中,文字对齐才有可靠基准 */}
+        <Logo aria-hidden viewBox="227 79 680 976" />
         <span>RikkaHub</span>
       </div>
       <div className="sp-dots">
