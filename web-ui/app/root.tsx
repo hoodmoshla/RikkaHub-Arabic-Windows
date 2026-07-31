@@ -92,13 +92,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <style
           dangerouslySetInnerHTML={{
             __html: [
-              "#rikkahub-splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:52px;background:oklch(.992 .002 240);color:oklch(.18 .005 240)}",
+              "#rikkahub-splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:44px;background:oklch(.992 .002 240);color:oklch(.18 .005 240)}",
               ".dark #rikkahub-splash{background:oklch(.12 .006 240);color:oklch(.93 .006 240)}",
-              "#rikkahub-splash .sp-brand{display:flex;align-items:center;gap:14px;transform:translateY(-6%)}",
-              "#rikkahub-splash .sp-brand svg{width:31px;height:44px}",
-              '#rikkahub-splash .sp-brand span{font:650 54px/1 system-ui,"Segoe UI",-apple-system,sans-serif;letter-spacing:-.02em;transform:translateY(1.5px)}',
-              "#rikkahub-splash .sp-dots{display:flex;gap:8px}",
-              "#rikkahub-splash .sp-dots i{width:8px;height:8px;border-radius:9999px;background:oklch(.55 .01 240);animation:rikkahub-splash-bounce 1s infinite}",
+              "#rikkahub-splash .sp-brand{display:flex;align-items:center;gap:16px;transform:translateY(-6%)}",
+              "#rikkahub-splash .sp-brand svg{width:38px;height:54px}",
+              '#rikkahub-splash .sp-brand span{font:650 48px/1 system-ui,"Segoe UI",-apple-system,sans-serif;letter-spacing:-.02em}',
+              "#rikkahub-splash .sp-dots{display:flex;gap:7px}",
+              "#rikkahub-splash .sp-dots i{width:9px;height:9px;border-radius:9999px;background:oklch(.55 .01 240);animation:rikkahub-splash-bounce 1s infinite}",
               ".dark #rikkahub-splash .sp-dots i{background:oklch(.65 .01 240)}",
               "@keyframes rikkahub-splash-bounce{0%,100%{transform:translateY(-30%);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:none;animation-timing-function:cubic-bezier(0,0,.2,1)}}",
             ].join("\n"),
