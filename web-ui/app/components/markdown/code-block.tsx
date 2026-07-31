@@ -838,6 +838,7 @@ function CodeBlockModeSwitch({
           key={option.value}
           type="button"
           disabled={disabled}
+          aria-pressed={mode === option.value}
           onClick={() => onModeChange(option.value)}
           className={cn(
             "rounded-full px-2 py-0.5 text-xs transition-colors",
@@ -852,6 +853,10 @@ function CodeBlockModeSwitch({
     </div>
   );
 }
+
+// Markdown 预览懒加载。必须是模块级单例:若在组件内 React.lazy,每个实例/每次
+// 重挂载都是新的组件类型,Suspense 会重复走 fallback(预览闪加载态)。
+const LazyMarkdown = React.lazy(() => import("./markdown"));
 
 // 源码/预览共享同一固定块高(产品稿:无论内容多长,块最多这么大,内部滚动)。
 // 两个字面量必须保持一致:body 是上限,iframe 撑满它。
@@ -971,11 +976,6 @@ export function CodeBlock({
     }
     return "";
   }, [code, previewLanguage]);
-
-  const LazyMarkdown = React.useMemo(
-    () => React.lazy(() => import("./markdown")),
-    [],
-  );
 
   return (
     <CodeBlockContext.Provider value={contextValue}>
