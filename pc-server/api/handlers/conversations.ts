@@ -534,11 +534,16 @@ export async function handleConversationRoutes(request: Request, url: URL, path:
       const messageId = String(body.messageId ?? "");
       const nodeIndex = conversation.messages.findIndex((node) => node.messages.some((msg) => msg.id === messageId));
       if (nodeIndex < 0) return error("Message not found", 404);
+      // 节点必须换新 id:pc_message_node.id 是全局主键,沿用源节点 id 会让 upsert 的
+      // ON CONFLICT 把源会话的节点行改挂到分支名下(源会话从 DB 重载后变空)。对齐 Android
+      // forkConversationAtMessage 的 Uuid.random() 行为;消息 id 与 Android 一致保留。
+      const forkedNodes = (JSON.parse(JSON.stringify(conversation.messages.slice(0, nodeIndex + 1))) as MessageNode[])
+        .map((node) => ({ ...node, id: id() }));
       const fork: Conversation = {
         ...JSON.parse(JSON.stringify(conversation)),
         id: id(),
         title: conversation.title ? `${conversation.title} Fork` : "Fork",
-        messages: JSON.parse(JSON.stringify(conversation.messages.slice(0, nodeIndex + 1))),
+        messages: forkedNodes,
         isPinned: false,
         createAt: Date.now(),
         updateAt: Date.now(),

@@ -13,7 +13,8 @@ import { applyEffectiveProxy, installProxyFetchInterceptor, primeSystemProxyCach
 import { setStartupPhase } from "./foundation/startup-gate";
 import { saveState, setState, state } from "./persistence/json-store";
 import { loadState } from "./persistence/state-load";
-import { initConversationsRuntime } from "./conversations";
+import { getConversationsDb, initConversationsRuntime } from "./conversations";
+import { repairForkNodeTheft } from "./conversations/fork-repair";
 import { initSseWiring } from "./api/sse";
 
 export async function bootstrap(): Promise<void> {
@@ -34,6 +35,20 @@ export async function bootstrap(): Promise<void> {
 
   // 3) 会话运行时:working set 判据接线 + 驻留清扫定时器。
   initConversationsRuntime();
+
+  // 3b) 历史 fork 缺陷修复:被分支抢走节点行的会话在就绪前还原(客户端加载到空会话
+  //     之前必须完成)。幂等且只读扫描为主,失败仅记录,不阻断启动。
+  try {
+    const db = getConversationsDb();
+    if (db) {
+      const outcome = repairForkNodeTheft(db);
+      if (outcome.repaired > 0 || outcome.skipped > 0) {
+        console.log(`[fork-repair] 完成:修复 ${outcome.repaired} 个会话,跳过 ${outcome.skipped} 个`);
+      }
+    }
+  } catch (err) {
+    console.error("[fork-repair] 修复失败(不影响启动):", err);
+  }
 
   // 4) SSE 接线:working set 的"界面正开着"判据 + 错误中心 SSE 广播。
   initSseWiring();
