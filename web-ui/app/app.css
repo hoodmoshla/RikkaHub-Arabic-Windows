@@ -1192,6 +1192,12 @@
   font-family: var(--rikkahub-chat-font, inherit);
 }
 
+/* 详情抽屉(components/detail-drawer.tsx)正文跟随对话字体,与消息区观感一致;
+   其内代码块/JSON 块仍走等宽(pre/code 的 mono 规则优先级更高),不受影响。 */
+[data-detail-drawer] {
+  font-family: var(--rikkahub-chat-font, inherit);
+}
+
 .message-markdown p {
   margin-block: 0.45rem;
 }

@@ -23,14 +23,7 @@ import {
 import Markdown from "~/components/markdown/markdown";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import {
-  Drawer,
-  DrawerContent,
-  DrawerDescription,
-  DrawerHeader,
-  DrawerTitle,
-} from "~/components/ui/drawer";
-import { useIsMobile } from "~/hooks/use-mobile";
+import { DetailDrawer } from "~/components/detail-drawer";
 import { copyTextToClipboard } from "~/lib/clipboard";
 import { resolveFileUrl } from "~/lib/files";
 import { cn } from "~/lib/utils";
@@ -685,7 +678,6 @@ export function ToolPart({
   }
 
   const { t } = useTranslation("message");
-  const isMobile = useIsMobile();
   const [expanded, setExpanded] = React.useState(true);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
 
@@ -860,75 +852,59 @@ export function ToolPart({
         )}
       </ControlledChainOfThoughtStep>
 
-      <Drawer
-        direction={isMobile ? "bottom" : "right"}
+      <DetailDrawer
         open={drawerOpen}
         onOpenChange={setDrawerOpen}
+        title={title}
+        description={t("tool_part.tool_name_label", { toolName: tool.toolName })}
       >
-        <DrawerContent>
-          <DrawerHeader>
-            <DrawerTitle>{title}</DrawerTitle>
-            <DrawerDescription>
-              {t("tool_part.tool_name_label", { toolName: tool.toolName })}
-            </DrawerDescription>
-          </DrawerHeader>
-
-          {/* PR#30 想法6:vaul 把 Content 上的 pointerdown 当作拖拽起点,正文文本因此
-              无法选中复制。在滚动区截断冒泡 + select-text:正文可自由选择,而从头部/
-              把手拖拽关闭不受影响(比 PR 原稿 handleOnly 更精准,不牺牲移动端手势)。 */}
-          <div
-            className="flex-1 min-h-0 select-text space-y-4 overflow-y-auto px-4 pb-6"
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            {tool.toolName === TOOL_NAMES.SEARCH_WEB && isExecuted ? (
-              <SearchWebPreview args={args} content={outputContent} />
-            ) : tool.toolName === TOOL_NAMES.SCRAPE_WEB && isExecuted ? (
-              <ScrapeWebPreview content={outputContent} />
-            ) : tool.toolName === TOOL_NAMES.USE_SKILL && isExecuted ? (
-              <UseSkillPreview args={args} content={outputContent} rawText={outputText} />
-            ) : (
-              <div className="space-y-3">
-                <div>
-                  <div className="mb-1 flex items-center justify-between text-muted-foreground text-xs">
-                    <span>{t("tool_part.parameters")}</span>
-                    <SectionCopyButton text={toJsonString(args)} label={t("tool_part.copy")} />
-                  </div>
-                  <JsonBlock value={args} maxHeightClass="max-h-none" />
+        {tool.toolName === TOOL_NAMES.SEARCH_WEB && isExecuted ? (
+          <SearchWebPreview args={args} content={outputContent} />
+        ) : tool.toolName === TOOL_NAMES.SCRAPE_WEB && isExecuted ? (
+          <ScrapeWebPreview content={outputContent} />
+        ) : tool.toolName === TOOL_NAMES.USE_SKILL && isExecuted ? (
+          <UseSkillPreview args={args} content={outputContent} rawText={outputText} />
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <div className="mb-1 flex items-center justify-between text-muted-foreground text-xs">
+                <span>{t("tool_part.parameters")}</span>
+                <SectionCopyButton text={toJsonString(args)} label={t("tool_part.copy")} />
+              </div>
+              <JsonBlock value={args} maxHeightClass="max-h-none" />
+            </div>
+            {isExecuted && (
+              <div className="space-y-2">
+                <div className="mb-1 flex items-center justify-between text-muted-foreground text-xs">
+                  <span>{t("tool_part.result")}</span>
+                  <SectionCopyButton text={outputText} label={t("tool_part.copy")} />
                 </div>
-                {isExecuted && (
-                  <div className="space-y-2">
-                    <div className="mb-1 flex items-center justify-between text-muted-foreground text-xs">
-                      <span>{t("tool_part.result")}</span>
-                      <SectionCopyButton text={outputText} label={t("tool_part.copy")} />
-                    </div>
-                    {tool.output.map((part, i) => {
-                      if (part.type === "text") {
-                        let parsed: unknown;
-                        try {
-                          parsed = JSON.parse(part.text);
-                        } catch {
-                          parsed = part.text;
-                        }
-                        return <JsonBlock key={i} value={parsed} maxHeightClass="max-h-none" />;
-                      }
-                      if (part.type === "image")
-                        return <ImagePartRenderer key={i} url={part.url} />;
-                      if (part.type === "video")
-                        return <VideoPartRenderer key={i} url={part.url} />;
-                      if (part.type === "audio")
-                        return <AudioPartRenderer key={i} url={part.url} />;
-                      return null;
-                    })}
-                  </div>
-                )}
-                {!isExecuted && (
-                  <div className="text-muted-foreground text-sm">{t("tool_part.not_executed")}</div>
-                )}
+                {tool.output.map((part, i) => {
+                  if (part.type === "text") {
+                    let parsed: unknown;
+                    try {
+                      parsed = JSON.parse(part.text);
+                    } catch {
+                      parsed = part.text;
+                    }
+                    return <JsonBlock key={i} value={parsed} maxHeightClass="max-h-none" />;
+                  }
+                  if (part.type === "image")
+                    return <ImagePartRenderer key={i} url={part.url} />;
+                  if (part.type === "video")
+                    return <VideoPartRenderer key={i} url={part.url} />;
+                  if (part.type === "audio")
+                    return <AudioPartRenderer key={i} url={part.url} />;
+                  return null;
+                })}
               </div>
             )}
+            {!isExecuted && (
+              <div className="text-muted-foreground text-sm">{t("tool_part.not_executed")}</div>
+            )}
           </div>
-        </DrawerContent>
-      </Drawer>
+        )}
+      </DetailDrawer>
     </>
   );
 }
