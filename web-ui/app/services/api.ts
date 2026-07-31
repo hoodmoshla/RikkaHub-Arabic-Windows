@@ -320,6 +320,15 @@ export async function requestWebAuthToken(password: string): Promise<WebAuthToke
   return response;
 }
 
+/**
+ * 代码块"在浏览器中打开"(桌面壳专用):后端把代码落盘为临时文件,并用系统默认
+ * 程序打开(.html → 默认浏览器)。桌面壳的 WebView2 会吞掉 window.open(blob:),
+ * 且 blob URL 只在页面内有效,无法交给外部浏览器。
+ */
+export async function openCodePreviewFile(content: string, language: string): Promise<void> {
+  await api.post("code-preview/open", { content, language });
+}
+
 export interface SSEEvent<T> {
   event: string;
   data: T;

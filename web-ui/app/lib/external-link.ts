@@ -5,13 +5,15 @@
 
 let cachedOpen: ((url: string) => Promise<void>) | null | undefined;
 
-function isTauriEnvironment(): boolean {
+// 是否运行在 Tauri 桌面壳内。窗口/浏览器相关能力(window.open、blob 导航)在
+// WebView2 里行为不同,需要分流的调用方以此判断。
+export function isDesktopShell(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 async function loadTauriOpen(): Promise<((url: string) => Promise<void>) | null> {
   if (cachedOpen !== undefined) return cachedOpen;
-  if (!isTauriEnvironment()) {
+  if (!isDesktopShell()) {
     cachedOpen = null;
     return null;
   }
