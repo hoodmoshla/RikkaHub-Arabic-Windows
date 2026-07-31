@@ -28,7 +28,6 @@ import { useTranslation } from "react-i18next";
 
 import { InfiniteScrollArea } from "~/components/extended/infinite-scroll-area";
 import { AvatarCropper } from "~/components/avatar-cropper";
-import Logo from "~/components/logo";
 import { RenameConversationDialog } from "~/components/rename-conversation-dialog";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -1281,23 +1280,15 @@ export const ConversationSidebar = React.memo(
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {/* 官网入口:图标形态与底栏其余 icon 按钮统一,文字链接在窄侧栏下易被截断 */}
-            <Button
-              asChild
-              variant="ghost"
-              size="icon-sm"
-              className="ml-auto text-muted-foreground hover:text-foreground"
+            <a
+              href="https://rikkahub-desktop.pages.dev/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ml-auto truncate whitespace-nowrap text-xs font-normal text-foreground/80 hover:text-foreground transition-colors"
               title="RikkaHub"
             >
-              <a
-                href="https://rikkahub-desktop.pages.dev/"
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label="RikkaHub"
-              >
-                <Logo className="size-4" />
-              </a>
-            </Button>
+              RikkaHub
+            </a>
           </div>
         </SidebarFooter>
       </Sidebar>
