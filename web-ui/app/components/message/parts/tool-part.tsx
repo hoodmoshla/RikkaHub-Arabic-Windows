@@ -723,8 +723,6 @@ export function ToolPart({
       (Boolean(getStringField(outputContent, "answer")) ||
         getArrayField(outputContent, "items").length > 0)) ||
     (tool.toolName === TOOL_NAMES.SCRAPE_WEB && Boolean(getStringField(args, "url"))) ||
-    (tool.toolName === TOOL_NAMES.USE_SKILL &&
-      (Boolean(getStringField(args, "path")) || Boolean(getStringField(outputContent, "content")))) ||
     isDenied ||
     hasMediaOutput;
 
@@ -808,18 +806,6 @@ export function ToolPart({
             {tool.toolName === TOOL_NAMES.SCRAPE_WEB && getStringField(args, "url") && (
               <div className="line-clamp-2 text-muted-foreground text-xs">
                 {getStringField(args, "url")}
-              </div>
-            )}
-
-            {/* use_skill(PR#30 想法7):卡片内联预览——加载的文件路径 + 技能正文前几行 */}
-            {tool.toolName === TOOL_NAMES.USE_SKILL && getStringField(args, "path") && (
-              <div className="truncate text-muted-foreground text-xs">
-                {getStringField(args, "path")}
-              </div>
-            )}
-            {tool.toolName === TOOL_NAMES.USE_SKILL && getStringField(outputContent, "content") && (
-              <div className="line-clamp-3 whitespace-pre-wrap text-muted-foreground text-xs">
-                {getStringField(outputContent, "content")}
               </div>
             )}
 
