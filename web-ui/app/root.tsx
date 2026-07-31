@@ -24,6 +24,11 @@ import { StartupGate } from "./components/startup-gate";
 import Logo from "./components/logo";
 import { FontFaceInjector } from "./components/font-face-injector";
 import { openExternal } from "./lib/external-link";
+import {
+  CHAT_CJK_OVERRIDE_FAMILY,
+  composeFontChain,
+  UI_CJK_OVERRIDE_FAMILY,
+} from "./lib/font-chain";
 import { toast } from "sonner";
 import { GlobalConfirmDialog } from "./components/global-confirm-dialog";
 import { useAppErrorsStore } from "./stores/app-errors-store";
@@ -140,21 +145,6 @@ function SilentUpdateChecker() {
   return <UpdateDialog info={update} open={true} onClose={() => setUpdate(null)} />;
 }
 
-// 把中文字体插入英文字体 family 链:插在主字体之后、其余 fallback 之前。
-// '"HarmonyOS Sans", system-ui, sans-serif' + '"思源宋体", serif'
-//   → '"HarmonyOS Sans", "思源宋体", serif, system-ui, sans-serif'
-// 思路:英文字体通常只有一个主字体(在链首),其余是 generic 兜底。把中文字体族插在
-// 链首之后,既保证英文字形优先用英文字体,又让中文字形在落到 generic 兜底前先尝试中文字体。
-// 中文字体族自带的 fallback(如 "思源宋体", serif)原样保留在中间。
-// 没设中文字体(cjk 空)→ 返回原始 family,行为同前。
-function mergeCjkIntoFamily(enFamily: string, cjkFamily: string): string {
-  if (!cjkFamily.trim()) return enFamily.trim();
-  const en = enFamily.trim();
-  if (!en) return cjkFamily.trim();
-  const idx = en.indexOf(",");
-  return idx < 0 ? `${en}, ${cjkFamily}` : `${en.slice(0, idx)}, ${cjkFamily}${en.slice(idx)}`;
-}
-
 // 专题8:语言上报——乐观写 store(settings 镜像随之落盘)+ POST 后端;等值跳过,
 // 保证快照回放触发的 languageChanged 不会回写成环。失败静默,本地已生效。
 function persistLanguage(lng: string): void {
@@ -232,9 +222,9 @@ function AppContent() {
   }, []);
   React.useEffect(() => {
     if (typeof document === "undefined") return;
-    // 中英文分别设置(Word 式):把中文字体插到英文字体 family 链的"主字体之后、兜底之前"。
-    // 效果:英文字形用英文字体,中文字形英文字体没有 → 落到中文字体,再落到兜底。
-    // 没设中文字体时 cjkInsert 为空,拼接退化为纯英文链,行为同前(向后兼容)。
+    // 中英文分别设置(Word 式):中文字体经 unicode-range 覆盖族生效(原理见 lib/font-chain.ts,
+    // @font-face 注入见 FontFaceInjector):覆盖族置于链首,中文字形命中它、拉丁字形穿透到
+    // 英文字体。没设中文字体 → 纯英文链,行为同前(向后兼容)。
     const uiEn = String(
       displaySetting?.uiFontFamilyCss ?? displaySetting?.uiFontFamily ?? "",
     ).trim();
@@ -243,9 +233,15 @@ function AppContent() {
     ).trim();
     const uiCjk = String(displaySetting?.uiFontFamilyCjkCss ?? "").trim();
     const chatCjk = String(displaySetting?.chatFontFamilyCjkCss ?? "").trim();
-    const uiFont =
-      mergeCjkIntoFamily(uiEn, uiCjk) || '"Noto Sans SC", "Microsoft YaHei", var(--font-sans)';
-    const chatFont = mergeCjkIntoFamily(chatEn, chatCjk) || "inherit";
+    const uiFont = composeFontChain(
+      uiEn || '"Noto Sans SC", "Microsoft YaHei", var(--font-sans)',
+      UI_CJK_OVERRIDE_FAMILY,
+      Boolean(uiCjk),
+    );
+    // 对话字体:英文未设时基链取界面链(继承观感);都未设且无中文 → inherit(纯继承,零成本)。
+    const chatFont = chatCjk
+      ? composeFontChain(chatEn || uiFont, CHAT_CJK_OVERRIDE_FAMILY, true)
+      : chatEn || "inherit";
     document.body.style.setProperty("--rikkahub-ui-font", uiFont);
     document.body.style.setProperty("--rikkahub-chat-font", chatFont);
     // 界面字号缩放:写到 <html>(documentElement)上,app.css 的 :root 规则会用它计算根字号。

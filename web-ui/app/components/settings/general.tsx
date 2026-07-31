@@ -6,6 +6,7 @@ import { UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { AvatarCropper } from "~/components/avatar-cropper";
 import { FontPickerPair } from "~/components/font-picker";
+import { CHAT_CJK_OVERRIDE_FAMILY, UI_CJK_OVERRIDE_FAMILY } from "~/lib/font-chain";
 import { useAutosaveDraft } from "~/hooks/use-autosave-draft";
 import { KeybindingSettings } from "~/components/keybinding-settings";
 import { Button } from "~/components/ui/button";
@@ -132,6 +133,7 @@ export function GeneralSection({
               fallbackFamily={
                 '"Noto Sans SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif'
               }
+              cjkOverrideFamily={UI_CJK_OVERRIDE_FAMILY}
               onChangeEn={(value, family) =>
                 void patchDisplay({ uiFontFamily: value, uiFontFamilyCss: family })
               }
@@ -139,14 +141,16 @@ export function GeneralSection({
                 void patchDisplay({ uiFontFamilyCjk: value, uiFontFamilyCjkCss: family })
               }
             />
+            {/* 预览兜底固定为默认链,不跟随界面字体——否则改界面字体时对话预览块跟着变,
+                用户会误以为两个设置联动(内测反馈)。未设对话字体时实际聊天区仍继承界面字体。 */}
             <FontPickerPair
               label={t("settings:general.chat_font")}
               enValue={textValue(display.chatFontFamily)}
               cjkValue={textValue(display.chatFontFamilyCjk)}
               fallbackFamily={
-                textValue(display.uiFontFamilyCss) ||
                 '"Noto Sans SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif'
               }
+              cjkOverrideFamily={CHAT_CJK_OVERRIDE_FAMILY}
               onChangeEn={(value, family) =>
                 void patchDisplay({ chatFontFamily: value, chatFontFamilyCss: family })
               }
