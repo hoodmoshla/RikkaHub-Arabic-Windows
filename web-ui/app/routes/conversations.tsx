@@ -717,6 +717,31 @@ const ConversationTimeline = React.memo(
       if (activeId) void loadOlderConversationNodes(activeId);
     }, [activeId]);
     const [isAtBottom, setIsAtBottom] = React.useState(true);
+    // 1.5.0 内测 bug1:底部幽灵空白自愈。Virtuoso 的 followOutput 只在新数据到达时
+    // 贴底,不追踪已有行的缩高(官方 issue #241 明确为设计取舍);贴底状态下最后一项
+    // 大幅缩高(推理块生成结束自动折叠、用户手动折叠长卡片等)时,过期总高度偶发
+    // 残留在滚动容器里,表现为"到底了还能继续下拉出大片空白"。对策:总高度变小且
+    // 仍贴底时补一次显式贴底,强制 Virtuoso 重算并钳位;rAF 等布局提交后执行。
+    // 高度增长(流式输出/向上翻页 prepend)不触发,不干扰正常滚动。
+    const isAtBottomRef = React.useRef(true);
+    const totalListHeightRef = React.useRef(0);
+    React.useEffect(() => {
+      // 切换会话时 Virtuoso 按 key 重挂,旧会话的总高度不应参与比较
+      totalListHeightRef.current = 0;
+    }, [activeId]);
+    const handleAtBottomStateChange = React.useCallback((atBottom: boolean) => {
+      isAtBottomRef.current = atBottom;
+      setIsAtBottom(atBottom);
+    }, []);
+    const handleTotalListHeightChanged = React.useCallback((height: number) => {
+      const previous = totalListHeightRef.current;
+      totalListHeightRef.current = height;
+      if (previous === 0 || height >= previous || !isAtBottomRef.current) return;
+      requestAnimationFrame(() => {
+        if (!isAtBottomRef.current) return;
+        virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+      });
+    }, []);
     // 打开会话的首帧渲染批量控制(专题2 加餐):increaseViewportBy=800 会让 Virtuoso
     // 挂载时连滚动缓冲区一并渲染,每条长消息的 markdown 管线(remark+KaTeX)要
     // 4-20ms,叠加 DOM 提交与布局就是用户看到的“空白/加载中”。改成两阶段:首帧只
@@ -1025,8 +1050,9 @@ const ConversationTimeline = React.memo(
                   ? "auto"
                   : false
             }
-            atBottomStateChange={setIsAtBottom}
+            atBottomStateChange={handleAtBottomStateChange}
             atTopStateChange={setIsAtTop}
+            totalListHeightChanged={handleTotalListHeightChanged}
             rangeChanged={({ startIndex, endIndex }) => {
               // I-2:firstItemIndex 使回调下标携带全局偏移;轮次条等用已加载数组的本地坐标
               setTopVisibleIndex(startIndex - nodesOffset);
