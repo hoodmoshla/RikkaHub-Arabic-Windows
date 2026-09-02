@@ -126,8 +126,9 @@ const COLOR_THEME_OPTIONS: Array<{
 ];
 
 const LANGUAGE_OPTIONS = [
-  { value: "zh-CN", label: "简体中文" },
-  { value: "en-US", label: "English" },
+  { value: "zh-CN", labelKey: "language_zh_cn", fallbackLabel: "简体中文" },
+  { value: "en-US", labelKey: "language_en_us", fallbackLabel: "English" },
+  { value: "ar", labelKey: "language_ar", fallbackLabel: "العربية" },
 ] as const;
 
 type ConversationListItem =
@@ -510,14 +511,16 @@ const ConversationListRow = React.memo(
 );
 
 function resolveLanguage(language: string): (typeof LANGUAGE_OPTIONS)[number]["value"] {
+  if (language === "ar" || language.startsWith("ar-")) return "ar";
   return language.startsWith("zh") ? "zh-CN" : "en-US";
 }
 
 function LanguageSwitcher() {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const currentLanguage = resolveLanguage(i18n.resolvedLanguage ?? i18n.language);
   const currentOption =
     LANGUAGE_OPTIONS.find((option) => option.value === currentLanguage) ?? LANGUAGE_OPTIONS[0];
+  const currentLabel = t(currentOption.labelKey, { defaultValue: currentOption.fallbackLabel });
 
   return (
     <DropdownMenu>
@@ -527,14 +530,14 @@ function LanguageSwitcher() {
           size="icon-sm"
           className="text-muted-foreground hover:text-foreground"
           type="button"
-          aria-label={`Language: ${currentOption.label}`}
-          title={`Language: ${currentOption.label}`}
+          aria-label={t("language_label", { label: currentLabel })}
+          title={t("language_label", { label: currentLabel })}
         >
           <Languages className="size-4" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-40" side="top" align="end">
-        <DropdownMenuLabel>Language</DropdownMenuLabel>
+        <DropdownMenuLabel>{t("language")}</DropdownMenuLabel>
         {LANGUAGE_OPTIONS.map((option) => {
           const selected = option.value === currentLanguage;
           return (
@@ -544,7 +547,9 @@ function LanguageSwitcher() {
                 void i18n.changeLanguage(option.value);
               }}
             >
-              <span className="flex-1">{option.label}</span>
+              <span className="flex-1">
+                {t(option.labelKey, { defaultValue: option.fallbackLabel })}
+              </span>
               <Check className={selected ? "size-4" : "size-4 opacity-0"} />
             </DropdownMenuItem>
           );

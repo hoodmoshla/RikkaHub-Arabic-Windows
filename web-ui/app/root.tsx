@@ -7,7 +7,7 @@ import {
   ScrollRestoration,
 } from "react-router";
 import * as React from "react";
-import i18n from "~/i18n";
+import i18n, { isArabicLanguage } from "~/i18n";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Route } from "./+types/root";
@@ -46,14 +46,16 @@ export function Layout({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     const sync = (lng: string) => {
       document.documentElement.lang = lng;
+      document.documentElement.dir = isArabicLanguage(lng) ? "rtl" : "ltr";
     };
+    sync(i18n.language);
     i18n.on("languageChanged", sync);
     return () => {
       i18n.off("languageChanged", sync);
     };
   }, []);
   return (
-    <html lang={i18n.language}>
+    <html lang={i18n.language} dir={isArabicLanguage(i18n.language) ? "rtl" : "ltr"}>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
