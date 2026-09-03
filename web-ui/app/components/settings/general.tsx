@@ -25,7 +25,7 @@ export function GeneralSection({
   settings: Settings;
   onSettings: (settings: Settings) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const display = settings.displaySetting;
   const [name, setName] = React.useState(textValue(display.userNickname));
   const [avatar, setAvatar] = React.useState<AssistantAvatar>(
@@ -124,6 +124,23 @@ export function GeneralSection({
                 setName(event.target.value);
               }}
             />
+          </label>
+          <label className="block space-y-2">
+            <span className="text-sm font-medium">{t("settings:general.language")}</span>
+            <select
+              className="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+              value={i18n.resolvedLanguage?.startsWith("ar") ? "ar" : i18n.resolvedLanguage?.startsWith("zh") ? "zh-CN" : "en-US"}
+              aria-label={t("settings:general.language")}
+              onChange={(event) => {
+                void i18n.changeLanguage(event.target.value).then(() => {
+                  void patchDisplay({ language: event.target.value });
+                });
+              }}
+            >
+              <option value="en-US">{t("settings:general.language_en_us")}</option>
+              <option value="zh-CN">{t("settings:general.language_zh_cn")}</option>
+              <option value="ar">{t("settings:general.language_ar")}</option>
+            </select>
           </label>
           <div className="grid gap-3 md:grid-cols-2">
             <FontPickerPair

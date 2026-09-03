@@ -1,0 +1,15 @@
+{
+  "code_block": {
+    "clipboard_not_available": "الحافظة غير متاحة",
+    "copy_code": "نسخ الكود",
+    "collapse_code": "طي كتلة الكود",
+    "expand_code": "توسيع كتلة الكود",
+    "preview": "معاينة",
+    "source": "المصدر",
+    "preview_loading": "جارٍ تحميل المعاينة…",
+    "open_in_browser": "فتح في المتصفح",
+    "open_failed": "تعذّر الفتح",
+    "download_code": "تنزيل الكود",
+    "downloaded_toast": "تم التنزيل إلى مجلد التنزيلات: {{name}}"
+  }
+}

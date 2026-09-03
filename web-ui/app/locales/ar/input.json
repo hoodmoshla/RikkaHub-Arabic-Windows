@@ -1,0 +1,138 @@
+{
+  "mcp": {
+    "title": "MCP",
+    "description": "اختر خوادم MCP المتاحة لهذا المساعد",
+    "update_failed": "فشل تحديث إعدادات MCP",
+    "unnamed_server": "خادم MCP بدون اسم",
+    "tools_enabled": "{{enabled}}/{{total}} أدوات ممكّنة",
+    "empty": "لا توجد خوادم MCP متاحة"
+  },
+  "injection": {
+    "title": "الامتدادات",
+    "description": "فعّل الرسائل السريعة وحقن النمط وLorebook للمساعد الحالي",
+    "update_failed": "فشل تحديث الامتدادات",
+    "tab_quickmessages": "الرسائل السريعة",
+    "tab_mode": "حقن النمط",
+    "tab_lorebook": "Lorebook",
+    "unnamed_mode": "حقن نمط بدون اسم",
+    "unnamed_lorebook": "Lorebook بدون اسم",
+    "unnamed_quickmessage": "رسالة سريعة بدون اسم",
+    "disabled": "معطّل",
+    "empty_mode": "لا توجد حقن نمط متاحة",
+    "empty_lorebook": "لا توجد Lorebook متاحة",
+    "empty_quickmessages": "لا توجد رسائل سريعة متاحة"
+  },
+  "reasoning": {
+    "title": "الاستدلال",
+    "description": "اضبط شدة الاستدلال والميزانية للمساعد الحالي",
+    "update_failed": "فشل تحديث ميزانية الاستدلال",
+    "custom_budget": "ميزانية استدلال مخصّصة",
+    "custom_budget_placeholder": "أدخل ميزانية التوكن",
+    "invalid_integer": "يرجى إدخال عدد صحيح صالح",
+    "apply": "تطبيق",
+    "examples": "أمثلة: 0 (إيقاف)، -1 (تلقائي)، 1024، 16000، 32000",
+    "presets": {
+      "off": {
+        "label": "إيقاف",
+        "description": "عطّل الاستدلال وأجب مباشرة."
+      },
+      "auto": {
+        "label": "تلقائي",
+        "description": "دع النموذج يحدد مستوى الاستدلال تلقائيًا."
+      },
+      "low": {
+        "label": "خفيف",
+        "description": "استخدم قدرًا قليلًا من الاستدلال للإجابة."
+      },
+      "medium": {
+        "label": "متوسط",
+        "description": "استخدم قدرًا أكبر من الاستدلال للإجابة."
+      },
+      "high": {
+        "label": "قوي",
+        "description": "استخدم استدلالًا مكثفًا للإجابة."
+      },
+      "xhigh": {
+        "label": "أقصى",
+        "description": "استخدم أقصى قدر من الاستدلال للإجابة."
+      }
+    }
+  },
+  "model_list": {
+    "ability_tool": "أدوات",
+    "ability_reasoning": "استدلال",
+    "select_model": "اختر النموذج",
+    "switch_model_failed": "فشل تبديل النموذج",
+    "update_favorites_failed": "فشل تحديث المفضلات",
+    "title": "اختر النموذج",
+    "description": "غيّر نموذج الدردشة المستخدم من قبل هذا المساعد",
+    "search_placeholder": "ابحث عن النماذج",
+    "empty": "لا توجد نماذج متاحة",
+    "favorites": "المفضلات"
+  },
+  "search": {
+    "default_service_label": "بحث",
+    "update_search_failed": "فشل تحديث بحث الويب",
+    "switch_service_failed": "فشل تبديل خدمة البحث",
+    "update_builtin_failed": "فشل تحديث البحث المدمج",
+    "title": "بحث الويب",
+    "description": "اضبط بحث الويب وخدمات البحث",
+    "builtin_title": "بحث الموديل المدمج",
+    "builtin_desc": "استخدم قدرة البحث الأصلية للموديل",
+    "web_title": "بحث عبر الويب",
+    "status_enabled": "ممكّن",
+    "status_disabled": "معطّل",
+    "unknown": "غير معروف",
+    "empty": "لا توجد خدمات بحث متاحة",
+    "builtin_notice": "بحث الموديل المدمج مفعل. إعدادات خدمة البحث في التطبيق لن تؤثر."
+  },
+  "chat": {
+    "attachment_image": "صورة",
+    "attachment_video": "فيديو",
+    "attachment_audio": "صوت",
+    "attachment_file": "مرفق",
+    "quick_message_default_title": "رسالة سريعة",
+    "upload_failed": "فشل الرفع",
+    "send_failed": "فشل الإرسال",
+    "drop_to_upload": "اسحب الملفات هنا لرفعها",
+    "drop_anywhere_to_upload": "أفلت لرفعها إلى المحادثة الحالية",
+    "editing_tip": "أنت تقوم بتحرير رسالة؛ الإرسال سيُنشئ فرعًا جديدًا",
+    "cancel_edit": "إلغاء التحرير",
+    "delete_attachment_failed": "فشل حذف المرفق",
+    "upload_image": "رفع صورة",
+    "upload_document": "رفع مستند",
+    "export_conversation": "تصدير المحادثة كـ Markdown",
+    "export_conversation_with_reasoning": "تصدير المحادثة كـ Markdown (مع الاستدلال)",
+    "unsupported_file_skipped": "{{count}} ملف/ملفات تم تخطيها بسبب تنسيق غير مدعوم",
+    "placeholder_ready": "اكتب رسالة...",
+    "placeholder_not_ready": "يرجى اختيار محادثة أولًا",
+    "send_hint_enter": "اضغط Enter للإرسال، Shift + Enter لإدراج سطر جديد",
+    "send_hint_newline": "اضغط Shift + Enter للإرسال، Enter لإدراج سطر جديد",
+    "long_text_as_file": "تم تحويل النص الطويل إلى مرفق ملف",
+    "uploading_progress": "جاري الرفع {{percent}}%",
+    "parsing_progress": "جارٍ تحليل الصفحة {{done}}/{{total}}",
+    "parsing": "جارٍ التحليل",
+    "extraction_failed": "فشل التحليل: لا يمكن إرفاق نص هذا الملف عند الإرسال",
+    "extraction_empty": "لم يتم استخراج أي نص (ممْسوح ضوئيًا أو ملف غير مدعوم)"
+  },
+  "resize_handle": "اسحب لتغيير حجم مربع الإدخال",
+  "compress_history": "ضغط سجل المحادثة",
+  "optimize": {
+    "title": "تحسين الموجه",
+    "slow_hint": "نموذج المحسّن يستجيب ببطء، جارٍ الانتظار…",
+    "empty_result": "لم يُعد المحسّن بأي نتيجة. أعد المحاولة أو غيّر نموذج المحسّن.",
+    "success": "تم تحسين الموجه",
+    "timeout": "انتهى وقت تحسين الموجه. أعد المحاولة لاحقًا أو تحقق من نموذج المحسّن.",
+    "failed": "فشل تحسين الموجه",
+    "undo": "تراجع",
+    "undo_title": "تراجع عن هذا التحسين واستعد النص الأصلي"
+  },
+  "asr": {
+    "not_configured": "قم بتكوين واختيار خدمة ASR أولًا من الإعدادات",
+    "failed": "فشل التعرف على الصوت",
+    "connect_failed": "فشل اتصال التعرف على الصوت",
+    "mic_denied": "لا يمكن الوصول إلى الميكروفون",
+    "start": "إدخال صوتي",
+    "stop": "إيقاف الإدخال الصوتي"
+  }
+}

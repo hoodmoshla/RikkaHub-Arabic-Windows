@@ -1,0 +1,95 @@
+{
+  "conversations": {
+    "meta": {
+      "title": "RikkaHub Web",
+      "description": "عميل الويب لـ RikkaHub"
+    },
+    "preview": {
+      "empty_message": "رسالة فارغة",
+      "image": "[صورة]",
+      "video": "[فيديو]",
+      "audio": "[صوت]",
+      "document": "[مستند]",
+      "document_with_name": "[مستند] {{name}}",
+      "thinking": "[يفكر]",
+      "tool_call": "[استدعاء أداة]",
+      "tool_with_name": "[أداة] {{name}}"
+    },
+    "errors": {
+      "load_detail_failed": "فشل تحميل تفاصيل المحادثة"
+    },
+    "empty_state": {
+      "select_title": "اختر محادثة",
+      "select_description": "اختر محادثة من الشريط الجانبي لعرض الرسائل",
+      "loading_title": "جارٍ التحميل...",
+      "loading_description": "جارٍ تحميل تفاصيل المحادثة",
+      "error_title": "فشل التحميل",
+      "no_message_title": "لا توجد رسائل بعد",
+      "no_message_description": "هذه المحادثة لا تحتوي على أي رسائل بعد"
+    },
+    "welcome_prompt": "كيف أستطيع مساعدتك؟",
+    "share": {
+      "cancel": "إلغاء التحديد",
+      "select_all": "تحديد الكل / إلغاء التحديد",
+      "confirm": "تصدير المحدد"
+    },
+    "user": {
+      "default_name": "مستخدم"
+    },
+    "header": {
+      "select_conversation": "اختر محادثة",
+      "cache_hit_rate": "نسبة نجاح الكاش: {{rate}}%"
+    },
+    "custom_prompt": {
+      "button": "مطالبة نظام المحادثة",
+      "button_active": "مطالبة نظام المحادثة ✎",
+      "placeholder": "تجاوز مطالبة النظام لهذه المحادثة",
+      "clear": "مسح",
+      "save": "حفظ",
+      "cancel": "إلغاء",
+      "saved": "تم حفظ مطالبة نظام المحادثة",
+      "edit_aria": "تحرير مطالبة نظام المحادثة",
+      "dialog_title": "مطالبة نظام المحادثة",
+      "dialog_description": "تُطبق على هذه المحادثة فقط. إذا كانت فارغة، سيتم الرجوع إلى مطالبة النظام الافتراضية للمساعد.",
+      "dialog_placeholder": "اكتب هنا لتجاوز مطالبة النظام لهذه المحادثة"
+    },
+    "theme_toggle": {
+      "to_light": "الانتقال إلى الوضع الفاتح",
+      "to_dark": "الانتقال إلى الوضع الداكن"
+    },
+    "compress": {
+      "dialog_title": "ضغط سجل المحادثة",
+      "dialog_description": "يستخدم نموذج ضغط السياق من إعدادات النموذج والمطالبة الافتراضية لتلخيص الرسائل السابقة مع الاحتفاظ بالرسائل الحديثة.",
+      "target_tokens": "الرموز المستهدفة",
+      "keep_recent": "الاحتفاظ بالرسائل الحديثة",
+      "additional_prompt": "متطلبات إضافية",
+      "additional_placeholder": "اختياري، مثال: الاحتفاظ بعلاقات الشخصيات، المعلمات الأساسية، والمهام",
+      "cancel": "إلغاء",
+      "start": "بدء الضغط",
+      "success": "تم ضغط سجل المحادثة",
+      "failed": "فشل الضغط"
+    },
+    "translate": {
+      "dialog_title": "اختر لغة الترجمة",
+      "dialog_description": "يتم حفظ الترجمة تحت الرد الحالي ولن تدخل في سياق الجولة التالية.",
+      "cancel": "إلغاء",
+      "confirm": "ترجم",
+      "failed": "فشل الترجمة",
+      "lang": {
+        "zh-CN": "الصينية المبسطة",
+        "zh-TW": "الصينية التقليدية",
+        "en-US": "الإنجليزية",
+        "ja-JP": "اليابانية",
+        "ko-KR": "الكورية",
+        "fr-FR": "الفرنسية",
+        "de-DE": "الألمانية",
+        "es-ES": "الإسبانية"
+      }
+    },
+    "optimize_context": {
+      "user": "المستخدم",
+      "assistant": "المساعد"
+    },
+    "scroll_to_bottom": "التمرير إلى الأسفل"
+  }
+}

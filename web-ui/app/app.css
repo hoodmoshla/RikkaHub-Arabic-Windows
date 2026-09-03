@@ -2,6 +2,27 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Arabic is the only RTL locale. Keep code, URLs, and terminal content LTR. */
+[dir="rtl"] {
+  direction: rtl;
+  text-align: right;
+}
+
+[dir="rtl"] :is(pre, code, kbd, samp, .code-block, .markdown-code, [data-language], [dir="ltr"]) {
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: isolate;
+}
+
+[dir="rtl"] input[type="url"],
+[dir="rtl"] input[type="email"],
+[dir="rtl"] input[type="password"],
+[dir="rtl"] textarea[data-code],
+[dir="rtl"] .font-mono {
+  direction: ltr;
+  text-align: left;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 :root {

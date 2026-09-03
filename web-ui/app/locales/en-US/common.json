@@ -38,6 +38,7 @@
     "language_label": "Language: {{label}}",
     "language_zh_cn": "Chinese (Simplified)",
     "language_en_us": "English",
+    "language_ar": "Arabic",
     "theme_mode": "Color mode",
     "theme_mode_label": "Color mode: {{label}}",
     "theme_color": "Theme color",
